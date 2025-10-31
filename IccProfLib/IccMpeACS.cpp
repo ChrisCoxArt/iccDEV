@@ -233,7 +233,9 @@ bool CIccMpeAcs::Write(CIccIO *pIO)
     return false;
 
   if (m_pData && m_nDataSize) {
-    if (pIO->Write8(m_pData, m_nDataSize)!=m_nDataSize)
+    // ERROR - sign and unsigned comparison, this should be fixed at a higher level
+    // cast type to get it compiling for now
+    if (pIO->Write8(m_pData, m_nDataSize) != (icInt32Number)m_nDataSize)
       return false;
   }
 
@@ -250,7 +252,7 @@ bool CIccMpeAcs::Write(CIccIO *pIO)
 * 
 * Return: 
 ******************************************************************************/
-bool CIccMpeAcs::Begin(icElemInterp nInterp, CIccTagMultiProcessElement *pMPE)
+bool CIccMpeAcs::Begin(icElemInterp /* nInterp */, CIccTagMultiProcessElement * /* pMPE */)
 {
   if (m_nInputChannels!=m_nOutputChannels)
     return false;
@@ -268,7 +270,7 @@ bool CIccMpeAcs::Begin(icElemInterp nInterp, CIccTagMultiProcessElement *pMPE)
 * 
 * Return: 
 ******************************************************************************/
-void CIccMpeAcs::Apply(CIccApplyMpe *pApply, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
+void CIccMpeAcs::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
 {
   memcpy(dstPixel, srcPixel, m_nInputChannels*sizeof(icFloatNumber));
 }

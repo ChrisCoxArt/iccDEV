@@ -524,7 +524,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
   icRenderingIntent nTagIntent = nIntent;
   bool bUseSpectralPCS = false;
   bool bAbsToRel = false;
-  bool bRelToAbs = false;
+  bool bRelToAbs = false;   // ERROR - value is set, but never used
   icMCSConnectionType nMCS = icNoMCS;
   icXformLutType nUseLutType = nLutType;
   bool bUseColorimeticTags = true;
@@ -552,6 +552,8 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
   if (nTagIntent == icUnknownIntent)
     nTagIntent = icPerceptual;
 
+// TODO -  there are too many layers in the switch, making it very difficult to understand the code
+// it should be broken into functions for improved readability
   switch (nUseLutType) {
     case icXformLutColor:
       if (bInput) {
@@ -706,7 +708,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
               if (pTag) {
                 nTagIntent = icRelativeColorimetric;
                 if (nTagIntent==icAbsoluteColorimetric)
-                  bRelToAbs = true;
+                  bRelToAbs = true; // ERROR - value never used!
               }
             }
 
@@ -761,7 +763,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
             if (pTag) {
               nTagIntent = icRelativeColorimetric;
               if (nTagIntent == icAbsoluteColorimetric)
-                bRelToAbs = true;
+                bRelToAbs = true; // ERROR - value never used!
             }
 
             if (!pTag) {
@@ -1129,6 +1131,10 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
           rv = NULL;
       }
       break;
+      
+    default:
+        // error unexpected transform type
+      break;
 
   }
 
@@ -1179,7 +1185,6 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
   CIccXform *rv = NULL;
   icRenderingIntent nTagIntent = nIntent;
   bool bAbsToRel = false;
-  bool bRelToAbs = false;
   icMCSConnectionType nMCS = icNoMCS;
 
   if (pProfile->m_Header.deviceClass == icSigColorEncodingClass) {
@@ -2020,6 +2025,7 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
 
     m_nDstSamples = pToXform->GetNumSrcSamples();
 
+    // ERROR - many values for case here are not defined as part of the enum!
     switch (m_srcSpace) {
       case icSigLabPcsData:
         switch (m_dstSpace) {
@@ -2068,12 +2074,14 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
             pushXyzToXyzIn();
             break;
 
+          default:
           case icSigReflectanceSpectralPcsData:
           case icSigTransmissionSpectralPcsData:
           case icSigRadiantSpectralPcsData:
           case icSigBiDirReflectanceSpectralPcsData:
           case icSigSparseMatrixSpectralPcsData:
             return icCmmStatUnsupportedPcsLink;
+            
         }
         break;
 
@@ -2118,6 +2126,7 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
             pushXyzToXyzIn();
             break;
 
+          default:
           case icSigReflectanceSpectralPcsData:
           case icSigTransmissionSpectralPcsData:
           case icSigRadiantSpectralPcsData:
@@ -2173,6 +2182,7 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
                             pToXform->m_pProfile->m_Header.spectralRange);
             break;
 
+          default:
           case icSigBiDirReflectanceSpectralPcsData:
           case icSigSparseMatrixSpectralPcsData:
             return icCmmStatUnsupportedPcsLink;
@@ -2181,7 +2191,7 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
 
       case icSigRadiantSpectralPcsData: {
         CIccProfile *pFromProfile = pFromXform->GetProfilePtr();
-        CIccProfile *pToProfile = pToXform->GetProfilePtr();
+//        CIccProfile *pToProfile = pToXform->GetProfilePtr();      // unused!
 
         switch (m_dstSpace) {
           case icSigLabPcsData:
@@ -2225,6 +2235,7 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
                                    pToXform->m_pProfile->m_Header.spectralRange);
             break;
 
+          default:
           case icSigBiDirReflectanceSpectralPcsData:
           case icSigSparseMatrixSpectralPcsData:
             return icCmmStatUnsupportedPcsLink;
@@ -2292,9 +2303,15 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
             else
               return icCmmStatUnsupportedPcsLink;
           
+          default:
           case icSigSparseMatrixSpectralPcsData:
             return icCmmStatUnsupportedPcsLink;
+        
         }
+        break;
+            
+      default:
+        return icCmmStatUnsupportedPcsLink;
         break;
     }
   }
@@ -3493,7 +3510,7 @@ CIccApplyPcsStep* CIccPcsStep::GetNewApply()
 *  Copies pSrc to pDst
 **************************************************************************
 */
-void CIccPcsStepIdentity::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepIdentity::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   if (pDst != pSrc)
     memcpy(pDst, pSrc, m_nChannels*sizeof(icFloatNumber));
@@ -3534,15 +3551,15 @@ CIccPcsStepRouteMcs::CIccPcsStepRouteMcs(CIccTagArray *pSrcChannels, CIccTagArra
   if (pDefaults) {
     pDefaults->GetValues(m_Defaults, 0, m_nDstChannels);
   }
-
+  
+  
   int i, j;
-  char *szSrc;
 
   for (i=0; i<m_nDstChannels; i++) {
     const icUChar *szDstChan = ((CIccTagUtf8Text*)(pDstChannels->GetIndex(i)))->GetText();
     for (j=0; j<m_nSrcChannels; j++) {
       const icUChar *szSrcChan = ((CIccTagUtf8Text*)(pSrcChannels->GetIndex(j)))->GetText();
-      szSrc = (char*)szSrcChan;
+      // char *szSrc = (char*)szSrcChan;  // value unused!
       if (!icUtf8StrCmp(szDstChan, szSrcChan))
         break;
     }
@@ -3606,7 +3623,7 @@ bool CIccPcsStepRouteMcs::isIdentity() const
 *  Copies pSrc to pDst
 **************************************************************************
 */
-void CIccPcsStepRouteMcs::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepRouteMcs::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   if (pDst != pSrc) {
     int i;
@@ -3679,7 +3696,7 @@ CIccPcsStepLabToXYZ::CIccPcsStepLabToXYZ(const icFloatNumber *xyzWhite/*=NULL*/)
 *  Converts from V4 Internal Lab to actual XYZ
 **************************************************************************
 */
-void CIccPcsStepLabToXYZ::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepLabToXYZ::Apply(CIccApplyPcsStep */* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   icFloatNumber Lab[3];
 
@@ -3761,7 +3778,7 @@ CIccPcsStepXYZToLab::CIccPcsStepXYZToLab(const icFloatNumber *xyzWhite/*=NULL*/)
 *  Converts from actual XYZ to V4 Internal Lab
 **************************************************************************
 */
-void CIccPcsStepXYZToLab::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepXYZToLab::Apply(CIccApplyPcsStep */* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   icFloatNumber Lab[3];
   icXYZtoLab(Lab, (icFloatNumber*)pSrc, m_xyzWhite);
@@ -3833,7 +3850,7 @@ CIccPcsStepLab2ToXYZ::CIccPcsStepLab2ToXYZ(const icFloatNumber *xyzWhite/*=NULL*
 *  Converts from actual XYZ to V2 Internal Lab
 **************************************************************************
 */
-void CIccPcsStepLab2ToXYZ::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepLab2ToXYZ::Apply(CIccApplyPcsStep */* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   icFloatNumber Lab[3];
 
@@ -3916,7 +3933,7 @@ CIccPcsStepXYZToLab2::CIccPcsStepXYZToLab2(const icFloatNumber *xyzWhite/*=NULL*
 *  Converts from V2 Internal Lab to actual XYZ
 **************************************************************************
 */
-void CIccPcsStepXYZToLab2::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepXYZToLab2::Apply(CIccApplyPcsStep */* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   icFloatNumber Lab[3];
   icXYZtoLab(Lab, (icFloatNumber*)pSrc, m_xyzWhite);
@@ -3970,7 +3987,7 @@ CIccPcsStep *CIccPcsStepXYZToLab2::concat(CIccPcsStep *pNext) const
 *  Converts from V2 Internal Lab to actual XYZ
 **************************************************************************
 */
-void CIccPcsStepLabToLab2::Apply(CIccApplyPcsStep* pApply, icFloatNumber* pDst, const icFloatNumber* pSrc) const
+void CIccPcsStepLabToLab2::Apply(CIccApplyPcsStep* /* pApply */, icFloatNumber* pDst, const icFloatNumber* pSrc) const
 {
   pDst[0] = (icFloatNumber)(pSrc[0] * 65280.0f / 65535.0f);
   pDst[1] = (icFloatNumber)(pSrc[1] * 65280.0f / 65535.0f);
@@ -4018,7 +4035,7 @@ CIccPcsStep* CIccPcsStepLabToLab2::concat(CIccPcsStep* pNext) const
 *  Converts from V2 Internal Lab to actual XYZ
 **************************************************************************
 */
-void CIccPcsStepLab2ToLab::Apply(CIccApplyPcsStep* pApply, icFloatNumber* pDst, const icFloatNumber* pSrc) const
+void CIccPcsStepLab2ToLab::Apply(CIccApplyPcsStep* /* pApply */, icFloatNumber* pDst, const icFloatNumber* pSrc) const
 {
   pDst[0] = (icFloatNumber)(pSrc[0] * 65535.0f / 65280.0f);
   pDst[1] = (icFloatNumber)(pSrc[1] * 65535.0f / 65280.0f);
@@ -4097,7 +4114,7 @@ CIccPcsStepOffset::~CIccPcsStepOffset()
 *  Added a fixed offset to the pSrc vector passed in
 **************************************************************************
 */
-void CIccPcsStepOffset::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepOffset::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   if (m_nChannels==3) {
     pDst[0] = m_vals[0] + pSrc[0];
@@ -4124,9 +4141,10 @@ void CIccPcsStepOffset::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, con
 void CIccPcsStepOffset::dump(std::string &str) const
 {
   str += "\nCIccPcsStepOffset\n\n";
-  char buf[80];
+  const size_t bufSize = 80;
+  char buf[bufSize];
   for (int i=0; i<m_nChannels; i++) {
-    sprintf(buf, ICCPCSSTEPDUMPFMT, m_vals[i]);
+    snprintf(buf, bufSize, ICCPCSSTEPDUMPFMT, m_vals[i]);
     str += buf;
   }
   str +="\n";
@@ -4235,7 +4253,7 @@ CIccPcsStepScale::~CIccPcsStepScale()
 *  Multiplies fixed scale values to the pSrc vector passed in
 **************************************************************************
 */
-void CIccPcsStepScale::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepScale::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   if (m_nChannels==3) {
     pDst[0] = m_vals[0] * pSrc[0];
@@ -4262,9 +4280,10 @@ void CIccPcsStepScale::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, cons
 void CIccPcsStepScale::dump(std::string &str) const
 {
   str += "\nCIccPcsStepScale\n\n";
-  char buf[80];
+  const size_t bufSize = 80;
+  char buf[bufSize];
   for (int i=0; i<m_nChannels; i++) {
-    sprintf(buf, ICCPCSSTEPDUMPFMT, m_vals[i]);
+    snprintf(buf, bufSize,  ICCPCSSTEPDUMPFMT, m_vals[i]);
     str += buf;
   }
   str +="\n";
@@ -4437,7 +4456,7 @@ void CIccPcsStepMatrix::dump(std::string &str) const
 CIccPcsStepMatrix *CIccPcsStepMatrix::Mult(const CIccPcsStepScale *scale) const
 {
   icUInt16Number mCols = scale->GetSrcChannels();
-  icUInt16Number mRows = mCols;
+  // icUInt16Number mRows = mCols;  // value unused - is the loop correct?
 
   if (m_nRows != mCols)
     return NULL;
@@ -4758,7 +4777,7 @@ CIccPcsStepSrcMatrix::~CIccPcsStepSrcMatrix()
 *  in a pDst vector
 **************************************************************************
 */
-void CIccPcsStepSrcMatrix::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepSrcMatrix::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   int i, j;
   const icFloatNumber *row = pSrc;
@@ -4783,9 +4802,10 @@ void CIccPcsStepSrcMatrix::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, 
 void CIccPcsStepSrcMatrix::dump(std::string &str) const
 {
   str += "\nCIccPcsStepSrcMatrix\n\n";
-  char buf[80];
+  const size_t bufSize = 80;
+  char buf[bufSize];
   for (int i=0; i<m_nCols; i++) {
-    sprintf(buf, ICCPCSSTEPDUMPFMT, m_vals[i]);
+    snprintf(buf, bufSize, ICCPCSSTEPDUMPFMT, m_vals[i]);
     str += buf;
   }
   str += "\n";
@@ -4834,7 +4854,7 @@ CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix()
 *  in a pDst vector
 **************************************************************************
 */
-void CIccPcsStepSparseMatrix::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepSparseMatrix::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   CIccSparseMatrix mtx((icUInt8Number*)m_vals, m_nBytesPerMatrix, icSparseMatrixFloatNum, true);
 
@@ -4905,7 +4925,7 @@ CIccPcsStepSrcSparseMatrix::~CIccPcsStepSrcSparseMatrix()
 *  in a pDst vector
 **************************************************************************
 */
-void CIccPcsStepSrcSparseMatrix::Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const
+void CIccPcsStepSrcSparseMatrix::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
   CIccSparseMatrix mtx((icUInt8Number*)pSrc, m_nBytesPerMatrix, icSparseMatrixFloatNum, true);
 
@@ -4924,9 +4944,10 @@ void CIccPcsStepSrcSparseMatrix::Apply(CIccApplyPcsStep *pApply, icFloatNumber *
 void CIccPcsStepSrcSparseMatrix::dump(std::string &str) const
 {
   str += "\nCIccPcsStepSrcSparseMatrix\n\n";
-  char buf[80];
+  const size_t bufSize = 80;
+  char buf[bufSize];
   for (int i=0; i<m_nCols; i++) {
-    sprintf(buf, ICCPCSSTEPDUMPFMT, m_vals[i]);
+    snprintf(buf, bufSize, ICCPCSSTEPDUMPFMT, m_vals[i]);
     str += buf;
   }
   str += "\n";
@@ -6827,7 +6848,7 @@ icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform* pApply, icChar *DstColorN
         return icCmmStatColorNotFound;
     }
 
-    sprintf(DstColorName, "%s", NamedColor.c_str());
+    snprintf(DstColorName, 256, "%s", NamedColor.c_str());
   }
   else if (m_pTag) {
     const CIccTagNamedColor2 *pTag = m_pTag;
@@ -6854,7 +6875,7 @@ icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform* pApply, icChar *DstColorN
       pTag->GetColorName(NamedColor, j);
     }
 
-    sprintf(DstColorName, "%s", NamedColor.c_str());
+    snprintf(DstColorName, 256, "%s", NamedColor.c_str());
   }
   else
     return icCmmStatBadXform;
@@ -6876,7 +6897,7 @@ icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform* pApply, icChar *DstColorN
 *  SrcColorName = Source color name which is to be applied.
 **************************************************************************
 */
-icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel, const icChar *SrcColorName, icFloatNumber tint) const
+icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform*  /* pApply */, icFloatNumber *DstPixel, const icChar *SrcColorName, icFloatNumber tint) const
 {
 
   if (m_pArray) {
@@ -7334,6 +7355,9 @@ CIccXform *CIccXformMpe::Create(CIccProfile *pProfile, bool bInput/* =true */, i
         }
       }
       break;
+      
+  default:
+    break;
   }
 
   if (rv) {
@@ -7724,7 +7748,7 @@ icStatusCMM CIccApplyCmm::Apply(icFloatNumber *DstPixel, const icFloatNumber *Sr
   CIccApplyXformList::iterator i;
   const CIccXform *pLastXform;
   int j, n = (int)m_Xforms->size();
-  bool bNoClip;
+  bool bNoClip;  // ERROR - set but not used
 
   if (!n)
     return icCmmStatBadXform;
@@ -7761,7 +7785,7 @@ icStatusCMM CIccApplyCmm::Apply(icFloatNumber *DstPixel, const icFloatNumber *Sr
 
     pLastXform = i->ptr->GetXform();   
     i->ptr->Apply(DstPixel, pSrc);
-    bNoClip = pLastXform->NoClipPCS();
+    bNoClip = pLastXform->NoClipPCS();  // ERROR - set but not used
   }
   else if (n==1) {
     i = m_Xforms->begin();
@@ -7773,10 +7797,10 @@ icStatusCMM CIccApplyCmm::Apply(icFloatNumber *DstPixel, const icFloatNumber *Sr
     DumpCmmApplyPixel(nCount++, pDst, i->ptr->GetXform()->GetNumDstSamples());
 #endif
 
-    bNoClip = pLastXform->NoClipPCS();
+    bNoClip = pLastXform->NoClipPCS();  // ERROR - set but not used
   }
   else {
-    bNoClip = true;
+    bNoClip = true;  // ERROR - set but not used
   }
 
   //m_pPCS->CheckLast(DstPixel, m_pCmm->m_nDestSpace, bNoClip);
@@ -8181,6 +8205,7 @@ icStatusCMM CIccCmm::AddXform(CIccProfile *pProfile,
           CIccXformList::iterator prev = --(m_Xforms->end());
           
           //Make sure previous profile connects with an icXformLutMCS
+// ERROR - comparison of wrong enum types!
           if (prev->ptr->GetXformType()!=icXformLutMCS) {
             //check to see if we can convert previous xform to connect via an MCS
             if (!prev->ptr->GetProfile()->m_Header.mcs) {
@@ -8904,6 +8929,7 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
   memcpy(pInput, pData, nSamples*sizeof(icFloatNumber));
   bool bCLRspace = icIsSpaceCLR(nSpace);
 
+// ERROR - case values are not part of the enumerated type!
   switch(icGetColorSpaceType(nSpace))
   {
     case icSigReflectanceSpectralPcsData:
@@ -8911,6 +8937,9 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
     case icSigBiDirReflectanceSpectralPcsData:
     case icSigSparseMatrixSpectralPcsData:
       bCLRspace = true;
+      break;
+    
+    default:
       break;
   }
 
@@ -11146,6 +11175,8 @@ bool CIccMruCache<T>::Apply(T *DstPixel, const T *SrcPixel)
     m_pFirst = last;
     pixel = last->pPixelData;
   }
+  
+// ERROR - dest is not used!  memcpy is probably incorrect!s
   T *dest = &pixel[m_nSrcSamples];
 
   memcpy(pixel, SrcPixel, m_nSrcSize);

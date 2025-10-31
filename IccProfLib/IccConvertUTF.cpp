@@ -200,13 +200,13 @@ icUtfConversionResult icConvertUTF16toUTF32 (const UTF16** sourceStart, const UT
 }
 
 icUtfConversionResult icConvertUTF16toUTF32 (const UTF16* source, const UTF16* sourceEnd, 
-                                             icUtf32Vector target, UTF32* targetEnd, icUtfConversionFlags flags)
+                                             icUtf32Vector target, UTF32* /* targetEnd */, icUtfConversionFlags flags)
 {
   icUtfConversionResult result = conversionOK;
   target.clear();
   UTF32 ch, ch2;
   while (source < sourceEnd) {
-    const UTF16* oldSource = source; /*  In case we have to back up because of target overflow. */
+    //const UTF16* oldSource = source; /*  In case we have to back up because of target overflow. */
     ch = *source++;
     /* If we have a surrogate pair, convert to UTF32 first. */
     if (ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_HIGH_END) {
@@ -374,7 +374,7 @@ icUtfConversionResult icConvertUTF16toUTF8 (const UTF16* source, const UTF16* so
     unsigned short bytesToWrite = 0;
     const UTF32 byteMask = 0xBF;
     const UTF32 byteMark = 0x80; 
-    const UTF16* oldSource = source; /* In case we have to back up because of target overflow. */
+    //const UTF16* oldSource = source; /* In case we have to back up because of target overflow. */
     ch = *source++;
     /* If we have a surrogate pair, convert to UTF32 first. */
     if (ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_HIGH_END) {

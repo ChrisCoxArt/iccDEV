@@ -207,7 +207,7 @@ void CIccArrayCreator::DoPushFactory(IIccArrayFactory *pFactory)
   factoryStack.push_front(pFactory);
 }
 
-IIccArrayFactory* CIccArrayCreator::DoPopFactory(bool bAll /*=false*/)
+IIccArrayFactory* CIccArrayCreator::DoPopFactory(bool /* bAll  =false */)
 {
   if (factoryStack.size()>0) {
     CIccArrayFactoryList::iterator i=factoryStack.begin();
