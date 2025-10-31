@@ -1435,7 +1435,8 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 {
   icValidateStatus rv = icValidateOK;
 
-  icChar buf[128];
+  const size_t bufSize = 128;
+  icChar buf[bufSize];
   CIccInfo Info;
 
   switch(m_Header.deviceClass) {
@@ -1455,7 +1456,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
     if (m_Header.version<icVersionNumberV5) {
       CIccInfo classInfo;
       sReport += icMsgValidateCriticalError;
-      sprintf(buf, " - %s not supported in Version %s profiles!\n", classInfo.GetProfileClassSigName(m_Header.deviceClass),
+      snprintf(buf, bufSize, " - %s not supported in Version %s profiles!\n", classInfo.GetProfileClassSigName(m_Header.deviceClass),
                                                                       Info.GetVersionName(m_Header.version));
       sReport += buf;
       rv = icMaxStatus(rv, icValidateCriticalError);
@@ -1464,7 +1465,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
   default:
     sReport += icMsgValidateCriticalError;
-    sprintf(buf, " - %s: Unknown profile class!\n", Info.GetProfileClassSigName(m_Header.deviceClass));
+    snprintf(buf, bufSize, " - %s: Unknown profile class!\n", Info.GetProfileClassSigName(m_Header.deviceClass));
     sReport += buf;
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
@@ -1493,7 +1494,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
     if (!Info.IsValidSpace(m_Header.colorSpace)) {
       if (!(m_Header.version>=icVersionNumberV5 && m_Header.deviceClass==icSigAbstractClass && Info.IsValidSpectralSpace(m_Header.colorSpace) && IsTagPresent(icSigDToB0Tag))) {
         sReport += icMsgValidateCriticalError;
-        sprintf(buf, " - %s: Unknown color space!\n", Info.GetColorSpaceSigName(m_Header.colorSpace));
+        snprintf(buf, bufSize, " - %s: Unknown color space!\n", Info.GetColorSpaceSigName(m_Header.colorSpace));
         sReport += buf;
         rv = icMaxStatus(rv, icValidateCriticalError);
       }
@@ -1504,8 +1505,8 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
       m_Header.deviceClass==icSigMaterialLinkClass) {
     if (m_Header.pcs!=icSigNoColorData) {
       sReport += icMsgValidateNonCompliant;
-      sprintf(buf, "Invalid PCS designator for %s\n", Info.GetProfileClassSigName(m_Header.deviceClass));
-      sReport += buf; 
+      snprintf(buf, bufSize, "Invalid PCS designator for %s\n", Info.GetProfileClassSigName(m_Header.deviceClass));
+      sReport += buf;
       rv = icMaxStatus(rv, icValidateNonCompliant);
     }
   }
@@ -1529,7 +1530,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
       m_Header.biSpectralRange.start || m_Header.biSpectralRange.end || m_Header.biSpectralRange.steps
       ) {
       sReport += icMsgValidateNonCompliant;
-      sprintf(buf, " - Encoding Class has non-zero Header data were zeros are required!\n");
+      snprintf(buf, bufSize, " - Encoding Class has non-zero Header data were zeros are required!\n");
       sReport += buf;
       rv = icMaxStatus(rv, icValidateNonCompliant);
     }
@@ -1538,7 +1539,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
     if (m_Header.deviceClass==icSigLinkClass) {
       if (!Info.IsValidSpace(m_Header.pcs)) {
         sReport += icMsgValidateCriticalError;
-        sprintf(buf, " - %s: Unknown pcs color space!\n", Info.GetColorSpaceSigName(m_Header.pcs));
+        snprintf(buf, bufSize, " - %s: Unknown pcs color space!\n", Info.GetColorSpaceSigName(m_Header.pcs));
         sReport += buf;
         rv = icMaxStatus(rv, icValidateCriticalError);
       }
@@ -1552,7 +1553,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
         default:
           sReport += icMsgValidateCriticalError;
-          sprintf(buf, " - %s: Invalid pcs color space!\n", Info.GetColorSpaceSigName(m_Header.pcs));
+          snprintf(buf, bufSize, " - %s: Invalid pcs color space!\n", Info.GetColorSpaceSigName(m_Header.pcs));
           sReport += buf;
           rv = icMaxStatus(rv, icValidateCriticalError);
           break;
@@ -1560,12 +1561,13 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
       if (m_Header.spectralPCS && m_Header.version<icVersionNumberV5) {
         sReport += icMsgValidateNonCompliant;
-        sprintf(buf, " - Spectral PCS usage in version %s ICC profile!\n", Info.GetVersionName(m_Header.version));
+        snprintf(buf, bufSize, " - Spectral PCS usage in version %s ICC profile!\n", Info.GetVersionName(m_Header.version));
         sReport += buf;
         rv = icMaxStatus(rv, icValidateNonCompliant);
       }
 
       switch(icGetColorSpaceType(m_Header.spectralPCS)) {
+// ERROR -- comparison of different enum types!
         case icSigNoSpectralData:
           if (m_Header.spectralRange.start ||
               m_Header.spectralRange.end ||
@@ -1574,12 +1576,13 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
               m_Header.biSpectralRange.end ||
               m_Header.biSpectralRange.steps) {
                 sReport += icMsgValidateWarning;
-                sprintf(buf, "%s - Spectral PCS wavelengths defined with no spectral PCS!\n", Info.GetColorSpaceSigName(m_Header.pcs));
+                snprintf(buf, bufSize, "%s - Spectral PCS wavelengths defined with no spectral PCS!\n", Info.GetColorSpaceSigName(m_Header.pcs));
                 sReport += buf;
                 rv = icMaxStatus(rv, icValidateWarning);
           }
           break;
 
+// ERROR - case type is not part of enum!
         case icSigBiSpectralReflectanceData:
         case icSigSparseMatrixReflectanceData:
           if (icGetColorSpaceType(m_Header.spectralPCS)==icSigBiSpectralReflectanceData) {
@@ -1592,26 +1595,26 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
           if (icF16toF(m_Header.biSpectralRange.end)<=icF16toF(m_Header.biSpectralRange.start)) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "end BiDir Spectral PCS wavelength must be larger than start BiDir Spectral PCS wavelength!\n");
+            snprintf(buf, bufSize, "end BiDir Spectral PCS wavelength must be larger than start BiDir Spectral PCS wavelength!\n");
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
 
           if (m_Header.biSpectralRange.steps<2) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "%d: Must have more 2 or more BiDir spectral wavelength steps!\n", m_Header.biSpectralRange.steps);
+            snprintf(buf, bufSize, "%d: Must have more 2 or more BiDir spectral wavelength steps!\n", m_Header.biSpectralRange.steps);
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
           if (icF16toF(m_Header.spectralRange.end)<=icF16toF(m_Header.spectralRange.start)) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "end Spectral PCS wavelength must be larger than start Spectral PCS wavelength!\n");
+            snprintf(buf, bufSize, "end Spectral PCS wavelength must be larger than start Spectral PCS wavelength!\n");
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
           if (m_Header.spectralRange.steps<2) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "%d: Must have more 2 or more spectral wavelength steps!\n", m_Header.spectralRange.steps);
+            snprintf(buf, bufSize, "%d: Must have more 2 or more spectral wavelength steps!\n", m_Header.spectralRange.steps);
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
@@ -1627,14 +1630,14 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
           }
           if (icF16toF(m_Header.spectralRange.end)<=icF16toF(m_Header.spectralRange.start)) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "end Spectral PCS wavelength must be larger than start Spectral PCS wavelength!\n");
+            snprintf(buf, bufSize, "end Spectral PCS wavelength must be larger than start Spectral PCS wavelength!\n");
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
 
           if (m_Header.spectralRange.steps<2) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "%d: Must have more 2 or more spectral wavelength steps!\n", m_Header.spectralRange.steps);
+            snprintf(buf, bufSize, "%d: Must have more 2 or more spectral wavelength steps!\n", m_Header.spectralRange.steps);
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
@@ -1642,7 +1645,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
               m_Header.biSpectralRange.end ||
               m_Header.biSpectralRange.steps) {
             sReport += icMsgValidateCriticalError;
-            sprintf(buf, "%s - Spectral PCS wavelengths defined with no spectral PCS!\n", Info.GetColorSpaceSigName(m_Header.pcs));
+            snprintf(buf, bufSize, "%s - Spectral PCS wavelengths defined with no spectral PCS!\n", Info.GetColorSpaceSigName(m_Header.pcs));
             sReport += buf;
             rv = icMaxStatus(rv, icValidateCriticalError);
           }
@@ -1650,7 +1653,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
         default:
           sReport += icMsgValidateCriticalError;
-          sprintf(buf, "%s: Invalid spectral PCS color space!\n", Info.GetColorSpaceSigName((icColorSpaceSignature)m_Header.spectralPCS));
+          snprintf(buf, bufSize, "%s: Invalid spectral PCS color space!\n", Info.GetColorSpaceSigName((icColorSpaceSignature)m_Header.spectralPCS));
           sReport += buf;
           rv = icMaxStatus(rv, icValidateCriticalError);
           break;
@@ -1658,7 +1661,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
       if (m_Header.pcs==icSigNoColorData && m_Header.spectralPCS==icSigNoSpectralData) {
         sReport += icMsgValidateCriticalError;
-        sprintf(buf, "Both Colorimetric PCS or Spectral PCS are not defined!\n");
+        snprintf(buf, bufSize, "Both Colorimetric PCS or Spectral PCS are not defined!\n");
         sReport += buf;
         rv = icMaxStatus(rv, icValidateCriticalError);
       }
@@ -1678,7 +1681,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
     
     default:
       sReport += icMsgValidateWarning;
-      sprintf(buf, "%s: Unknown platform signature.\n", Info.GetPlatformSigName(m_Header.platform));
+      snprintf(buf, bufSize, "%s: Unknown platform signature.\n", Info.GetPlatformSigName(m_Header.platform));
       sReport += buf;
       rv = icMaxStatus(rv, icValidateWarning);
     }
@@ -1752,7 +1755,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
         break;
     default:
         sReport += icMsgValidateWarning;
-        sprintf(buf, "Major version number (%d) is unexpected.\n", ((bcdpair >> 4) * 10 + (bcdpair & 0x0F)));
+        snprintf(buf, bufSize, "Major version number (%d) is unexpected.\n", ((bcdpair >> 4) * 10 + (bcdpair & 0x0F)));
         sReport += buf;
         rv = icMaxStatus(rv, icValidateWarning);
     }
@@ -1793,7 +1796,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
     default:
       sReport += icMsgValidateWarning;
-      sprintf(buf, "%s: Unregistered CMM signature.\n", Info.GetCmmSigName((icCmmSignature)m_Header.cmmId));
+      snprintf(buf, bufSize, "%s: Unregistered CMM signature.\n", Info.GetCmmSigName((icCmmSignature)m_Header.cmmId));
       sReport += buf;
       rv = icMaxStatus(rv, icValidateWarning);
     }
@@ -1807,7 +1810,7 @@ icValidateStatus CIccProfile::CheckHeader(std::string &sReport) const
 
     default:
       sReport += icMsgValidateCriticalError;
-      sprintf(buf, "%s: Unknown rendering intent!\n", Info.GetRenderingIntentName((icRenderingIntent)m_Header.renderingIntent));
+      snprintf(buf, bufSize, "%s: Unknown rendering intent!\n", Info.GetRenderingIntentName((icRenderingIntent)m_Header.renderingIntent));
       sReport += buf;
       rv = icMaxStatus(rv, icValidateCriticalError);
     }
@@ -1860,8 +1863,9 @@ bool CIccProfile::CheckTagExclusion(std::string &sReport) const
   bool rv = true;
 
   CIccInfo Info;
-  icChar buf[128];
-  sprintf(buf, "%s", Info.GetSigName(m_Header.deviceClass));
+  const size_t bufSize = 128;
+  icChar buf[bufSize];
+  snprintf(buf, bufSize, "%s", Info.GetSigName(m_Header.deviceClass));
   if (m_Header.deviceClass!=icSigInputClass && m_Header.deviceClass!=icSigDisplayClass &&
       m_Header.deviceClass != icSigColorEncodingClass) {
     if (GetTag(icSigGrayTRCTag) || GetTag(icSigRedTRCTag) || GetTag(icSigGreenTRCTag) ||
@@ -1956,7 +1960,8 @@ icValidateStatus CIccProfile::CheckTagTypes(std::string &sReport) const
 {
   icValidateStatus rv = icValidateOK;
 
-  icChar buf[128];
+  const size_t bufSize = 128;
+  icChar buf[bufSize];
   CIccInfo Info;
 
   icTagSignature tagsig;
@@ -1969,11 +1974,11 @@ icValidateStatus CIccProfile::CheckTagTypes(std::string &sReport) const
     typesig = i->pTag->GetType();
     structSig = i->pTag->GetTagStructType();
     arraySig = i->pTag->GetTagArrayType();
-    sprintf(buf, "%s", Info.GetSigName(tagsig));
+    snprintf(buf, bufSize, "%s", Info.GetSigName(tagsig));
     if (!IsTypeValid(tagsig, typesig, structSig, arraySig)) {
       sReport += icMsgValidateNonCompliant;
       sReport += buf;
-      sprintf(buf," %s: Invalid tag type (Might be critical!).\n", Info.GetTagTypeSigName(typesig));
+      snprintf(buf,bufSize, " %s: Invalid tag type (Might be critical!).\n", Info.GetTagTypeSigName(typesig));
       sReport += buf;
       rv = icMaxStatus(rv, icValidateNonCompliant);
     }
@@ -3181,7 +3186,7 @@ bool CIccProfile::getMediaWhiteXYZ(icFloatNumber *pXYZ)
  * 
  *****************************************************************************
  */
-bool CIccProfile::calcLumIlluminantXYZ(icFloatNumber *pXYZ, IIccProfileConnectionConditions *pObservingPCC)
+bool CIccProfile::calcLumIlluminantXYZ(icFloatNumber *pXYZ, IIccProfileConnectionConditions * /* pObservingPCC */)
 {
   const CIccTagSpectralViewingConditions *pCond = getPccViewingConditions();
 
@@ -3227,7 +3232,7 @@ bool CIccProfile::calcLumIlluminantXYZ(icFloatNumber *pXYZ, IIccProfileConnectio
 *
 *****************************************************************************
 */
-bool CIccProfile::calcNormIlluminantXYZ(icFloatNumber *pXYZ, IIccProfileConnectionConditions *pObservingPCC)
+bool CIccProfile::calcNormIlluminantXYZ(icFloatNumber *pXYZ, IIccProfileConnectionConditions * /* pObservingPCC */)
 {
   const CIccTagSpectralViewingConditions *pCond = getPccViewingConditions();
 
@@ -3457,7 +3462,7 @@ CIccProfile* ReadIccProfile(const icWChar *szFilename, bool bUseSubProfile/*=fal
 *  Pointer to icc profile object, or NULL on failure
 ******************************************************************************
 */
-CIccProfile* ReadIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool bUseSubProfile/*=false*/)
+CIccProfile* ReadIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool /* bUseSubProfile =false*/)
 {
   CIccMemIO *pMemIO = new CIccMemIO();
 

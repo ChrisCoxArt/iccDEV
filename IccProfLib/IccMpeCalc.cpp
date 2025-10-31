@@ -102,7 +102,7 @@ public:
     fflush(stdout);
   }
 
-  virtual bool BeforeOp(SIccCalcOp *op, SIccOpState &os, SIccCalcOp *ops)
+  virtual bool BeforeOp(SIccCalcOp *op, SIccOpState &os, SIccCalcOp * /* ops */)
   {
     if (op->sig == icSigIfOp || op->sig == icSigSelectOp) {
       printf("Start:");
@@ -116,7 +116,7 @@ public:
     return false;
   }
 
-  virtual bool AfterOp(SIccCalcOp *op, SIccOpState &os, SIccCalcOp *ops)
+  virtual bool AfterOp(SIccCalcOp *op, SIccOpState &os, SIccCalcOp * /* ops */)
   {
     if (op->sig == icSigDataOp) {
       printf("%9s\t", "data");
@@ -210,8 +210,8 @@ void IIccCalcDebugger::SetDebugger(IIccCalcDebugger *pDebugger)
 class CIccOpDefInvalid : public IIccOpDef
 {
 public:
-  virtual bool IsValid(CIccMpeCalculator *pCalc, SIccCalcOp &op) { return false; }
-  virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
+  virtual bool IsValid(CIccMpeCalculator * /* pCalc */, SIccCalcOp & /* op */) { return false; }
+  virtual bool Exec(SIccCalcOp *op, SIccOpState & /* os */)
   {
     if (g_pDebugger)
     {
@@ -373,7 +373,7 @@ public:
 
     pElemApply->Apply(d, s);
 
-    int ns = (int)ss + (int)nDst - (int)nSrc;
+    size_t ns = (size_t)( ss + (int)nDst - (int)nSrc );
 
     if (ns != ss)
       os.pStack->resize(ns);
@@ -593,7 +593,7 @@ public:
 class CIccOpDefPi : public IIccOpDef
 {
 public:
-  virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
+  virtual bool Exec(SIccCalcOp * /* op */, SIccOpState &os)
   {
     OsPushArg((icFloatNumber)icPiNum);
     return true;
@@ -603,7 +603,7 @@ public:
 class CIccOpDefPosInfinity : public IIccOpDef
 {
 public:
-  virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
+  virtual bool Exec(SIccCalcOp * /* op */, SIccOpState &os)
   {
     OsPushArg((icFloatNumber)icPosInfinity);
     return true;
@@ -613,7 +613,7 @@ public:
 class CIccOpDefNegInfinity : public IIccOpDef
 {
 public:
-  virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
+  virtual bool Exec(SIccCalcOp * /* op */, SIccOpState &os)
   {
     OsPushArg((icFloatNumber)icNegInfinity);
     return true;
@@ -623,7 +623,7 @@ public:
 class CIccOpDefNotANumber : public IIccOpDef
 {
 public:
-  virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
+  virtual bool Exec(SIccCalcOp * /* op */, SIccOpState &os)
   {
     OsPushArg((icFloatNumber)icNotANumber);
     return true;
@@ -1784,11 +1784,12 @@ public:
 * 
 * Return: 
 ******************************************************************************/
-void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
-{ 
-  char buf[300];
+void SIccCalcOp::Describe(std::string &desc, int /* nVerboseness */)
+{
+  const size_t bufSize = 300;
+  char buf[bufSize];
   if (sig==icSigDataOp) {
-    sprintf(buf, "%.8g", data.num);
+    snprintf(buf, bufSize, "%.8g", data.num);
     desc = buf;
     return;
   }
@@ -1812,9 +1813,9 @@ void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
     case icSigTempPutChanOp:
     case icSigTempSaveChanOp:
       if (!data.select.v2)
-        sprintf(buf, "[%d]", data.select.v1);
+        snprintf(buf, bufSize, "[%d]", data.select.v1);
       else
-        sprintf(buf, "[%d,%d]", data.select.v1, data.select.v2+1);
+        snprintf(buf, bufSize, "[%d,%d]", data.select.v1, data.select.v2+1);
       desc += buf;
       break;
 
@@ -1833,7 +1834,7 @@ void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
             varName[l]=0;
           }
         }
-        sprintf(buf, "(%s)", varName);
+        snprintf(buf, bufSize, "(%s)", varName);
         desc += buf;
       }
       break;
@@ -1846,36 +1847,36 @@ void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
     case icSigApplyFromJabOp:
     case icSigApplyCalcOp:
     case icSigApplyElemOp:
-      sprintf(buf, "(%d)", data.select.v1);
+      snprintf(buf, bufSize, "(%d)", data.select.v1);
       desc += buf;
       break;
 
     case icSigPopOp:
-      sprintf(buf, "(%d)", data.select.v1+1);
+      snprintf(buf, bufSize, "(%d)", data.select.v1+1);
       desc += buf;
       break;
 
     case icSigSolveOp:
     case icSigTransposeOp:
-      sprintf(buf, "(%d,%d)", data.select.v1+1, data.select.v2+1);
+      snprintf(buf, bufSize, "(%d,%d)", data.select.v1+1, data.select.v2+1);
       desc += buf;
       break;
 
     case icSigRotateLeftOp:       
     case icSigRotateRightOp:
-      sprintf(buf, "(%d,%d)", data.select.v1, data.select.v2);
+      snprintf(buf, bufSize, "(%d,%d)", data.select.v1, data.select.v2);
       break;
 
     case icSigCopyOp:             
     case icSigPositionDupOp:
       if (!data.select.v2) {
         if (data.select.v1) {
-          sprintf(buf, "(%d)", data.select.v1+1);
+          snprintf(buf, bufSize, "(%d)", data.select.v1+1);
           desc += buf;
         }
       }
       else {
-        sprintf(buf, "(%d,%d)", data.select.v1+1, data.select.v2+1);
+        snprintf(buf, bufSize, "(%d,%d)", data.select.v1+1, data.select.v2+1);
         desc += buf;
       }
       break;
@@ -1888,7 +1889,7 @@ void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
     case icSigAndOp:
     case icSigOrOp:
       if (data.select.v1) {
-        sprintf(buf, "(%d)", data.select.v1+2);
+        snprintf(buf, bufSize, "(%d)", data.select.v1+2);
         desc += buf;
       }
       break;
@@ -1943,9 +1944,12 @@ void SIccCalcOp::Describe(std::string &desc, int nVerboseness)
     case icSigVectorAndOp:
     case icSigVectorOrOp:
       if (data.select.v1) {
-        sprintf(buf, "[%d]", data.select.v1+1);
+        snprintf(buf, bufSize, "[%d]", data.select.v1+1);
         desc += buf;
       }
+      break;
+    
+    default:
       break;
   }
 }
@@ -2953,7 +2957,7 @@ void CIccCalculatorFunc::DescribeSequence(std::string &sDescription,
  * 
  * Return: 
  ******************************************************************************/
-void CIccCalculatorFunc::Describe(std::string &sDescription, int nVerboseness, int nBlanks)
+void CIccCalculatorFunc::Describe(std::string &sDescription, int /* nVerboseness */, int nBlanks)
 {
   if (m_nOps) {
     DescribeSequence(sDescription, m_nOps, m_Op, nBlanks);
@@ -3459,7 +3463,7 @@ bool CIccCalculatorFunc::SetOpDefs()
  * 
  * Return: 
  ******************************************************************************/
-bool CIccCalculatorFunc::Begin(const CIccMpeCalculator *pChannelCalc, CIccTagMultiProcessElement *pMPE)
+bool CIccCalculatorFunc::Begin(const CIccMpeCalculator *pChannelCalc, CIccTagMultiProcessElement * /* pMPE */)
 {
   if (!pChannelCalc)
     return false;
@@ -3933,7 +3937,7 @@ int CIccCalculatorFunc::CheckUnderflowOverflow(SIccCalcOp *op, icUInt32Number nO
         l=nOps-1;
       for (j=(icUInt32Number)f; j<=l; j++) {
         op[j].Describe(opDesc, 100); // TODO - propogate nVerboseness
-        if (j!=f)
+        if (j!=(icUInt32Number)f)
           sReport += " ";
         sReport += opDesc;
       }
@@ -4430,18 +4434,19 @@ icFuncParseStatus CIccMpeCalculator::SetCalcFunc(const char *szFuncDef, std::str
 void CIccMpeCalculator::Describe(std::string &sDescription, int nVerboseness)
 {
   if (m_calcFunc) {
-    icChar buf[81];
+    const size_t bufSize = 81;
+    icChar buf[bufSize];
 
-    sprintf(buf, "BEGIN_CALC_ELEMENT %u %u\n", m_nInputChannels, m_nOutputChannels); 
+    snprintf(buf, bufSize, "BEGIN_CALC_ELEMENT %u %u\n", m_nInputChannels, m_nOutputChannels);
     sDescription += buf;
 
     if (m_nSubElem && m_SubElem) {
       icUInt32Number i;
       for (i=0; i<m_nSubElem; i++) {
-        sprintf(buf, "BEGIN_SUBCALCELEM %u\n", i);
+        snprintf(buf, bufSize, "BEGIN_SUBCALCELEM %u\n", i);
         sDescription += buf;
         m_SubElem[i]->Describe(sDescription, nVerboseness);
-        sprintf(buf, "END_SUBCALCELEM %u\n\n", i);
+        snprintf(buf, bufSize, "END_SUBCALCELEM %u\n\n", i);
         sDescription += buf;
       }
     }
@@ -4452,7 +4457,7 @@ void CIccMpeCalculator::Describe(std::string &sDescription, int nVerboseness)
       sDescription += "END_CALC_FUNCTION\n";
     }
 
-    sprintf(buf, "END_CALC_ELEMENT\n");
+    snprintf(buf, bufSize, "END_CALC_ELEMENT\n");
     sDescription += buf;
 
   }
@@ -4733,7 +4738,7 @@ bool CIccMpeCalculator::Begin(icElemInterp nInterp, CIccTagMultiProcessElement *
 ******************************************************************************/
 CIccApplyMpe *CIccMpeCalculator::GetNewApply(CIccApplyTagMpe *pApplyTag)
 {
-  CIccApplyTagMpe *pApplyTagEx = (CIccApplyTagMpe*)pApplyTag;
+  //CIccApplyTagMpe *pApplyTagEx = (CIccApplyTagMpe*)pApplyTag;
 
   CIccApplyMpeCalculator *pApply = new CIccApplyMpeCalculator(this);
 
