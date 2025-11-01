@@ -84,15 +84,16 @@ bool CIccMpeXmlUnknown::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   icUInt8Number *m_ptr = m_pData;
 
-  char line[256];
-  char buf[256];
-  char fix[256];
-  sprintf(line, "<UnknownElement Type=\"%s\" InputChannels=\"%d\" OutputChannels=\"%d\"", 
-           icFixXml(fix, icGetSigStr(buf, GetType())), NumInputChannels(), NumOutputChannels());
+  const size_t bufSize = 256;
+  char line[bufSize];
+  char buf[bufSize];
+  char fix[bufSize];
+  snprintf(line, bufSize, "<UnknownElement Type=\"%s\" InputChannels=\"%d\" OutputChannels=\"%d\"", 
+           icFixXml(fix, icGetSigStr(buf, bufSize, GetType())), NumInputChannels(), NumOutputChannels());
   xml += blanks + line;
 
   if (m_nReserved) {
-    sprintf(line, " Reserved=\"%u\"", m_nReserved);
+    snprintf(line, bufSize, " Reserved=\"%u\"", m_nReserved);
     xml += buf;
   }
   xml += ">\n";
@@ -1533,12 +1534,13 @@ bool CIccMpeXmlInvEmissionMatrix::ParseXml(xmlNode *pNode, std::string &parseStr
 
 bool CIccMpeXmlTintArray::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  char buf[128], line[128];
-  sprintf(buf, "<TintArrayElement InputChannels=\"%d\" OutputChannels=\"%d\"", NumInputChannels(), NumOutputChannels());
+  const size_t bufSize = 128;
+  char buf[bufSize], line[bufSize];
+  snprintf(buf, bufSize, "<TintArrayElement InputChannels=\"%d\" OutputChannels=\"%d\"", NumInputChannels(), NumOutputChannels());
   xml += blanks + buf;
 
   if (m_nReserved) {
-    sprintf(buf, " Reserved=\"%u\"", m_nReserved);
+    snprintf(buf, bufSize, " Reserved=\"%u\"", m_nReserved);
     xml += buf;
   }
   xml += ">\n";
@@ -1548,16 +1550,16 @@ bool CIccMpeXmlTintArray::ToXml(std::string &xml, std::string blanks/* = ""*/)
     CIccTagXml *pTagXml = (CIccTagXml*)pTagEx;
     const icChar* tagSig = icGetTagSigTypeName(m_Array->GetType());
 
-    sprintf(line, "  <%s>\n",  tagSig); //parent node is the tag type
-    xml += line; 				
+    snprintf(line, bufSize, "  <%s>\n",  tagSig); //parent node is the tag type
+    xml += line;
 
     //convert the rest of the tag to xml
     if (!pTagXml->ToXml(xml, "    ")) {
-      printf("Unable to output tag with type %s\n", icGetSigStr(buf, m_Array->GetType()));
+      printf("Unable to output tag with type %s\n", icGetSigStr(buf, bufSize, m_Array->GetType()));
       return false;
     }
-    sprintf(line, "  </%s>\n",  tagSig);
-    xml += line; 	
+    snprintf(line, bufSize, "  </%s>\n",  tagSig);
+    xml += line;
   }
 
   xml += blanks + "</TintArrayElement>\n";
@@ -1949,21 +1951,20 @@ bool CIccMpeXmlExtCLUT::ParseXml(xmlNode *pNode, std::string &parseStr)
 
 bool CIccMpeXmlBAcs::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  char line[256];
-  char buf[256], fix[256];
+  const size_t bufSize = 256;
+  char line[bufSize];
+  char buf[bufSize], fix[bufSize];
 
-  sprintf(line, "<BAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
-                icFixXml(fix, icGetSigStr(buf, m_signature)));
+  snprintf(line, bufSize, "<BAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
+                icFixXml(fix, icGetSigStr(buf, bufSize, m_signature)));
   xml += blanks + line;
 
   if (m_nReserved) {
-    sprintf(line, " Reserved=\"%u\"", m_nReserved);
+    snprintf(line, bufSize, " Reserved=\"%u\"", m_nReserved);
     xml += line;
   }
 
   if (m_pData && m_nDataSize) {
-    icUInt8Number *m_ptr = m_pData;
-
     xml += ">\n";
   
     icXmlDumpHexData(xml, blanks+"  ", m_pData, m_nDataSize);
@@ -2005,21 +2006,20 @@ bool CIccMpeXmlBAcs::ParseXml(xmlNode *pNode, std::string &parseStr)
 
 bool CIccMpeXmlEAcs::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  char line[256];
-  char buf[256], fix[256];
+  const size_t bufSize = 256;
+  char line[bufSize];
+  char buf[bufSize], fix[bufSize];
 
-  sprintf(line, "<EAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
-    icFixXml(fix, icGetSigStr(buf, m_signature)));
+  snprintf(line, bufSize, "<EAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
+    icFixXml(fix, icGetSigStr(buf, bufSize, m_signature)));
   xml += blanks + line;
 
   if (m_nReserved) {
-    sprintf(line, " Reserved=\"%u\"", m_nReserved);
+    snprintf(line, bufSize, " Reserved=\"%u\"", m_nReserved);
     xml += line;
   }
 
   if (m_pData && m_nDataSize) {
-    icUInt8Number *m_ptr = m_pData;
-
     xml += ">\n";
     icXmlDumpHexData(xml, blanks+"  ", m_pData, m_nDataSize);
     xml += blanks + "</EAcsElement>\n";

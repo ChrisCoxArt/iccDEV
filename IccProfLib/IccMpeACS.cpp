@@ -133,7 +133,7 @@ void CIccMpeAcs::Describe(std::string &sDescription, int nVerboseness)
   else
     sDescription += "ELEM_eACS\n";
 
-  icGetSig(sigBuf, m_signature);
+  icGetSig(sigBuf, 30, m_signature);
   sDescription += "  Signature = ";
   sDescription += sigBuf;
   sDescription += "\n";

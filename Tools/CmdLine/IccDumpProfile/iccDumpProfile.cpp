@@ -90,23 +90,24 @@
 void DumpTag(CIccProfile *pIcc, icTagSignature sig, int nVerboseness)
 {
   CIccTag *pTag = pIcc->FindTag(sig);
-  char buf[64];
+  const size_t bufSize = 64;
+  char buf[bufSize];
   CIccInfo Fmt;
 
   std::string contents;
 
   if (pTag) {
-    printf("\nContents of %s tag (%s)\n", Fmt.GetTagSigName(sig), icGetSig(buf, sig));
+    printf("\nContents of %s tag (%s)\n", Fmt.GetTagSigName(sig), icGetSig(buf, bufSize, sig));
     printf("Type: ");
     if (pTag->IsArrayType()) {
       printf("Array of ");
     }
-    printf("%s (%s)\n", Fmt.GetTagTypeSigName(pTag->GetType()), icGetSig(buf, pTag->GetType()));
+    printf("%s (%s)\n", Fmt.GetTagTypeSigName(pTag->GetType()), icGetSig(buf, bufSize, pTag->GetType()));
     pTag->Describe(contents, nVerboseness);
     fwrite(contents.c_str(), contents.length(), 1, stdout);
   }
   else {
-    printf("Tag (%s) not found in profile\n", icGetSig(buf, sig));
+    printf("Tag (%s) not found in profile\n", icGetSig(buf, bufSize, sig));
   }
 }
 
@@ -203,7 +204,8 @@ print_usage:
   }
   else {
     pHdr = &pIcc->m_Header;
-    char buf[64];
+    const size_t bufSize = 64;
+    char buf[bufSize];
 
     printf("Profile:            '%s'\n", argv[nArg]);
     if(Fmt.IsProfileIDCalculated(&pHdr->profileID))
@@ -219,8 +221,8 @@ print_usage:
     printf("Creation Date:      %d/%d/%d (M/D/Y)  %02u:%02u:%02u\n",
                                pHdr->date.month, pHdr->date.day, pHdr->date.year,
                                pHdr->date.hours, pHdr->date.minutes, pHdr->date.seconds);
-    printf("Creator:            %s\n", icGetSig(buf, pHdr->creator));
-    printf("Device Manufacturer:%s\n", icGetSig(buf, pHdr->manufacturer));
+    printf("Creator:            %s\n", icGetSig(buf, bufSize, pHdr->creator));
+    printf("Device Manufacturer:%s\n", icGetSig(buf, bufSize, pHdr->manufacturer));
     printf("Data Color Space:   %s\n", Fmt.GetColorSpaceSigName(pHdr->colorSpace));
     printf("Flags:              %s\n", Fmt.GetProfileFlagsName(pHdr->flags));
     printf("PCS Color Space:    %s\n", Fmt.GetColorSpaceSigName(pHdr->pcs));
@@ -228,7 +230,7 @@ print_usage:
     printf("Rendering Intent:   %s\n", Fmt.GetRenderingIntentName((icRenderingIntent)(pHdr->renderingIntent)));
     printf("Profile Class:      %s\n", Fmt.GetProfileClassSigName(pHdr->deviceClass));
     if (pHdr->deviceSubClass)
-      printf("Profile SubClass:   %s\n", icGetSig(buf, pHdr->deviceSubClass));
+      printf("Profile SubClass:   %s\n", icGetSig(buf, bufSize, pHdr->deviceSubClass));
     else
       printf("Profile SubClass:   Not Defined\n");
     printf("Version:            %s\n", Fmt.GetVersionName(pHdr->version));

@@ -3026,7 +3026,8 @@ bool CIccTagNamedColor2::Write(CIccIO *pIO)
 void CIccTagNamedColor2::Describe(std::string &sDescription, int /* nVerboseness */)
 {
   const size_t bufSize = 128;
-  icChar buf[bufSize], szColorVal[40], szColor[40];
+  const size_t nameSize = 40;
+  icChar buf[bufSize], szColorVal[nameSize], szColor[nameSize];
 
   icUInt32Number i, j;
   SIccNamedColorEntry *pNamedColor=m_NamedColor;
@@ -3056,16 +3057,16 @@ void CIccTagNamedColor2::Describe(std::string &sDescription, int /* nVerboseness
     }
 
     for (j=0; j<3; j++) {
-      icColorIndexName(szColor, m_csPCS, j, 3, "P");
-      icColorValue(szColorVal, pcsCoord[j], m_csPCS, j);
+      icColorIndexName(szColor, nameSize, m_csPCS, j, 3, "P");
+      icColorValue(szColorVal, nameSize, pcsCoord[j], m_csPCS, j);
       snprintf(buf, bufSize, " %s=%s", szColor, szColorVal);
       sDescription += buf;
     }
     if (m_nDeviceCoords) {
       sDescription += " :";
       for (j=0; j<m_nDeviceCoords; j++) {
-        icColorIndexName(szColor, m_csDevice, j, m_nDeviceCoords, "D");
-        icColorValue(szColorVal, pNamedColor->deviceCoords[j], m_csDevice, j);
+        icColorIndexName(szColor, nameSize, m_csDevice, j, m_nDeviceCoords, "D");
+        icColorValue(szColorVal, nameSize, pNamedColor->deviceCoords[j], m_csDevice, j);
         snprintf(buf, bufSize, " %s=%s", szColor, szColorVal);
         sDescription += buf;
       }
@@ -4875,7 +4876,7 @@ icValidateStatus CIccTagSparseMatrixArray::Validate(std::string sigPath, std::st
   bool bCheckPCS=false;
 
   icSignature sig1 = icGetFirstSigPathSig(sigPath);
-  icSignature sig2 = icGetSecondSigPathSig(sigPath);    // unused, is this call needed for side effects?
+  icSignature sig2 = icGetSecondSigPathSig(sigPath);    // TODO - unused, is this call needed for side effects?
 
   if (sig1==icSigSpectralWhitePointTag) {
     bCheckPCS = true;
@@ -10793,7 +10794,7 @@ void CIccTagSpectralDataInfo::Describe(std::string &sDescription, int /* nVerbos
   icChar buf[bufSize];
 
   sDescription += "ColorSignature: ";
-  sDescription += icGetColorSigStr(buf, m_nSig);
+  sDescription += icGetColorSigStr(buf, bufSize, m_nSig);
   sDescription += "\n";
 
   snprintf(buf, bufSize, "SpectralRange: start %fnm end %fnm with %d steps\n", icF16toF(m_spectralRange.start), icF16toF(m_spectralRange.end), m_spectralRange.steps);

@@ -528,7 +528,8 @@ MyChild::MyChild(wxMDIParentFrame *parent, const wxString& title, CIccProfile *p
 	m_panel->SetSizer(sizerTop);
 
 	CIccInfo Fmt;
-	char buf[64];
+    const size_t bufSize = 64;
+	char buf[bufSize];
 	int n;
     wxString str;
 
@@ -548,8 +549,8 @@ MyChild::MyChild(wxMDIParentFrame *parent, const wxString& title, CIccProfile *p
 	    m_textCreationDate->SetLabel(wxString::Format(wxT("%d/%d/%d (M/D/Y) %02u:%02u:%02u"),
     	    pHdr->date.month, pHdr->date.day, pHdr->date.year,
 		    pHdr->date.hours, pHdr->date.minutes, pHdr->date.seconds));
-	    m_textCreator->SetLabel(icGetSig(buf, pHdr->creator));
-        m_textDeviceManufacturer->SetLabel(icGetSig(buf, pHdr->manufacturer));
+	    m_textCreator->SetLabel(icGetSig(buf, bufSize, pHdr->creator));
+        m_textDeviceManufacturer->SetLabel(icGetSig(buf, bufSize, pHdr->manufacturer));
         m_textColorSpace->SetLabel(Fmt.GetColorSpaceSigName(pHdr->colorSpace));
 	    m_textFlags->SetLabel(Fmt.GetProfileFlagsName(pHdr->flags, pHdr->mcs!=0));
 	    m_textPCS->SetLabel(Fmt.GetColorSpaceSigName(pHdr->pcs));
@@ -557,7 +558,7 @@ MyChild::MyChild(wxMDIParentFrame *parent, const wxString& title, CIccProfile *p
 	    m_textRenderingIntent->SetLabel(Fmt.GetRenderingIntentName((icRenderingIntent)(pHdr->renderingIntent)));
 	    m_textClass->SetLabel(Fmt.GetProfileClassSigName(pHdr->deviceClass));
         if (pHdr->deviceSubClass) 
-            m_textSubClass->SetLabel(icGetSig(buf, pHdr->deviceSubClass));
+            m_textSubClass->SetLabel(icGetSig(buf, bufSize, pHdr->deviceSubClass));
         else
             m_textSubClass->SetLabel(_T("Not Defined"));
 

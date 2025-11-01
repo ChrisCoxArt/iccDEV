@@ -138,7 +138,7 @@ bool CIccBasicStructFactory::GetStructSigName(std::string &structName, icStructS
   if (!bFindUnknown) {
     char sig[20];
     structName = "UnknownStruct_";
-    icGetSigStr(sig, structTypeSig);
+    icGetSigStr(sig, 20, structTypeSig);
     structName += sig;
   }
   else {

@@ -287,7 +287,7 @@ void CIccCfgDataApply::toJson(json& j) const
 
   jsonSetValue(j, "srcType", m_srcType);
   if (m_srcSpace != icSigUnknownData)
-    j["srcSpace"] = icGetColorSigStr(buf, m_srcSpace);
+    j["srcSpace"] = icGetColorSigStr(buf, 30, m_srcSpace);
 
   if (m_srcFile.size())
     j["srcFile"] = m_srcFile;
@@ -668,7 +668,7 @@ static bool jsonFromEnvMap(json& j, const icCmmEnvSigMap& map)
   j.clear();
   for (auto e = map.begin(); e != map.end(); e++) {
     json var;
-    var["name"] = icGetSigStr(buf, e->first);
+    var["name"] = icGetSigStr(buf, 30, e->first);
     var["value"] = e->second;
     j.push_back(var);
   }
@@ -2083,9 +2083,9 @@ bool CIccCfgColorData::toIt8(const char* filename, icUInt8Number nDigits, icUInt
 void CIccCfgColorData::toJson(json& obj) const
 {
   char buf[32];
-  obj["space"] = icGetColorSigStr(buf, m_space);
+  obj["space"] = icGetColorSigStr(buf, 32, m_space);
   obj["encoding"] = icGetJsonFloatColorEncoding(m_encoding);
-  obj["srcSpace"] = icGetColorSigStr(buf, m_srcSpace);
+  obj["srcSpace"] = icGetColorSigStr(buf, 32, m_srcSpace);
   obj["srcEncoding"] = icGetJsonFloatColorEncoding(m_srcEncoding);
 
   json data;

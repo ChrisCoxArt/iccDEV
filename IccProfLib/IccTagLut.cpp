@@ -344,13 +344,13 @@ void CIccTagCurve::Describe(std::string &sDescription, int nVerboseness)
       for (i=0; i<(int)m_nSize; i++) {
         ptr = buf;
 
-        icColorValue(buf, (icFloatNumber)i/(m_nSize-1), icSigMCH1Data, 1);
+        icColorValue(buf, bufSize, (icFloatNumber)i/(m_nSize-1), icSigMCH1Data, 1);
         ptr += strlen(buf);
 
         strcpy(ptr, " ");
         ptr ++;
 
-        icColorValue(ptr, m_Curve[i], icSigMCH1Data, 1);
+        icColorValue(ptr, bufSize, m_Curve[i], icSigMCH1Data, 1);
 
         ptr += strlen(ptr);
 
@@ -408,13 +408,14 @@ void CIccTagCurve::DumpLut(std::string &sDescription, const icChar *szName,
       for (i=0; i<(int)m_nSize; i++) {
         ptr = buf;
 
-        icColorValue(buf, (icFloatNumber)i/(m_nSize-1), csSig, nIndex);
+        icColorValue(buf, bufSize, (icFloatNumber)i/(m_nSize-1), csSig, nIndex);
         ptr += strlen(buf);
 
         strcpy(ptr, " ");
         ptr ++;
 
-        icColorValue(ptr, m_Curve[i], csSig, nIndex);
+// TODO - this length is wrong because we're mid buffer, needs work
+        icColorValue(ptr, bufSize, m_Curve[i], csSig, nIndex);
 
         ptr += strlen(ptr);
 
@@ -2043,7 +2044,8 @@ void CIccCLUT::Iterate(std::string &sDescription, icUInt8Number nIndex, icUInt32
     int i;
 
     for (i=0; i<m_nInput; i++) {
-      icColorValue(m_pVal, (icFloatNumber)m_GridAdr[i] / (m_GridPoints[i]-1) , m_csInput, i, bUseLegacy);
+// TODO - hard coding size temporarily, really should be passed in
+      icColorValue(m_pVal, 40, (icFloatNumber)m_GridAdr[i] / (m_GridPoints[i]-1) , m_csInput, i, bUseLegacy);
 
 // TODO - this buffer handling is sloppy, but should be ok for now
 // really needs to be refactored, needs some sort of error return if buffer overflows
@@ -2056,7 +2058,8 @@ void CIccCLUT::Iterate(std::string &sDescription, icUInt8Number nIndex, icUInt32
     ptr += 2;
 
     for (i=0; i<m_nOutput; i++) {
-      icColorValue(m_pVal, pData[i], m_csOutput, i, bUseLegacy);
+// TODO - hard coding size temporarily, really should be passed in
+      icColorValue(m_pVal, 40, pData[i], m_csOutput, i, bUseLegacy);
 
       ptr += snprintf(ptr, size_t(ptrEnd-ptr), " %s", m_pVal);
       if (ptr >= ptrEnd)
@@ -2174,7 +2177,8 @@ void CIccCLUT::DumpLut(std::string  &sDescription, const icChar *szName,
                        int nVerboseness, bool bUseLegacy)
 {
   const size_t outSize = 200000;
-  icChar szOutText[outSize], szColor[40];
+  const size_t nameSize = 40;
+  icChar szOutText[outSize], szColor[nameSize];
   int i;
 
   snprintf(szOutText, outSize, "BEGIN_LUT %s %d %d\n", szName, m_nInput, m_nOutput);
@@ -2183,7 +2187,7 @@ void CIccCLUT::DumpLut(std::string  &sDescription, const icChar *szName,
   if (nVerboseness > 75) {
 
     for (i=0; i<m_nInput; i++) {
-      icColorIndexName(szColor, csInput, i, m_nInput, "In");
+      icColorIndexName(szColor, nameSize, csInput, i, m_nInput, "In");
       snprintf(szOutText, outSize, " %s=%d", szColor, m_GridPoints[i]);
       sDescription += szOutText;
     }
@@ -2191,7 +2195,7 @@ void CIccCLUT::DumpLut(std::string  &sDescription, const icChar *szName,
     sDescription += "  ";
 
     for (i=0; i<m_nOutput; i++) {
-      icColorIndexName(szColor, csOutput, i, m_nOutput, "Out");
+      icColorIndexName(szColor, nameSize, csOutput, i, m_nOutput, "Out");
       snprintf(szOutText, outSize, " %s", szColor);
       sDescription += szOutText;
     }
@@ -2201,11 +2205,11 @@ void CIccCLUT::DumpLut(std::string  &sDescription, const icChar *szName,
     if (nVerboseness > 75) {
       size_t len = 0;
       for (i=0; i<m_nInput; i++) {
-        icColorValue(szColor, 1.0, csInput, i, bUseLegacy);
+        icColorValue(szColor, nameSize, 1.0, csInput, i, bUseLegacy);
         len += strlen(szColor);
       }
       for (i=0; i<m_nOutput; i++) {
-        icColorValue(szColor, 1.0, csOutput, i, bUseLegacy);
+        icColorValue(szColor, nameSize, 1.0, csOutput, i, bUseLegacy);
         len += strlen(szColor);
       }
       len += m_nInput + m_nOutput + 6;
@@ -3462,13 +3466,14 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
 {
   int i;
   const size_t bufSize = 128;
-  icChar buf[bufSize], color[40];
+  const size_t nameSize = 40;
+  icChar buf[bufSize], color[nameSize];
 
 
   if (IsInputMatrix()) {
     if (m_CurvesB && !m_bUseMCurvesAsBCurves) {
       for (i=0; i<m_nInput; i++) {
-        icColorIndexName(color, m_csInput, i, m_nInput, "");
+        icColorIndexName(color, nameSize, m_csInput, i, m_nInput, "");
         snprintf(buf, bufSize, "B_Curve_%s", color);
         m_CurvesB[i]->DumpLut(sDescription, buf, m_csInput, i, nVerboseness);
       }
@@ -3479,7 +3484,7 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
 
     if (m_CurvesM) {
       for (i=0; i<m_nInput; i++) {
-        icColorIndexName(color, m_csInput, i, m_nInput, "");
+        icColorIndexName(color, nameSize, m_csInput, i, m_nInput, "");
         if (!m_bUseMCurvesAsBCurves)
           snprintf(buf, bufSize, "M_Curve_%s", color);
         else
@@ -3493,7 +3498,7 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
 
     if (m_CurvesA) {
       for (i=0; i<m_nOutput; i++) {
-        icColorIndexName(color, m_csOutput, i, m_nOutput, "");
+        icColorIndexName(color, nameSize, m_csOutput, i, m_nOutput, "");
         snprintf(buf, bufSize, "A_Curve_%s", color);
         m_CurvesA[i]->DumpLut(sDescription, buf, m_csOutput, i, nVerboseness);
       }
@@ -3502,7 +3507,7 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
   else {
     if (m_CurvesA) {
       for (i=0; i<m_nInput; i++) {
-        icColorIndexName(color, m_csInput, i, m_nInput, "");
+        icColorIndexName(color, nameSize, m_csInput, i, m_nInput, "");
         snprintf(buf, bufSize, "A_Curve_%s", color);
         m_CurvesA[i]->DumpLut(sDescription, buf, m_csInput, i, nVerboseness);
       }
@@ -3513,7 +3518,7 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
 
     if (m_CurvesM && this->GetType()!=icSigLut8Type) {
       for (i=0; i<m_nOutput; i++) {
-        icColorIndexName(color, m_csOutput, i, m_nOutput, "");
+        icColorIndexName(color, nameSize, m_csOutput, i, m_nOutput, "");
         snprintf(buf, bufSize, "M_Curve_%s", color);
         m_CurvesM[i]->DumpLut(sDescription, buf, m_csOutput, i, nVerboseness);
       }
@@ -3524,7 +3529,7 @@ void CIccMBB::Describe(std::string &sDescription, int nVerboseness)
 
     if (m_CurvesB) {
       for (i=0; i<m_nOutput; i++) {
-        icColorIndexName(color, m_csOutput, i, m_nOutput, "");
+        icColorIndexName(color, nameSize, m_csOutput, i, m_nOutput, "");
         snprintf(buf, bufSize, "B_Curve_%s", color);
         m_CurvesB[i]->DumpLut(sDescription, buf, m_csOutput, i, nVerboseness);
       }

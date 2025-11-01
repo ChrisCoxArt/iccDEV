@@ -348,7 +348,7 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     icHeader* pHdr = &m_pProfile->m_Header;
     CIccInfo Fmt;
     const size_t bufSize = 180;
-    char buf[bufSize], sigbuf[180];
+    char buf[bufSize], sigbuf[180], buf2[bufSize];
 
     if (Fmt.IsProfileIDCalculated(&pHdr->profileID)) {
       sDescription += "Profile ID:         ";
@@ -370,7 +370,7 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
       pHdr->date.month, pHdr->date.day, pHdr->date.year,
       pHdr->date.hours, pHdr->date.minutes, pHdr->date.seconds);
     sDescription += buf;
-    snprintf(buf, bufSize, "Creator:            %s\n", icGetSig(buf, pHdr->creator));
+    snprintf(buf, bufSize, "Creator:            %s\n", icGetSig(buf2, bufSize, pHdr->creator));
     sDescription += buf;
     snprintf(buf, bufSize, "Data Color Space:   %s\n", Fmt.GetColorSpaceSigName(pHdr->colorSpace));
     sDescription += buf;
@@ -385,7 +385,7 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     snprintf(buf, bufSize, "Profile Class:      %s\n", Fmt.GetProfileClassSigName(pHdr->deviceClass));
     sDescription += buf;
     if (pHdr->deviceSubClass) {
-      snprintf(buf, bufSize, "Profile SubClass:   %s\n", icGetSig(buf, pHdr->deviceSubClass));
+      snprintf(buf, bufSize, "Profile SubClass:   %s\n", icGetSig(buf2, bufSize, pHdr->deviceSubClass));
       sDescription += buf;
     }
     else

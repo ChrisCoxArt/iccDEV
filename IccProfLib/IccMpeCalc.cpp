@@ -1822,7 +1822,7 @@ void SIccCalcOp::Describe(std::string &desc, int /* nVerboseness */)
     case icSigEnvVarOp:
       {
         char varName[10];
-        icGetSigStr(varName, (icSignature)data.size);
+        icGetSigStr(varName, 10, (icSignature)data.size);
         int l=(int)strlen(varName);
         if (l==9) { //Remove h at end
           varName[8]=0;

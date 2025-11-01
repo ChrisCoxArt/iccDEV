@@ -524,7 +524,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
   icRenderingIntent nTagIntent = nIntent;
   bool bUseSpectralPCS = false;
   bool bAbsToRel = false;
-  bool bRelToAbs = false;   // ERROR - value is set, but never used
+  //bool bRelToAbs = false;     // set, but never used
   icMCSConnectionType nMCS = icNoMCS;
   icXformLutType nUseLutType = nLutType;
   bool bUseColorimeticTags = true;
@@ -707,8 +707,8 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
               pTag = pProfile->FindTag(icSigBToD1Tag);
               if (pTag) {
                 nTagIntent = icRelativeColorimetric;
-                if (nTagIntent==icAbsoluteColorimetric)
-                  bRelToAbs = true; // ERROR - value never used!
+                //if (nTagIntent==icAbsoluteColorimetric)
+                //  bRelToAbs = true; // value never used!
               }
             }
 
@@ -762,8 +762,8 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
             pTag = pProfile->FindTag(icSigBToA1Tag);
             if (pTag) {
               nTagIntent = icRelativeColorimetric;
-              if (nTagIntent == icAbsoluteColorimetric)
-                bRelToAbs = true; // ERROR - value never used!
+              //if (nTagIntent == icAbsoluteColorimetric)
+              //  bRelToAbs = true; // value never used!
             }
 
             if (!pTag) {
@@ -7746,9 +7746,9 @@ icStatusCMM CIccApplyCmm::Apply(icFloatNumber *DstPixel, const icFloatNumber *Sr
   icFloatNumber *pDst, *pTmp;
   const icFloatNumber *pSrc;
   CIccApplyXformList::iterator i;
-  const CIccXform *pLastXform;
+  //const CIccXform *pLastXform;
   int j, n = (int)m_Xforms->size();
-  bool bNoClip;  // ERROR - set but not used
+  // bool bNoClip;  // set but not used, except in commented out code
 
   if (!n)
     return icCmmStatBadXform;
@@ -7783,24 +7783,24 @@ icStatusCMM CIccApplyCmm::Apply(icFloatNumber *DstPixel, const icFloatNumber *Sr
         pDst = pTmp;
     }
 
-    pLastXform = i->ptr->GetXform();   
+    // pLastXform = i->ptr->GetXform();     // set, but only used by unused value below
     i->ptr->Apply(DstPixel, pSrc);
-    bNoClip = pLastXform->NoClipPCS();  // ERROR - set but not used
+    // bNoClip = pLastXform->NoClipPCS();  // set but not used
   }
   else if (n==1) {
     i = m_Xforms->begin();
 
-    pLastXform = i->ptr->GetXform();
+    // pLastXform = i->ptr->GetXform();  // set, but only used by unused value below
     i->ptr->Apply(DstPixel, SrcPixel);
 
 #ifdef DEBUG_CMM_APPLY
     DumpCmmApplyPixel(nCount++, pDst, i->ptr->GetXform()->GetNumDstSamples());
 #endif
 
-    bNoClip = pLastXform->NoClipPCS();  // ERROR - set but not used
+    // bNoClip = pLastXform->NoClipPCS();  // set but not used
   }
   else {
-    bNoClip = true;  // ERROR - set but not used
+    // bNoClip = true;
   }
 
   //m_pPCS->CheckLast(DstPixel, m_pCmm->m_nDestSpace, bNoClip);
@@ -11176,8 +11176,7 @@ bool CIccMruCache<T>::Apply(T *DstPixel, const T *SrcPixel)
     pixel = last->pPixelData;
   }
   
-// ERROR - dest is not used!  memcpy is probably incorrect!s
-  T *dest = &pixel[m_nSrcSamples];
+  //T *dest = &pixel[m_nSrcSamples];        // ERROR - the memcpy is probably wrong, as this value was unused
 
   memcpy(pixel, SrcPixel, m_nSrcSize);
 

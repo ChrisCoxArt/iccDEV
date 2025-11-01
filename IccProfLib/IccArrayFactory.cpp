@@ -118,7 +118,7 @@ bool CIccBasicArrayFactory::GetArraySigName(std::string &arrayName, icArraySigna
   if (!bFindUnknown) {
     char sig[20];
     arrayName = "UnknownStruct_";
-    icGetSigStr(sig, arrayTypeSig);
+    icGetSigStr(sig, 20, arrayTypeSig);
     arrayName += sig;
   }
   else {
