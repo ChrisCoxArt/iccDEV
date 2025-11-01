@@ -219,7 +219,7 @@ namespace iccDEV {
     virtual icFloatNumber costFunc(CIccSearchVec &point) = 0;
 
     //Set bUsebouds true, and override boundsCheck to implement bounds checking setting boundsCost with "distance" out of bounds
-    virtual bool boundsCheck(const CIccSearchVec& point, icFloatNumber& boundsCost) const {
+    virtual bool boundsCheck(const CIccSearchVec& /*point*/, icFloatNumber& boundsCost) const {
       boundsCost = 0;
       return false;
     }

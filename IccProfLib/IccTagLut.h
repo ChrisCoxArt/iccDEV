@@ -90,8 +90,8 @@ public:
   virtual CIccTag *NewCopy() const { return new CIccCurve; } 
   virtual ~CIccCurve() {}
 
-  virtual void DumpLut(std::string &sDescription, const icChar *szName,
-    icColorSpaceSignature csSig, int nIndex, int nVerboseness) {}
+  virtual void DumpLut(std::string & /*sDescription*/, const icChar * /*szName*/,
+    icColorSpaceSignature /*csSig*/, int /*nIndex*/, int /*nVerboseness*/) {}
 
   virtual void Begin() {}
   virtual icFloatNumber Apply(icFloatNumber v) const { return v; }
