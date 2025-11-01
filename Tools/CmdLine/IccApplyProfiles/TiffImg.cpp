@@ -247,7 +247,7 @@ bool CTiffImg::Open(const char *szFname)
     TIFFError(szFname,"Can not open input image");
     return false;
   }
-  icUInt16Number nPlanar=PLANARCONFIG_CONTIG;
+  //icUInt16Number nPlanar=PLANARCONFIG_CONTIG;
   icUInt16Number nOrientation=ORIENTATION_TOPLEFT;
   icUInt16Number nSampleFormat=SAMPLEFORMAT_UINT;
   icUInt16Number *nSampleInfo=NULL;
