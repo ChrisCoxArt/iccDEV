@@ -378,7 +378,7 @@ public:
   void SetPrecision(icUInt8Number nPrecision) { m_nPrecision = nPrecision; }
 
 protected:
-  void Iterate(std::string &sDescription, icUInt8Number nIndex, icUInt32Number nPos, bool bUseLegacy=false);
+  void Iterate(std::string &sDescription, icUInt8Number nIndex, icUInt32Number nPos, size_t bufSize, bool bUseLegacy=false );
   void SubIterate(IIccCLUTExec* pExec, icUInt8Number nIndex, icUInt32Number nPos);
 
   icCLUTCLIPFUNC UnitClip;
