@@ -98,8 +98,8 @@ public:
   virtual void Close() {}
 
 // unused param is needed to define default value for overrides, changing would require a lot of additional changes
-  virtual icInt32Number Read8(void */*pBuf8*/, icInt32Number nNum=1) { return 0; }
-  virtual icInt32Number Write8(void */*pBuf8*/, icInt32Number nNum=1) { return 0; }
+  virtual icInt32Number Read8(void * /*pBuf8*/, icInt32Number nNum=1) { (void)nNum; return 0; }
+  virtual icInt32Number Write8(void * /*pBuf8*/, icInt32Number nNum=1) { (void)nNum; return 0; }
 
   icInt32Number ReadLine(void *pBuf8, icInt32Number nNum=256);
 

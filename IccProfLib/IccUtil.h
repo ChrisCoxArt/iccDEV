@@ -373,7 +373,7 @@ class ICCPROFLIB_API CIccPixelBuf
 public:
   CIccPixelBuf(int nChan=icDefaultPixelBufSize);
   ~CIccPixelBuf();
-  icFloatNumber &operator[](int nPos) { return m_pixel[nPos]; }
+  icFloatNumber &operator[](size_t nPos) { return m_pixel[nPos]; }
   icFloatNumber *get() { return m_pixel;}
   
   operator icFloatNumber *() { return m_pixel; }

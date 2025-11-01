@@ -829,7 +829,7 @@ public:
   CIccTagSparseMatrixArray(int nNumMatrices=1, int nChannelsPerMatrix=4);
   CIccTagSparseMatrixArray(const CIccTagSparseMatrixArray &ITSMA);
   CIccTagSparseMatrixArray &operator=(const CIccTagSparseMatrixArray &ITSMA);
-  virtual CIccTag* NewCopy() { return new CIccTagSparseMatrixArray(*this); }
+  virtual CIccTag* NewCopy() const { return new CIccTagSparseMatrixArray(*this); }
   virtual ~CIccTagSparseMatrixArray();
 
   virtual bool IsArrayType() { return m_nSize > 1; }
