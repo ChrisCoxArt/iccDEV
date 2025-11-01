@@ -1416,9 +1416,12 @@ static inline bool compare_float(float x, float y, float eps=0.01f) {
     return (fabsf(x-y)<eps);
 }
 
+#if 0
+// currently unused
 static inline bool compare_float(double x, double y, double eps=0.0000001f) {
     return (fabs(x-y)<eps);
 }
+#endif
 
 
 /**
@@ -2272,7 +2275,7 @@ bool CIccProfile::IsTypeValid(icTagSignature tagSig, icTagTypeSignature typeSig,
       else return true;
     }
 
-  case icSigCicpType:
+  case icSigCicpTag:
     {
       if (typeSig != icSigCicpType)
         return false;
