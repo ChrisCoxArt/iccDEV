@@ -530,19 +530,19 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     else {
       m_nShortcutType = 0;
     }
-
-    return true;
+    break;  // and return true below
 
   case 0x0001:
     if (!m_params || m_nParameters<5)
       return false;
-
-    return true;
+    break;  // and return true below
 
   case 0x0002:
   case 0x0003:
     if (!m_params || m_nParameters < 5)
       return false;
+    // TODO - was this supposed to fall through, doesn't seem like it
+    break;  // and return true below
 
   case 0x0004:
     if (!m_params || m_nParameters < 5)
@@ -554,7 +554,7 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     else {
       m_nShortcutType = 0;
     }
-    return true;
+    break;  // and return true below
 
   case 0x0005:
     if (!m_params || m_nParameters < 6)
@@ -566,7 +566,7 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     else {
       m_nShortcutType = 0;
     }
-    return true;
+    break;  // and return true below
 
   case 0x0006:
     if (!m_params || m_nParameters < 7)
@@ -578,7 +578,7 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     else {
       m_nShortcutType = 0;
     }
-    return true;
+    break;  // and return true below
 
   case 0x0007:
     if (!m_params || m_nParameters < 6)
@@ -590,8 +590,7 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     else {
       m_nShortcutType = 0;
     }
-    return true;
-
+    break;  // and return true below
 
   default:
     return false;

@@ -850,6 +850,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
             case icSigXYZData:
             case icSigLabData:
               rv = CIccXformCreator::CreateXform(icXformType3DLut, pTag, pHintManager);
+              break;
 
             default:
               break;
@@ -870,6 +871,7 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
             case icSigXYZData:
             case icSigLabData:
               rv = CIccXformCreator::CreateXform(icXformType3DLut, pTag, pHintManager);
+              break;
 
             default:
               break;
@@ -7292,6 +7294,7 @@ CIccXform *CIccXformMpe::Create(CIccProfile *pProfile, bool bInput/* =true */, i
             case icSigXYZData:
             case icSigLabData:
               rv = new CIccXform3DLut(pTag);
+              break;
 
             default:
               break;
@@ -7328,6 +7331,7 @@ CIccXform *CIccXformMpe::Create(CIccProfile *pProfile, bool bInput/* =true */, i
             case icSigXYZData:
             case icSigLabData:
               rv = new CIccXform3DLut(pTag);
+              break;
 
             default:
               break;
@@ -7348,6 +7352,7 @@ CIccXform *CIccXformMpe::Create(CIccProfile *pProfile, bool bInput/* =true */, i
             case icSigXYZData:
             case icSigLabData:
               rv = new CIccXform3DLut(pTag);
+              break;
 
             default:
               break;
@@ -8119,6 +8124,7 @@ icStatusCMM CIccCmm::AddXform(CIccProfile *pProfile,
     case icSigMaterialLinkClass:
       nIntent = icPerceptual;
       nLutType = icXformLutMCS;
+      break;
 
     default:
       break;

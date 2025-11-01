@@ -1341,6 +1341,7 @@ bool CIccProfile::LoadTag(IccTagEntry *pTagEntry, CIccIO *pIO, bool bReadAll/*=f
     else if (pTag->GetType()==icSigNamedColor2Type) {
       ((CIccTagNamedColor2*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
     }
+    break;
 
   default:
     break;
@@ -2602,6 +2603,7 @@ icValidateStatus CIccProfile::CheckRequiredTags(std::string &sReport, const CIcc
                   sReport += "xCLR output profile is missing colorantTableTag\n";
                   rv = icMaxStatus(rv, icValidateNonCompliant);
                 }
+                break;
 
               default:
                 break;
@@ -2771,6 +2773,7 @@ icValidateStatus CIccProfile::CheckRequiredTags(std::string &sReport, const CIcc
                   sReport += "xCLR output profile is missing colorantTableTag\n";
                   rv = icMaxStatus(rv, icValidateNonCompliant);
                 }
+                break;
 
               default:
                 break;
