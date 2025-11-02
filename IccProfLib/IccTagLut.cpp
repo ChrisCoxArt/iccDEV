@@ -4836,9 +4836,8 @@ icValidateStatus CIccTagLut8::Validate(std::string sigPath, std::string &sReport
         nOutput = 1;
       }
 
-      icUInt8Number i;
       if (m_CurvesB) {
-        for (i=0; i<nInput; i++) {
+        for (icUInt32Number i=0; i<nInput; i++) {
           if (m_CurvesB[i]) {
             rv = icMaxStatus(rv, m_CurvesB[i]->Validate(sigPath+icGetSigPath(GetType()), sReport, pProfile));
             if (m_CurvesB[i]->GetType()==icSigCurveType) {
@@ -4865,7 +4864,7 @@ icValidateStatus CIccTagLut8::Validate(std::string sigPath, std::string &sReport
       }
       else {
         int sum=0;
-        for (int i=0; i<9; i++) {
+        for (icUInt32Number i=0; i<9; i++) {
           sum += m_XYZMatrix[i];
         }
         if (m_XYZMatrix[0]!=1.0 || m_XYZMatrix[4]!=1.0 || m_XYZMatrix[8]!=1.0 || sum!=3.0) {
@@ -4878,7 +4877,7 @@ icValidateStatus CIccTagLut8::Validate(std::string sigPath, std::string &sReport
 
       if (m_CurvesA) {
 
-        for (i=0; i<nOutput; i++) {
+        for (icUInt32Number i=0; i<nOutput; i++) {
           if (m_CurvesA[i]) {
             rv = icMaxStatus(rv, m_CurvesA[i]->Validate(sigPath+icGetSigPath(GetType()), sReport, pProfile));
             if (m_CurvesA[i]->GetType()==icSigCurveType) {
@@ -5261,9 +5260,8 @@ icValidateStatus CIccTagLut16::Validate(std::string sigPath, std::string &sRepor
         nOutput = 1;
       }
 
-      icUInt8Number i;
       if (m_CurvesB) {
-        for (i=0; i<nInput; i++) {
+        for (icUInt32Number i=0; i<nInput; i++) {
           if (m_CurvesB[i]) {
             rv = icMaxStatus(rv, m_CurvesB[i]->Validate(sigPath+icGetSigPath(GetType()), sReport, pProfile));
             if (m_CurvesB[i]->GetType()==icSigCurveType) {
@@ -5290,7 +5288,7 @@ icValidateStatus CIccTagLut16::Validate(std::string sigPath, std::string &sRepor
       }
       else {
         int sum=0;
-        for (int i=0; i<9; i++) {
+        for (icUInt32Number i=0; i<9; i++) {
           sum += m_XYZMatrix[i];
         }
         if (m_XYZMatrix[0]!=1.0 || m_XYZMatrix[4]!=1.0 || m_XYZMatrix[8]!=1.0 || sum!=3.0) {
@@ -5303,7 +5301,7 @@ icValidateStatus CIccTagLut16::Validate(std::string sigPath, std::string &sRepor
 
       if (m_CurvesA) {
 
-        for (i=0; i<nOutput; i++) {
+        for (icUInt32Number i=0; i<nOutput; i++) {
           if (m_CurvesA[i]) {
             rv = icMaxStatus(rv, m_CurvesA[i]->Validate(sigPath+icGetSigPath(GetType()), sReport, pProfile));
             if (m_CurvesA[i]->GetType()==icSigCurveType) {

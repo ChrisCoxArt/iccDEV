@@ -10238,18 +10238,18 @@ icStatusCMM CIccApplyNamedColorCmm::Apply(icFloatNumber *DstPixel, const icChar 
       pApply = i->ptr;
       pApplyXform = pApply->GetXform();
       if (pApplyXform->GetXformType()==icXformTypeNamedColor) {
-        CIccXformNamedColor *pXform = (CIccXformNamedColor*)pApplyXform;
-        switch(pXform->GetInterface()) {
+        CIccXformNamedColor *pXformLocal = (CIccXformNamedColor*)pApplyXform;
+        switch(pXformLocal->GetInterface()) {
         case icApplyPixel2Pixel:
-          pXform->Apply(pApply, pDst, pSrc);
+          pXformLocal->Apply(pApply, pDst, pSrc);
           break;
 
         case icApplyPixel2Named:
-          pXform->Apply(pApply, NamedColor, pSrc);
+          pXformLocal->Apply(pApply, NamedColor, pSrc);
           break;
 
         case icApplyNamed2Pixel:
-          rv = pXform->Apply(pApply, pDst, NamedColor);
+          rv = pXformLocal->Apply(pApply, pDst, NamedColor);
           if (rv) {
             return rv;
           }

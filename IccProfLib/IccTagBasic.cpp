@@ -7249,15 +7249,15 @@ bool CIccLocalizedUnicode::SetText(const icChar *szText,
         break;
       }
       else {
-        unsigned char ch = szText[i];
-        if (ch < 0x80 || ch > 0xBF) {
+        unsigned char ch2 = szText[i];
+        if (ch2 < 0x80 || ch2 > 0xBF) {
           //not a UTF-8 string so use question mark
           uni = '?';
           break;
         }
         else {
           uni <<= 6;
-          uni += ch & 0x3F;
+          uni += ch2 & 0x3F;
         }
       }
     }

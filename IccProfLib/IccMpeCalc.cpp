@@ -162,6 +162,9 @@ void IIccCalcDebugger::SetDebugger(IIccCalcDebugger *pDebugger)
     g_pDebugger = pDebugger;
 }
 
+// TODO - get rid of these macros and inline the code to reduce errors
+// shadowed variable names are way too risky
+// templates may be an option
 #define OsPopArg(X) { \
   if (!os.pStack->size()) \
     return false; \
@@ -170,40 +173,39 @@ void IIccCalcDebugger::SetDebugger(IIccCalcDebugger *pDebugger)
 }
 
 #define OsPopArgs(X, N) { \
-  icUInt32Number nv=(N); \
-  size_t ss = os.pStack->size(); \
-  if (nv>ss) \
+  icUInt32Number _nv=(N); \
+  size_t _ss = os.pStack->size(); \
+  if (_nv>_ss) \
     return false; \
-  icFloatNumber *sv = &(*os.pStack)[ss-nv]; \
-  memcpy((X), sv, nv*sizeof(icFloatNumber)); \
-  os.pStack->resize(ss-nv); \
+  icFloatNumber *_sv = &(*os.pStack)[_ss-_nv]; \
+  memcpy((X), _sv, _nv*sizeof(icFloatNumber)); \
+  os.pStack->resize(_ss-_nv); \
 }
 
-
 #define OsPushArg(X) { \
-  icFloatNumber V = (X); \
-  os.pStack->push_back(V); \
+  icFloatNumber _V = (X); \
+  os.pStack->push_back(_V); \
 }
 
 #define OsPushArgs(X, N) { \
-  size_t ss = os.pStack->size(); \
-  icUInt32Number nv=(N); \
-  os.pStack->resize(ss+nv); \
-  icFloatNumber *sv = &(*os.pStack)[ss]; \
-  memcpy(sv, (X), nv*sizeof(icFloatNumber)); \
+  size_t _ss = os.pStack->size(); \
+  icUInt32Number _nv=(N); \
+  os.pStack->resize(_ss+_nv); \
+  icFloatNumber *_sv = &(*os.pStack)[_ss]; \
+  memcpy(_sv, (X), _nv*sizeof(icFloatNumber)); \
 }
 
 #define OsShrinkArgs(N) { \
   icUInt32Number nv = (N); \
-  size_t ss = os.pStack->size(); \
-  if (nv>ss) \
+  size_t _ss = os.pStack->size(); \
+  if (nv>_ss) \
     return false; \
-  os.pStack->resize(ss-nv); \
+  os.pStack->resize(_ss-nv); \
 }
 
 #define OsExtendArgs(N) { \
-  size_t ss = os.pStack->size(); \
-  os.pStack->resize(ss+(N)); \
+  size_t _ss = os.pStack->size(); \
+  os.pStack->resize(_ss+(N)); \
 }
 
 
@@ -389,17 +391,17 @@ class CIccOpDefCopy : public IIccOpDef
 public:
   virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
   {
-    size_t ss = os.pStack->size();
+    size_t stackSize = os.pStack->size();
     int j;
     int n=op->data.select.v1+1;
     int t=op->data.select.v2+1;
-    if (n>(int)ss)
+    if (n>(int)stackSize)
       return false;
 
     if (n && t) {
       OsExtendArgs(n*t);
 
-      icFloatNumber *to = &(*os.pStack)[ss];
+      icFloatNumber *to = &(*os.pStack)[stackSize];
       icFloatNumber *from = to-n;
 
       for (j=0; j<t; j++) {
@@ -416,16 +418,16 @@ class CIccOpDefPositionDup : public IIccOpDef
 public:
   virtual bool Exec(SIccCalcOp *op, SIccOpState &os)
   {
-    size_t ss = os.pStack->size();
+    size_t stackSize = os.pStack->size();
     int j, n=op->data.select.v1+1;
     int t=op->data.select.v2+1;
-    if (n>(int)ss)
+    if (n>(int)stackSize)
       return false;
 
     if (n && t) {
       OsExtendArgs(t);
 
-      icFloatNumber *to = &(*os.pStack)[ss];
+      icFloatNumber *to = &(*os.pStack)[stackSize];
       icFloatNumber *from = to-n;
 
       for (j=0; j<t; j++) {
@@ -3912,18 +3914,19 @@ bool CIccCalculatorFunc::SequenceNeedTempReset(SIccCalcOp *op, icUInt32Number nO
 int CIccCalculatorFunc::CheckUnderflowOverflow(SIccCalcOp *op, icUInt32Number nOps, int nArgs, bool bCheckUnderflow, std::string &sReport) const
 {
   icUInt32Number i, p;
-  int n, nIfArgs, nElseArgs, nSelArgs, nCaseArgs;
+  int nIfArgs, nElseArgs, nSelArgs, nCaseArgs;
+
 
   for (i=0; i<nOps; i++) {
-    n = op[i].ArgsUsed(m_pCalc);
+    int nArgsUsed = op[i].ArgsUsed(m_pCalc);
 
 #if 0
     std::string opstr;
     op[i].Describe(opstr);
-    printf("%s : %d %d\n", opstr.c_str(), n, nArgs);
+    printf("%s : %d %d\n", opstr.c_str(), nArgsUsed, nArgs);
 #endif
 
-    if (n > nArgs) {
+    if (nArgsUsed > nArgs) {
       std::string opDesc;
       icUInt32Number j, l;
       icInt32Number f;
@@ -3945,7 +3948,7 @@ int CIccCalculatorFunc::CheckUnderflowOverflow(SIccCalcOp *op, icUInt32Number nO
       return -1;
     }
 
-    nArgs -= n;
+    nArgs -= nArgsUsed;
     nArgs += op[i].ArgsPushed(m_pCalc);
 
     if (nArgs>icMaxDataStackSize)
