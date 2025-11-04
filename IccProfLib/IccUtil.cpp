@@ -974,7 +974,7 @@ void icMemDump(std::string &sDump, void *pBuf, size_t nNum)
       buf[76] = ' ';
       buf[77] = '\n';
       buf[78] = '\0';
-      snprintf(num, numSize, "%08lX:", i);
+      snprintf(num, numSize, "%08zX:", i);
       strncpy(buf, num, 9);
     }
 
