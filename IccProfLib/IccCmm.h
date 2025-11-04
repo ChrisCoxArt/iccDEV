@@ -229,7 +229,7 @@ public:
 
 	icColorSpaceSignature csPcs;
 	icColorSpaceSignature csDevice;
-  icSpectralColorSignature csSpectralPcs;
+  icColorSpaceSignature csSpectralPcs;
   icSpectralRange spectralRange;
   icSpectralRange biSpectralRange;
 };
@@ -1361,7 +1361,7 @@ class ICCPROFLIB_API CIccXformNamedColor : public CIccXform
 {
 public:
   CIccXformNamedColor(CIccTag *pTag, icColorSpaceSignature csPcs, icColorSpaceSignature csDevice, 
-                      icSpectralColorSignature csSpectralPcs=icSigNoSpectralData,
+                      icColorSpaceSignature csSpectralPcs=icSigNoSpectralData,
                       const icSpectralRange *pSpectralRange = NULL,
                       const icSpectralRange *pBiSPectralRange = NULL);
   virtual ~CIccXformNamedColor();
