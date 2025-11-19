@@ -76,7 +76,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
-//#include <codecvt>
+#include <codecvt>
 #include <locale>
 #include "IccTagDict.h"
 #include "IccUtil.h"
@@ -215,7 +215,8 @@ static
 std::string wstringToUTF8Converter( std::wstring &input )
 {
 
-#if 1
+#if 0
+// turn this off until we get some way to test it
   size_t maxBufferSize = 6 * ( input.size() + 1 );  // assume worst case conversion to UTF8
   std::vector<char> outputBuffer ( maxBufferSize );
   UTF8 *output_data( (UTF8 *)outputBuffer.data() );
