@@ -582,7 +582,12 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 */
 bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
 {
-  xmlAttr *attr;
+  xmlAttr *attr = NULL;
+  
+  if (!pNode) {
+	  parseStr += "Invalid NULL Tag Node\n";
+	  return false;
+  }
   
   if (pNode->type != XML_ELEMENT_NODE) {// || icXmlStrCmp(pNode->name, "Tag")) {
 	  parseStr += "Invalid Tag Node: ";
@@ -664,15 +669,17 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
       // create a tag based on the signature
       pTag = CIccTag::Create(sigType);
 
-      IIccExtensionTag *pExt;
-      
+      IIccExtensionTag *pExt = NULL;
       const size_t strSize = 100;
       char str[strSize];
+    
+      if (pTag)
+        pExt = pTag->GetExtension();
 
-      if (pTag && (pExt = pTag->GetExtension()) && !strcmp(pExt->GetExtClassName(), "CIccTagXml")) {
+      if (pExt && !strcmp(pExt->GetExtClassName(), "CIccTagXml")) {
         CIccTagXml* pXmlTag = (CIccTagXml*)pExt;
 
-        if (pXmlTag->ParseXml(pTypeNode->children, parseStr)) {
+        if (pXmlTag && pXmlTag->ParseXml(pTypeNode->children, parseStr)) {
           if ((attr = icXmlFindAttr(pTypeNode, "reserved"))) {
             sscanf(icXmlAttrValue(attr), "%x", &pTag->m_nReserved);
           }
@@ -714,14 +721,17 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
     // create a tag based on the signature
     pTag = CIccTag::Create(sigType);
 
-    IIccExtensionTag *pExt;
+    IIccExtensionTag *pExt = NULL;
     const size_t strSize = 100;
     char str[strSize];
+    
+    if (pTag)
+      pExt = pTag->GetExtension();
 
-    if (pTag && (pExt = pTag->GetExtension()) && !strcmp(pExt->GetExtClassName(), "CIccTagXml")) {
+    if (pExt && !strcmp(pExt->GetExtClassName(), "CIccTagXml")) {
       CIccTagXml* pXmlTag = (CIccTagXml*)pExt;
 
-      if (pXmlTag->ParseXml(pNode->children, parseStr)) {
+      if (pXmlTag && pXmlTag->ParseXml(pNode->children, parseStr)) {
         if ((attr = icXmlFindAttr(pNode, "reserved"))) {
           sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
         }
@@ -759,7 +769,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
   case icSigAToB1Tag:
   case icSigAToB2Tag:
   case icSigAToB3Tag:
-    if (pTag->IsMBBType())
+    if (pTag && pTag->IsMBBType())
       ((CIccMBB*)pTag)->SetColorSpaces(m_Header.colorSpace, m_Header.pcs);
     break;
 
@@ -767,7 +777,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
   case icSigBToA1Tag:
   case icSigBToA2Tag:
   case icSigBToA3Tag:
-    if (pTag->IsMBBType())
+    if (pTag && pTag->IsMBBType())
       ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
     break;
 
@@ -775,21 +785,21 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
   case icSigHToS1Tag:
   case icSigHToS2Tag:
   case icSigHToS3Tag:
-    if (pTag->IsMBBType())
+    if (pTag && pTag->IsMBBType())
       ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.pcs);
     break;
 
   case icSigGamutTag:
-    if (pTag->IsMBBType())
+    if (pTag && pTag->IsMBBType())
       ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, icSigGamutData);
     break;
 
   case icSigNamedColor2Tag:
     {
-      if (pTag->GetType()==icSigNamedColor2Type) {
+      if (pTag && pTag->GetType()==icSigNamedColor2Type) {
         ((CIccTagNamedColor2*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
       }
-      else if (pTag->GetTagArrayType()==icSigNamedColorArray) {
+      else if (pTag && pTag->GetTagArrayType()==icSigNamedColorArray) {
         CIccArrayNamedColor *pAry = (CIccArrayNamedColor*)icGetTagArrayHandler(pTag);
 
         if (pAry) {
