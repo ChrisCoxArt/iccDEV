@@ -738,8 +738,10 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
 
         for (xmlNode *tagSigNode = pNode->children; tagSigNode; tagSigNode = tagSigNode->next) {
           if (tagSigNode->type == XML_ELEMENT_NODE && !icXmlStrCmp(tagSigNode->name, "TagSignature")) {
-            sigTag = (icTagSignature)icGetSigVal((const icChar*)tagSigNode->children->content);
-            AttachTag(sigTag, pTag);
+            if ((const icChar*)tagSigNode->children != NULL) {
+              sigTag = (icTagSignature)icGetSigVal((const icChar*)tagSigNode->children->content);
+              AttachTag(sigTag, pTag);
+            }
           }
         }
       }
