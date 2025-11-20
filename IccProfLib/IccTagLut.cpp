@@ -142,11 +142,12 @@ icFloatNumber CIccCurve::Find(icFloatNumber v,
 */
 CIccTagCurve::CIccTagCurve(int nSize/*=0*/)
 {
-    m_nSize = nSize <0 ? 0 : nSize;
-  if (m_nSize>0)
+  m_nSize = (nSize < 0) ? 0 : nSize;
+  m_nMaxIndex = 0;
+  m_Curve = NULL;
+  
+  if (m_nSize > 0)
     m_Curve = (icFloatNumber*)calloc(nSize, sizeof(icFloatNumber));
-  else
-    m_Curve = NULL;
 }
 
 
@@ -164,9 +165,12 @@ CIccTagCurve::CIccTagCurve(const CIccTagCurve &ITCurve)
 {
   m_nSize = ITCurve.m_nSize;
   m_nMaxIndex = ITCurve.m_nMaxIndex;
-
-  m_Curve = (icFloatNumber*)calloc(m_nSize, sizeof(icFloatNumber));
-  memcpy(m_Curve, ITCurve.m_Curve, m_nSize*sizeof(icFloatNumber));
+  m_Curve = NULL;
+  
+  if (m_nSize > 0) {
+    m_Curve = (icFloatNumber*)calloc(m_nSize, sizeof(icFloatNumber));
+    memcpy(m_Curve, ITCurve.m_Curve, m_nSize*sizeof(icFloatNumber));
+  }
 }
 
 
@@ -190,8 +194,12 @@ CIccTagCurve &CIccTagCurve::operator=(const CIccTagCurve &CurveTag)
 
   if (m_Curve)
     free(m_Curve);
-  m_Curve = (icFloatNumber*)calloc(m_nSize, sizeof(icFloatNumber));
-  memcpy(m_Curve, CurveTag.m_Curve, m_nSize*sizeof(icFloatNumber));
+  m_Curve = NULL;
+  
+  if (m_nSize > 0) {
+    m_Curve = (icFloatNumber*)calloc(m_nSize, sizeof(icFloatNumber));
+    memcpy(m_Curve, CurveTag.m_Curve, m_nSize*sizeof(icFloatNumber));
+  }
 
   return *this;
 }
@@ -696,8 +704,8 @@ CIccTagParametricCurve &CIccTagParametricCurve::operator=(const CIccTagParametri
 
   if (m_dParam)
     delete [] m_dParam;
-	m_dParam = new icFloatNumber[m_nNumParam];
-	memcpy(m_dParam, ParamCurveTag.m_dParam, m_nNumParam*sizeof(icFloatNumber));
+  m_dParam = new icFloatNumber[m_nNumParam];
+  memcpy(m_dParam, ParamCurveTag.m_dParam, m_nNumParam*sizeof(icFloatNumber));
 
   return *this;
 }
@@ -2523,9 +2531,6 @@ void CIccCLUT::Interp2d(icFloatNumber *destPixel, const icFloatNumber *srcPixel)
   const icFloatNumber dF2 =  t * nu;
   const icFloatNumber dF3 =  t *  u;
 
-// this is crashing, could be bad p (wrong channel count?), could be bad tetrahedral offsets (which is my best guess)
-// need a reproducible case to find the exact cause
-// ../Testing/sRGB_v4_ICC_preference.icc
   for (int i=0; i<m_nOutput; i++) {
     icFloatNumber pv = p[n000 + i]*dF0 + p[n001 + i]*dF1 + p[n010 + i]*dF2 + p[n011 + i]*dF3;
     destPixel[i] = pv;
