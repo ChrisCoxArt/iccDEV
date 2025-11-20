@@ -76,7 +76,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
-#include <codecvt>
+//#include <codecvt>
 #include <locale>
 #include "IccTagDict.h"
 #include "IccUtil.h"
@@ -215,8 +215,7 @@ static
 std::string wstringToUTF8Converter( std::wstring &input )
 {
 
-#if 0
-// turn this off until we get some way to test it
+#if 1
   size_t maxBufferSize = 6 * ( input.size() + 1 );  // assume worst case conversion to UTF8
   std::vector<char> outputBuffer ( maxBufferSize );
   UTF8 *output_data( (UTF8 *)outputBuffer.data() );
@@ -236,8 +235,6 @@ std::string wstringToUTF8Converter( std::wstring &input )
   }
 
 // output_start has been moved to point to the end of the output, and should have a terminating NULL
-// TODO - ccox - really should test the output string
-// but I can't find a profile that exercises this code path!
 
   return std::string ( (char *)output_data );     // this makes a copy of the output string data
 #else
