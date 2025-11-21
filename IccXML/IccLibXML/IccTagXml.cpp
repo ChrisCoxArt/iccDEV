@@ -3228,8 +3228,10 @@ bool icMBBToXml(std::string &xml, CIccMBB *pMBB, icConvertType nType, std::strin
     }
 
     if (pMBB->GetCurvesM()) {
-      // added if-statement 
-      if (!icCurvesToXml(xml, "MCurves", pMBB->GetCurvesM(), 3, nType, blanks)){
+      // added if-statement
+      // The number of curves depends on this being used for input or output
+      icUInt8Number nCurves = pMBB->IsInputMatrix() ? pMBB->InputChannels() : pMBB->OutputChannels();
+      if (!icCurvesToXml(xml, "MCurves", pMBB->GetCurvesM(), nCurves, nType, blanks)){
         return false;
       }
     }
