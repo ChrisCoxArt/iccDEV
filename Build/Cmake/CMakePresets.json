@@ -23,7 +23,7 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/vs2022-x64",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "$penv{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_MANIFEST_DIR": "${sourceDir}"
       }
     },
@@ -55,6 +55,56 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-gcc-asan",
+      "inherits": "linux-gcc",
+      "displayName": "Linux GCC with AddressSanitizer",
+      "binaryDir": "${sourceDir}/build/linux-gcc-asan",
+      "cacheVariables": {
+        "ENABLE_SANITIZERS": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-clang-asan",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with AddressSanitizer",
+      "binaryDir": "${sourceDir}/build/linux-clang-asan",
+      "cacheVariables": {
+        "ENABLE_SANITIZERS": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-clang-tsan",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with ThreadSanitizer",
+      "binaryDir": "${sourceDir}/build/linux-clang-tsan",
+      "cacheVariables": {
+        "ENABLE_TSAN": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-clang-msan",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with MemorySanitizer",
+      "binaryDir": "${sourceDir}/build/linux-clang-msan",
+      "cacheVariables": {
+        "ENABLE_MSAN": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-clang-ubsan",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with UBSanitizer",
+      "binaryDir": "${sourceDir}/build/linux-clang-ubsan",
+      "cacheVariables": {
+        "ENABLE_UBSAN": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     },
     {

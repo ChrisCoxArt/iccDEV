@@ -69,7 +69,7 @@
 //////////////////////////////////////////////////////////////////////
 
 
-#include <stdio.h>
+#include <cstdio>
 #include <string>
 #include "IccProfile.h"
 #include "IccTagBasic.h"
@@ -336,7 +336,7 @@ int main(int argc, char* argv[])
     printf("Usage: iccFromCube cube_file output_icc_file\n");
     printf("Built with IccProfLib version " ICCPROFLIBVER "\n");
 
-    return -1;
+    return 0;
   }
 
   CubeFile cube(argv[1]);

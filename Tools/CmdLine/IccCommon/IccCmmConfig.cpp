@@ -66,9 +66,9 @@
 
 
 #include "IccCmmConfig.h"
-#include <stdio.h>
+#include <cstdio>
 #include <fstream>
-#include <string.h>
+#include <cstring>
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -851,8 +851,7 @@ int CIccCfgPccWeight::fromArgs(const char** args, int nArg, bool /*bReset*/)
     m_pccPath = args[0];
     m_dWeight = (icFloatNumber)atof(args[1]);
 
-    args += 2;
-    nArg -= 2;
+//    args += 2;    // static analysis says value unread
     nUsed += 2;
   }
 
@@ -1101,7 +1100,7 @@ bool CIccCfgSearchApply::fromJsonInit(json j)
 
   m_bInitialized = true;
 
-  int intent;
+  int intent = icUnknownIntent; // just incase json parsing fails
   icGetJsonRenderingIntent(j["intent"], intent);
   m_intentInitial = (icRenderingIntent)intent;
 
@@ -1532,7 +1531,7 @@ bool CIccCfgColorData::fromIt8(const char* filename, bool bReset)
       }
       else {
       int nColor = -1;
-      if (sscanf(szFmt, "%uCOLOR_", &nColor) && nColor >= 1) {
+      if ( (sscanf(szFmt, "%uCOLOR_", &nColor) == 1) && nColor >= 1) {  // sscanf can also return EOF(-1)
         const size_t bufSize = 30;
         char buf[bufSize];
         snprintf(buf, bufSize, "%uCOLOR", nColor);
@@ -1730,6 +1729,7 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
   FILE* f;
   const size_t tempSize = 256;
   char tempBuf[tempSize];
+  char tempBuf2[tempSize];
   const size_t fmtSize = 20;
   char fmt[fmtSize];
   if (!nDigits)
@@ -1746,7 +1746,7 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
     return false;
 
   std::string out;
-  snprintf(tempBuf, tempSize, "%s\t; ", icGetColorSig(tempBuf, m_space, false));
+  snprintf(tempBuf, tempSize, "%s\t; ", icGetColorSig(tempBuf2, tempSize, m_space, false));
   out = tempBuf;
   out += "Data Format\n";
   fwrite(out.c_str(), out.size(), 1, f);
@@ -1757,7 +1757,7 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
   fwrite(out.c_str(), out.size(), 1, f);
 
   out = ";Source Data Format: ";
-  snprintf(tempBuf, tempSize, "%s\n", icGetColorSig(tempBuf, m_srcSpace, false));
+  snprintf(tempBuf, tempSize, "%s\n", icGetColorSig(tempBuf2, tempSize, m_srcSpace, false));
   out += tempBuf;
   fwrite(out.c_str(), out.size(), 1, f);
 

@@ -74,10 +74,10 @@
   #pragma warning( disable: 4786) //disable warning in <list.h>
   #include <windows.h>
 #endif
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include "IccTag.h"
 #include "IccUtil.h"
 #include "IccProfile.h"
@@ -1619,6 +1619,9 @@ icValidateStatus CIccMatrix::Validate(std::string sigPath, std::string &sReport,
   
 static icFloatNumber ClutUnitClip(icFloatNumber v)
 {
+	// Check for NaN first - NaN comparisons always return false
+  if (std::isnan(v))
+    return 0;
   if (v<0)
     return 0;
   else if (v>1.0)
@@ -1707,6 +1710,12 @@ CIccCLUT::CIccCLUT(icUInt8Number nInputChannels, icUInt16Number nOutputChannels,
   m_nPrecision = nPrecision;
   m_pData = NULL;
   m_nOffset = NULL;
+  m_pOutText = NULL;
+  m_pVal = NULL;
+  m_nNumPoints = 0;
+  m_nNodes = 0;
+  m_csInput = icSigUnknownData;
+  m_csOutput = icSigUnknownData;
   memset(&m_nReserved2, 0 , sizeof(m_nReserved2));
 
   UnitClip = ClutUnitClip;
@@ -1842,6 +1851,14 @@ bool CIccCLUT::Init(const icUInt8Number *pGridPoints, icUInt32Number nMaxSize, i
 {
   if (nMaxSize && !nBytesPerPoint)
     return false;
+  
+  // must have at least 1 input and 1 output
+  if (m_nInput < 1 || m_nOutput < 1)
+    return false;
+
+  // and the current limit is for 15 channels
+  if (m_nInput > 15 || m_nOutput > 15)
+    return false;
 
   icUInt64Number nNumPoints;
   memset(m_nReserved2, 0, sizeof(m_nReserved2));
@@ -1865,7 +1882,7 @@ bool CIccCLUT::Init(const icUInt8Number *pGridPoints, icUInt32Number nMaxSize, i
     m_pData = NULL;
   }
 
-  int i=m_nInput-1;
+  int i = m_nInput-1;
 
   // m_DimSize[] is a fixed size of 16
   if (i >= 16)
@@ -2502,8 +2519,14 @@ void CIccCLUT::Interp2d(icFloatNumber *destPixel, const icFloatNumber *srcPixel)
   icUInt8Number mx = m_MaxGridPoint[0];
   icUInt8Number my = m_MaxGridPoint[1];
 
+  // The UnitClip function pointer is calling "NoClip", but now removes NaN and Inf
   icFloatNumber x = UnitClip(srcPixel[0]) * mx;
   icFloatNumber y = UnitClip(srcPixel[1]) * my;
+  
+  if (x < 0.0)
+    x = 0.0;
+  if (y < 0.0)
+    y = 0.0;
 
   icUInt32Number ix = (icUInt32Number)x;
   icUInt32Number iy = (icUInt32Number)y;
@@ -2522,8 +2545,16 @@ void CIccCLUT::Interp2d(icFloatNumber *destPixel, const icFloatNumber *srcPixel)
 
   const icFloatNumber nt = 1.0f - t;
   const icFloatNumber nu = 1.0f - u;
+  
+  int offset = ix*n001 + iy*n010;
 
-  const icFloatNumber *p = &m_pData[ ix*n001 + iy*n010 ];
+  // clip offset to valid data address, in case of bad inputs
+  int maxDataSize = NumPoints()*m_nOutput;
+  int maxDataOffset = maxDataSize - (m_nOutput + n011);
+  if (offset > maxDataOffset)
+    offset = maxDataOffset;
+
+  const icFloatNumber *p = &m_pData[ offset ];
 
   // Normalize grid units
   const icFloatNumber dF0 = nt * nu;
@@ -3646,7 +3677,7 @@ icValidateStatus CIccMBB::Validate(std::string sigPath, std::string &sReport, co
   }
   case icSigGamutTag:
     {
-      nInput = 1;
+      nInput = icGetSpaceSamples(pProfile->m_Header.pcs);
       if (m_nInput!=nInput) {
         sReport += icMsgValidateCriticalError;
         sReport += sSigPathName;
@@ -3654,7 +3685,7 @@ icValidateStatus CIccMBB::Validate(std::string sigPath, std::string &sReport, co
         rv = icMaxStatus(rv, icValidateCriticalError);
       }
 
-      nOutput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+      nOutput = 1;
       if (m_nOutput!=nOutput) {
         sReport += icMsgValidateCriticalError;
         sReport += sSigPathName;
@@ -3954,6 +3985,14 @@ bool CIccTagLutAtoB::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   if (sig!=GetType())
+    return false;
+
+  // must have at least 1 input and 1 output
+  if (m_nInput < 1 || m_nOutput < 1)
+    return false;
+
+  // and the current limit is for 15 channels
+  if (m_nInput > 15 || m_nOutput > 15)
     return false;
 
   //B Curves
@@ -4394,21 +4433,17 @@ icValidateStatus CIccTagLutBtoA::Validate(std::string sigPath, std::string &sRep
   case icSigBToA2Tag:
   case icSigGamutTag:
     {
-      icUInt32Number nInput = icGetSpaceSamples(pProfile->m_Header.pcs);
+//      icUInt32Number nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+//      icUInt32Number nOutput = icGetSpaceSamples(pProfile->m_Header.pcs);
+// m_nInput should match nInput, and m_nOutput should match nOutput
+// That is validated in CIccMBB::Validate
+// Here we don't want to crash while validating the curves, even if the count of them is incorrect, so we use the same counts obtained from reading the LUT.
 
-      icUInt32Number nOutput;
+      icUInt32Number nInput = m_nInput;
+      icUInt32Number nOutput = m_nOutput;
+
       if (sig==icSigGamutTag) {
         nOutput = 1;
-      }
-      else {
-        nOutput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
-      }
-
-      if (m_nOutput!=nOutput) {
-        sReport += icMsgValidateCriticalError;
-        sReport += sSigPathName;
-        sReport += " - Incorrect number of output channels.\n";
-        rv = icMaxStatus(rv, icValidateCriticalError);
       }
 
       icUInt8Number i;
@@ -4583,6 +4618,14 @@ bool CIccTagLut8::Read(icUInt32Number size, CIccIO *pIO)
   if (sig!=GetType())
     return false;
 
+  // must have at least 1 input and 1 output
+  if (m_nInput < 1 || m_nOutput < 1)
+    return false;
+
+  // and the current limit is for 15 channels
+  if (m_nInput > 15 || m_nOutput > 15)
+    return false;
+
   //B Curves
   pCurves = NewCurvesB();
 
@@ -4699,8 +4742,6 @@ bool CIccTagLut8::Write(CIccIO *pIO)
   icTagTypeSignature sig = GetType();
   icUInt8Number i, nGrid;
   icS15Fixed16Number XYZMatrix[9];
-  //icUInt16Number nInputEntries;
-  //icUInt16Number nOutputEntries;
   LPIccCurve *pCurves;
   CIccTagCurve *pCurve;
   icFloat32Number v;
@@ -4726,8 +4767,7 @@ bool CIccTagLut8::Write(CIccIO *pIO)
 
   nGrid = m_CLUT->GridPoints();
 
-  //nInputEntries = (icUInt16Number)(((CIccTagCurve*)pCurves[0])->GetSize());
-  //nOutputEntries = (icUInt16Number)(((CIccTagCurve*)m_CurvesA[0])->GetSize());
+  // NOTE - input and output table sizes are always 256 for 8 bit tables
 
   if (!pIO->Write32(&sig) ||
       !pIO->Write32(&m_nReserved) ||
@@ -4831,15 +4871,14 @@ icValidateStatus CIccTagLut8::Validate(std::string sigPath, std::string &sReport
   case icSigBToA2Tag:
   case icSigGamutTag:
     {
-      icUInt32Number nInput, nOutput;
-      if (sig==icSigAToB0Tag || sig==icSigAToB1Tag || sig==icSigAToB2Tag || sig==icSigGamutTag) {
-        nInput = icGetSpaceSamples(pProfile->m_Header.pcs);
-        nOutput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
-      }
-      else {
-        nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
-        nOutput = icGetSpaceSamples(pProfile->m_Header.pcs);
-      }
+//      icUInt32Number nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+//      icUInt32Number nOutput = icGetSpaceSamples(pProfile->m_Header.pcs);
+// m_nInput should match nInput, and m_nOutput should match nOutput
+// That is validated in CIccMBB::Validate
+// Here we don't want to crash while validating the curves, even if the count of them is incorrect, so we use the same counts obtained from reading the LUT.
+
+      icUInt32Number nInput = m_nInput;
+      icUInt32Number nOutput = m_nOutput;
 
       if (sig==icSigGamutTag) {
         nOutput = 1;
@@ -4872,11 +4911,12 @@ icValidateStatus CIccTagLut8::Validate(std::string sigPath, std::string &sReport
         rv = icMaxStatus(rv, m_Matrix->Validate(sigPath + icGetSigPath(GetType()), sReport, pProfile));
       }
       else {
-        int sum=0;
+        const int s15dot16Unity = 65536;
+        int sum = 0;
         for (icUInt32Number i=0; i<9; i++) {
           sum += m_XYZMatrix[i];
         }
-        if (m_XYZMatrix[0]!=1.0 || m_XYZMatrix[4]!=1.0 || m_XYZMatrix[8]!=1.0 || sum!=3.0) {
+        if (m_XYZMatrix[0]!=s15dot16Unity || m_XYZMatrix[4]!=s15dot16Unity || m_XYZMatrix[8]!=s15dot16Unity || sum!=3*s15dot16Unity) {
           sReport += icMsgValidateWarning;
           sReport += sSigPathName;
           sReport += " - Matrix must be identity.\n";
@@ -5032,6 +5072,13 @@ bool CIccTagLut16::Read(icUInt32Number size, CIccIO *pIO)
   if (sig!=GetType())
     return false;
 
+  // must have at least 1 input and 1 output
+  if (m_nInput < 1 || m_nOutput < 1)
+    return false;
+
+  // and the current limit is for 15 channels
+  if (m_nInput > 15 || m_nOutput > 15)
+    return false;
 
   //B Curves
   pCurves = NewCurvesB();
@@ -5193,6 +5240,10 @@ bool CIccTagLut16::Write(CIccIO *pIO)
     pCurve = (CIccTagCurve*)pCurves[i];
     if (!pCurve)
       return false;
+    
+    // validate that the sizes match between all curves
+    if (pCurve->GetSize() != nInputEntries)
+        return false;
 
     if (pIO->WriteUInt16Float(&(*pCurve)[0], nInputEntries) != nInputEntries)
       return false;
@@ -5210,6 +5261,10 @@ bool CIccTagLut16::Write(CIccIO *pIO)
       return false;
 
     pCurve = (CIccTagCurve*)pCurves[i];
+    
+    // validate that the sizes match between all curves
+    if (pCurve->GetSize() != nOutputEntries)
+        return false;
 
     if (pIO->WriteUInt16Float(&(*pCurve)[0], nOutputEntries) != nOutputEntries)
       return false;
@@ -5254,15 +5309,14 @@ icValidateStatus CIccTagLut16::Validate(std::string sigPath, std::string &sRepor
   case icSigBToA2Tag:
   case icSigGamutTag:
     {
-      icUInt32Number nInput, nOutput;
-      if (sig==icSigAToB0Tag || sig==icSigAToB1Tag || sig==icSigAToB2Tag || sig==icSigGamutTag) {
-        nInput = icGetSpaceSamples(pProfile->m_Header.pcs);
-        nOutput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
-      }
-      else {
-        nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
-        nOutput = icGetSpaceSamples(pProfile->m_Header.pcs);
-      }
+//      icUInt32Number nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+//      icUInt32Number nOutput = icGetSpaceSamples(pProfile->m_Header.pcs);
+// m_nInput should match nInput, and m_nOutput should match nOutput
+// That is validated in CIccMBB::Validate
+// Here we don't want to crash while validating the curves, even if the count of them is incorrect, so we use the same counts obtained from reading the LUT.
+
+      icUInt32Number nInput = m_nInput;
+      icUInt32Number nOutput = m_nOutput;
 
       if (sig==icSigGamutTag) {
         nOutput = 1;
@@ -5295,11 +5349,12 @@ icValidateStatus CIccTagLut16::Validate(std::string sigPath, std::string &sRepor
         rv = icMaxStatus(rv, m_Matrix->Validate(sigPath + icGetSigPath(GetType()), sReport, pProfile));
       }
       else {
-        int sum=0;
+        const int s15dot16Unity = 65536;
+        int sum = 0;
         for (icUInt32Number i=0; i<9; i++) {
           sum += m_XYZMatrix[i];
         }
-        if (m_XYZMatrix[0]!=1.0 || m_XYZMatrix[4]!=1.0 || m_XYZMatrix[8]!=1.0 || sum!=3.0) {
+        if (m_XYZMatrix[0]!=s15dot16Unity || m_XYZMatrix[4]!=s15dot16Unity || m_XYZMatrix[8]!=s15dot16Unity || sum!=3*s15dot16Unity) {
           sReport += icMsgValidateWarning;
           sReport += sSigPathName;
           sReport += " - Matrix must be identity.\n";
@@ -5531,11 +5586,22 @@ bool CIccTagGamutBoundaryDesc::Read(icUInt32Number size, CIccIO *pIO)
 	if (!pIO->Read16(&m_nPCSChannels) ||
 		!pIO->Read16(&m_nDeviceChannels))
 		return false;
+    
+    if (m_nPCSChannels > 3)
+        return false;
+    
+    if (m_nDeviceChannels > 15)
+        return false;
 	
 	if (!pIO->Read32(&m_NumberOfVertices) ||
 		!pIO->Read32(&m_NumberOfTriangles))
-		return false;	
-
+		return false;
+  
+  // minimum number to make a solid shape
+  if (m_NumberOfVertices < 4 || m_NumberOfTriangles < 4)
+    return false;
+  
+  // maximum count will be enforced by file size and tag size limitations
   if (sizeof(icTagTypeSignature) + 
       sizeof(icUInt32Number)*3 +
       sizeof(icUInt16Number)*2 + 

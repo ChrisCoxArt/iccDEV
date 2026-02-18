@@ -84,6 +84,7 @@
 #include "IccSparseMatrix.h"
 #include "IccEncoding.h"
 #include "IccMatrixMath.h"
+#include <cassert>
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -819,16 +820,17 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
         pNamedColorHint->csSpectralPcs = pProfile->m_Header.spectralPCS;
         pNamedColorHint->spectralRange = pProfile->m_Header.spectralRange;
         pNamedColorHint->biSpectralRange = pProfile->m_Header.biSpectralRange;
-				if (pHintManager) {
-					pHintManager->AddHint(pNamedColorHint);
-					rv = CIccXformCreator::CreateXform(icXformTypeNamedColor, pTag, pHintManager);
-					pHintManager->DeleteHint(pNamedColorHint);
-				}
-				else {
-					CIccCreateXformHintManager HintManager;
-					HintManager.AddHint(pNamedColorHint);
-					rv = CIccXformCreator::CreateXform(icXformTypeNamedColor, pTag, &HintManager);
-				}
+        
+        if (pHintManager) {
+          pHintManager->AddHint(pNamedColorHint);
+          rv = CIccXformCreator::CreateXform(icXformTypeNamedColor, pTag, pHintManager);
+//	      pHintManager->DeleteHint(pNamedColorHint);    // hint manager takes ownership, we should not delete
+        }
+        else {
+          CIccCreateXformHintManager HintManager;
+          HintManager.AddHint(pNamedColorHint);
+          rv = CIccXformCreator::CreateXform(icXformTypeNamedColor, pTag, &HintManager);
+        }
 
         if (pProfile->m_Header.spectralPCS)
           bUseSpectralPCS = true;
@@ -5785,6 +5787,11 @@ void CIccXform3DLut::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel, cons
   Pixel[0] = SrcPixel[0];
   Pixel[1] = SrcPixel[1];
   Pixel[2] = SrcPixel[2];
+  
+  // make sure all output pixel values are initialized, just in case
+  for (i = 3; i < m_pTag->m_nOutput; ++i) {
+     Pixel[i] = 0.0;
+  }
 
   if (m_pTag->m_bInputMatrix) {
     if (m_ApplyCurvePtrB) {
@@ -6514,17 +6521,20 @@ void CIccXformNDLut::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel, cons
   if (m_bSrcPcsConversion)
     SrcPixel = CheckSrcAbs(pApply, SrcPixel);
 
-  for (i=0; i<m_nNumInput; i++)
+  // Prevent array bounds overflow - Pixel has 16 elements
+  int nInput = (m_nNumInput > 16) ? 16 : m_nNumInput;
+
+  for (i=0; i<nInput; i++)
     Pixel[i] = SrcPixel[i];
 
   if (m_pTag->m_bInputMatrix) {
     if (m_ApplyCurvePtrB) {
-      for (i=0; i<m_nNumInput; i++)
+      for (i=0; i<nInput; i++)
         Pixel[i] = m_ApplyCurvePtrB[i]->Apply(Pixel[i]);
     }
 
     if (m_pTag->m_CLUT) {
-      switch(m_nNumInput) {
+      switch(nInput) {
       case 5:
         m_pTag->m_CLUT->Interp5d(Pixel, Pixel);
         break;
@@ -6549,7 +6559,7 @@ void CIccXformNDLut::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel, cons
   }
   else {
     if (m_ApplyCurvePtrA) {
-      for (i=0; i<m_nNumInput; i++)
+      for (i=0; i<nInput; i++)
         Pixel[i] = m_ApplyCurvePtrA[i]->Apply(Pixel[i]);
     }
 
@@ -6588,7 +6598,8 @@ void CIccXformNDLut::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel, cons
     }
   }
 
-  for (i=0; i<m_pTag->m_nOutput; i++) {
+  int nOutput = (m_pTag->m_nOutput > 16) ? 16 : m_pTag->m_nOutput;
+  for (i=0; i<nOutput; i++) {
     DstPixel[i] = Pixel[i];
   }
 
@@ -7501,6 +7512,15 @@ icStatusCMM CIccXformMpe::Begin()
   if (!m_pTag) {
     return icCmmStatInvalidLut;
   }
+  
+  // make sure the input and output samples match, or we could cause an access violation
+  icUInt16Number inputSamples = GetNumSrcSamples();
+  icUInt16Number outputSamples = GetNumDstSamples();
+  icUInt16Number xformInputSamples = m_pTag->NumInputChannels();
+  icUInt16Number xformOutputSamples = m_pTag->NumOutputChannels();
+  
+  if (inputSamples != xformInputSamples || outputSamples != xformOutputSamples)
+    return icCmmStatBadXform;
 
   if (!m_pTag->Begin(icElemInterpLinear, GetProfileCC(), GetConnectionConditions(), GetCmmEnvVarLookup())) {
     return icCmmStatInvalidProfile;
@@ -7638,6 +7658,8 @@ CIccApplyXformMpe::CIccApplyXformMpe(CIccXformMpe *pXform) : CIccApplyXform(pXfo
 */
 CIccApplyXformMpe::~CIccApplyXformMpe()
 {
+  if (m_pApply)
+    delete m_pApply;
 }
 
 
@@ -10729,6 +10751,9 @@ icStatusCMM CIccNamedColorCmm::AddXform(CIccProfile *pProfile,
       nIntent = icPerceptual;
   }
 
+  // this must be done before CIccXform::Create frees the profile pointer
+  bool bLinked = (pProfile->m_Header.deviceClass == icSigLinkClass);
+
   if (!Xform.ptr)
     Xform.ptr = CIccXform::Create(pProfile, bInput, nIntent, nInterp, pPcc, nUseLutType, bUseD2BxB2DxTags, pHintManager);
 
@@ -10739,7 +10764,7 @@ icStatusCMM CIccNamedColorCmm::AddXform(CIccProfile *pProfile,
   m_nLastSpace = Xform.ptr->GetDstSpace();
   m_nLastIntent = nIntent;
 
-  if (pProfile->m_Header.deviceClass == icSigLinkClass)
+  if (bLinked)
     bInput = false;
   m_bLastInput = bInput;
   
@@ -11175,6 +11200,10 @@ bool CIccMruCache<T>::Apply(T *DstPixel, const T *SrcPixel)
   else {  //Reuse oldest value and put it at the front of the list
     if (prev)
       prev->pNext = NULL;
+
+    // Static analysis gets a false positive here, because it doesn't understand the relation between count and pointers in the list
+    // assert avoids the static analysis warning, and should never fire
+    assert( m_pFirst != NULL );
     last->pNext = m_pFirst;
 
     m_pFirst = last;

@@ -69,7 +69,7 @@
 //////////////////////////////////////////////////////////////////////
 
 
-#include <stdio.h>
+#include <cstdio>
 #include <string>
 #include "IccCmm.h"
 #include "IccUtil.h"
@@ -643,7 +643,7 @@ int main(int argc, icChar* argv[])
   int minargs = 10; // minimum number of arguments
   if(argc<minargs) {
     Usage();
-    return -1;
+    return 0;
   }
 
   int nNumProfiles, temp;

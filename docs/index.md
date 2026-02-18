@@ -48,7 +48,7 @@ Within the project are several libraries and tools as follows:
     testing various features of iccMAX.
 
   * IccApplyProfiles is a cross platform command line tool that allows a sequence of
-    ICC profiles mat and/or iccMAX profiles to a source TIFF image resulting in a
+    ICC profiles and/or iccMAX profiles to a source TIFF image resulting in a
     destination TIFF image. The final destination profile can optionally be embedded
     in the resulting TIFF image.
 
@@ -56,8 +56,10 @@ Within the project are several libraries and tools as follows:
     from a ICC profile and/or a iccMAX profile to be output to the console. Data
     with non-printable values are replaced with '?'. Output from this tool is
     not guaranteed to be ASCII or UTF-8, but line-endings are consistent for a
-    given platform.
-
+    given platform. This tool is particularly useful for developers, color scientists,
+    and QA engineers who need to ensure ICC profiles conform to standards and contain
+    expected metadata.
+    
     Detailed validation messages start with either "Warning!", "Error!" or "NonCompliant!".
     The overall status of validation is reported 2 lines below the line starting
     "Validation Report" and can be located using the following simple `grep`:
@@ -68,7 +70,7 @@ Within the project are several libraries and tools as follows:
 
   * IccRoundTrip is a cross platform command line tool that allows round trip
     colorimetric processing characteristics of rendering intent of a profile to be
-    evaluated. (Evaluation goes from device values to PCS to establish initial PCS
+    evaluated. Evaluation goes from device values to PCS to establish initial PCS
     values. These are then converted to device values and then PCS values for the
     first round trip. Second round trip comparison then converts the second PCS
     values to device values to PCS values for comparison to the second PCS values.
@@ -90,6 +92,35 @@ Within the project are several libraries and tools as follows:
   * wxProfileDump provides a [wxWidgets](https://www.wxwidgets.org/) GUI based
     ICC and iccMAX profile inspector tool. The code for this tool is based on
     wxWidgets 3.2.
+    
+  * iccV5DspObsToV4Dsp is a cross platform command line tool to combine a
+    V5 display profile with a V5 observer profile to create a V4 display profile.
+    This allows conversion to support legacy applications which only read
+    V4 profiles.
+    
+  * iccApplySearch is a cross platform command line tool that applies a
+    sequence of profiles utilizing a search with the forward transform of
+    the last profile. When the first profile is a PCS encoding profile this
+    provides a logical inverse of the forward transform of the last profile.
+    This is especially useful when the forward transform of the last profile
+    results in a spectral PCS without the availability of a reverse transform
+    in the last profile and the first profile is a spectral PCS encoding profile.
+    Using a colorimetric PCS encoding intermediate profile with a weighted set of
+    Profile Connection Conditions profiles allows for spectral color reproduction to
+    be performed. This tool supports JSON and legacy data inputs, and ICCv5
+    capabilities including debugging of calculator-based profiles.
+
+  * iccApplyToLink is a versatile command line tool that builds either an ICC
+    DeviceLink profile or a `.cube` LUT file by applying a sequence of ICC profiles.
+    It supports fine-grained control over rendering intents, LUT size, interpolation,
+    and Profile Connection Conditions (PCC). This tool is especially useful for creating
+    link profiles for production workflows or transforming color spaces for VFX, printing,
+    or display calibration.
+
+  * iccFromCube is a command line utility that converts a 3D LUT file in `.cube` format
+    (common in video and color grading applications) into an ICC.2 DeviceLink profile.
+    This tool enables integration of creative grading LUTs into ICC color management
+    workflows.
 
 
 ## Example iccMAX Profiles

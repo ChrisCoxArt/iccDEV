@@ -13,6 +13,9 @@ Contributors are anyone who submits content to the project, Committers
 review and approve such submissions, and the ICC provides general project
 oversight.
 
+We require all participants to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+
 ## Get Connected
 
 The first thing to do, before anything else, is to talk to us! Whether you are reporting an issue, requesting or implementing a feature, or just asking a question, please don’t hesitate to reach out to project maintainers or the community as a whole. This is an important first step because your issue, feature, or question may have been solved or discussed already, and you will save yourself a lot of time by asking first.
@@ -77,6 +80,27 @@ the upstream ICC project repository. These topics are covered in
 and [Configuring a remote for a fork](https://help.github.com/articles/configuring-a-remote-for-a-fork/).
 
 You are now ready to contribute.
+
+## Code Style
+It's an older codebase, it isn't perfect, but let's at least **try** to keep things consistent.
+| Category                   |  Style
+| -------------------------- | ---------------------------- |
+| **Indentation**            | 2 space indentation, no tabs. |
+| **Braces**                   | **K&R** style  |
+| **Naming class/struct members** |  prefix with m_ |
+| **Naming variables** | There is currently no uniform convention. Try to match nearby code. |
+| **Header guards**         | Use header guards.   |
+| **Namespaces**           | Currently not using namespaces, though there is work in progress. |
+| **File organization**      | Multiple classes per file, grouped by functionality.  | 
+| **Use of `std` namespace** | Minimize pollution.   | 
+| **Commenting style**       | There is no consistent style. Try to match nearby code.   | 
+| **Const correctness**      | Make inputs const when possible, class functions const when appropriate, and variables const as needed. |
+| **Compiler Warnings** | Should be zero (or as close as we can get across all platforms). |
+| **Static Analysis Warnings** | Should be zero (or as close as we can get across all platforms). |
+| **Templates / Generics**   | Currently minimal.  Make sure new templates are readable. | 
+| **Exceptions**             | Most of the code uses manual return values for error handling. |
+| **Containers vs. Raw Pointers**  | Prefer STL containers, but historically uses a lot of raw pointers. |
+
 
 ## Development and Pull Requests
 

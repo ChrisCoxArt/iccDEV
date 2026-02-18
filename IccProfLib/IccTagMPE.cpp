@@ -72,10 +72,10 @@
 #pragma warning( disable: 4786) //disable warning in <list.h>
 #endif
 
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include "IccTagMPE.h"
 #include "IccIO.h"
 #include "IccMpeFactory.h"
@@ -315,6 +315,14 @@ bool CIccMpeUnknown::SetDataSize(icUInt32Number nSize, bool /* bZeroData =true *
   if (m_pData)
     free(m_pData);
 
+  // Prevent excessive allocation - limit to 256MB for unknown MPE data
+  const icUInt32Number MAX_MPE_UNKNOWN_SIZE = 268435456; // 256 MB
+  if (nSize > MAX_MPE_UNKNOWN_SIZE) {
+    m_pData = NULL;
+    m_nSize = 0;
+    return false;
+  }
+
   m_nSize = nSize;
   if (m_nSize) {
     m_pData = (icUInt8Number*)malloc(m_nSize);
@@ -341,7 +349,7 @@ bool CIccMpeUnknown::SetDataSize(icUInt32Number nSize, bool /* bZeroData =true *
  ******************************************************************************/
 bool CIccMpeUnknown::Read(icUInt32Number nSize, CIccIO *pIO)
 {
-  icUInt32Number nHeaderSize = sizeof(icTagTypeSignature) + 
+  icUInt32Number nHeaderSize = sizeof(icUInt32Number) + 
     sizeof(icUInt32Number) + 
     sizeof(icUInt16Number) + 
     sizeof(icUInt16Number);
@@ -434,7 +442,7 @@ icValidateStatus CIccMpeUnknown::Validate(std::string sigPath, std::string &sRep
   sReport += icMsgValidateCriticalError;
   sReport += sSigPathName;
   sReport += " - Contains unknown processing element type (";
-  icGetSig(buf, m_sig, true);
+  icGetSig(buf, 40, m_sig, true);
   sReport += buf;
   sReport += ").\n";
 
@@ -972,11 +980,11 @@ bool CIccTagMultiProcessElement::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
   
-  icUInt32Number headerSize = sizeof(icTagTypeSignature) + 
+  icUInt32Number headerSize = sizeof(icUInt32Number) + 
     sizeof(icUInt32Number) + 
-    sizeof(icUInt8Number) + 
-    sizeof(icUInt8Number) + 
-    sizeof(icUInt16Number);
+    sizeof(icUInt16Number) +
+    sizeof(icUInt16Number) +
+    sizeof(icUInt32Number);
 
   if (headerSize > size)
     return false;
@@ -1004,15 +1012,13 @@ bool CIccTagMultiProcessElement::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read32(&m_nProcElements))
     return false;
 
-  if (headerSize + (icUInt64Number)m_nProcElements*sizeof(icUInt32Number) > size)
+  if ( (headerSize + (icUInt64Number)m_nProcElements*sizeof(icPositionNumber)) > size)
     return false;
 
   m_list = new CIccMultiProcessElementList();
 
   if (!m_list)
     return false;
-
-  icUInt32Number i;
 
   m_position = (icPositionNumber*)calloc(m_nProcElements, sizeof(icPositionNumber));
 
@@ -1021,6 +1027,7 @@ bool CIccTagMultiProcessElement::Read(icUInt32Number size, CIccIO *pIO)
 
   CIccLutOffsetMap loadedElements;
 
+  icUInt32Number i;
   for (i=0; i<m_nProcElements; i++) {
     if (!pIO->Read32(&m_position[i].offset))
       return false;
@@ -1039,7 +1046,7 @@ bool CIccTagMultiProcessElement::Read(icUInt32Number size, CIccIO *pIO)
     //Use hash to cache offset duplication
     CIccMultiProcessElement *element = loadedElements[m_position[i].offset];
     if (!element) {
-      size_t pos = tagStart + m_position[i].offset;
+      int64_t pos = tagStart + m_position[i].offset;
 
       if (pIO->Seek(pos, icSeekSet)!= pos) {
         return false;
@@ -1701,17 +1708,17 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
         switch(icGetFirstSigPathSig(sigPath)) {
           case icSigBrdfTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           case icSigBrdfLightTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           case icSigBrdfOutputTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           default:
@@ -1727,17 +1734,17 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
         switch(icGetFirstSigPathSig(sigPath)) {
           case icSigBrdfTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           case icSigBrdfLightTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           case icSigBrdfOutputTransformMbr:
             //TODO: Initialize input and output
-            nInput = nOutput = 0;
+            //nInput = nOutput = 0;
             break;
 
           default:

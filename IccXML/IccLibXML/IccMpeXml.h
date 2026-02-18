@@ -97,6 +97,11 @@ public:
 class CIccSegmentedCurveXml : public CIccSegmentedCurve
 {
 public:
+  CIccSegmentedCurveXml() : CIccSegmentedCurve() {}
+  CIccSegmentedCurveXml( const CIccSegmentedCurve &parent) : CIccSegmentedCurve(parent) {}
+  CIccSegmentedCurveXml( const CIccSegmentedCurve *parent) : CIccSegmentedCurve(*parent) {}
+
+public:
   bool ToXml(std::string &xml, std::string blanks/* = ""*/);
   bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
@@ -295,7 +300,9 @@ typedef std::map<std::string, std::string> MacroMap;
 class CIccMpeXmlCalculator : public CIccMpeCalculator, public CIccMpeXml
 {
 public:
-  CIccMpeXmlCalculator() { m_sImport = "*"; }
+  CIccMpeXmlCalculator() : CIccMpeCalculator() { m_sImport = "*"; }
+
+public:
   virtual ~CIccMpeXmlCalculator() {  clean(); }
 
   virtual const char *GetClassName() const { return "CIccMpeXmlCalculator"; }

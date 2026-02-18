@@ -73,7 +73,9 @@
 #endif
 #endif
 #include <cstring> /* C strings strcpy, memcpy ... */
-#include <math.h>  /* nanf */
+#include <cmath>  /* nanf */
+#include <limits>
+#include <type_traits>
 
 
 
@@ -614,7 +616,7 @@ icUInt32Number icXmlGetHexData(void *pBuf, const char *szText, icUInt32Number nB
   unsigned char *pDest = (unsigned char*)pBuf;
   icUInt32Number rv =0;
 
-  while(*szText && rv<nBufSize) {
+  while( rv<nBufSize && *szText ) {
     int c1=hexValue(szText[0]);
     int c2=hexValue(szText[1]);
     if (c1>=0 && c2>=0) {
@@ -932,29 +934,29 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseTextCountNum(const char *szText, 
   
   //while (*szText) {
   for (icUInt32Number i=0; i<num; i++) {
-	  if (icIsNumChar(*szText)) {
-		  if (!bInNum) {
-			  bInNum = true;
-		  }
-	  }
+    if (icIsNumChar(*szText)) {
+      if (!bInNum) {
+        bInNum = true;
+      }
+    }
     else if (bInNum && !strncmp(szText, "#QNAN", 5)) { //Handle 1.#QNAN000 (non a number)
       i+=4;
       szText+=4;
     }
-	  // an invalid character is encountered (not digit and not space)
-	  else if (!isspace(*szText) && i <= num ){
-          const size_t lineSize = 100;
-		  char line[lineSize];
-		  snprintf(line, lineSize, "Data '%c' in position %d is not a number. ", *szText, i);
-		  parseStr += line;
-		  return false;
-	  }
-	  else if (bInNum) { //char is a space
-		  n++;
-		  bInNum = false;
-	  }	  
-	  szText++;
-	  //count++;
+    // an invalid character is encountered (not digit and not space)
+    else if ( i <= num && !isspace(*szText) ) {
+      const size_t lineSize = 100;
+      char line[lineSize];
+      snprintf(line, lineSize, "Data '%c' in position %d is not a number. ", *szText, i);
+      parseStr += line;
+      return false;
+    }
+    else if (bInNum) { //char is a space
+      n++;
+      bInNum = false;
+    }
+    szText++;
+    //count++;
   }
   if (bInNum) {
     n++;
@@ -991,6 +993,34 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseTextCount(const char *szText)
   return n;
 }
 
+// because VisualC has some really bad macros and doesn't test with standard templates
+#undef max
+
+// clip the input value to the valid output range
+template<typename T, typename F>
+T clipTypeRange( const F &input )
+{
+  if (input > std::numeric_limits<T>::max())
+    return std::numeric_limits<T>::max();
+  if (input < std::numeric_limits<T>::lowest()) // not min, which is a positive small number for floating point
+    return std::numeric_limits<T>::lowest();
+  if ( !std::numeric_limits<F>::is_integer && std::isnan(input) )
+    return T(0);    // flush NaN to zero
+  return T(input);  // passed all the checks, just cast it
+}
+
+// special case when types are equal
+double clipTypeRange( const double &input )
+{
+  return input;
+}
+
+// special case when types are equal
+float clipTypeRange( const float &input )
+{
+  return input;
+}
+
 template <class T, icTagTypeSignature Tsig>
 icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSize, const char *szText)
 {	
@@ -998,8 +1028,8 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
   bool bInNum = false;
   char num[256] = {0};
 
-  while (*szText && n<nSize) {	  
-	  if (icIsNumChar(*szText)) {
+  while ( (n < nSize) && *szText ) {
+    if (icIsNumChar(*szText)) {
       if (!bInNum) {
         bInNum = true;
         b=0;
@@ -1012,23 +1042,29 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
     else if (bInNum) {
       num[b] = 0;
       if (!strncmp(num, "nan", 3) || !strncmp(num, "-nan", 4)) {
-        pBuf[n] = (T)nanf(num);
+        if (std::is_floating_point<T>())        // compile type constant for each type
+          pBuf[n] = (T)nanf(num);
+        else
+          pBuf[n] = 0;  // flush nan to zero for integers
       }
       else {
-        pBuf[n] = (T)atof(num);
+        pBuf[n] = clipTypeRange<T>(atof(num));  // clip input to valid output range
       }
       n++;
       bInNum = false;
     }
     szText++;
   }
-  if (bInNum) {
+  if ( bInNum && (n < nSize) ) {
     num[b] = 0;
     if (!strncmp(num, "nan", 3) || !strncmp(num, "-nan", 4)) {
-      pBuf[n] = (T)nanf(num);
+        if (std::is_floating_point<T>())        // compile type constant for each type
+          pBuf[n] = (T)nanf(num);
+        else
+          pBuf[n] = 0;  // flush nan to zero for integers
     }
     else {
-      pBuf[n] = (T)atof(num);
+      pBuf[n] = clipTypeRange<T>(atof(num));  // clip input to valid output range
     }
     n++;
   } 
@@ -1040,6 +1076,10 @@ template <class T, icTagTypeSignature Tsig>
 bool CIccXmlArrayType<T, Tsig>::ParseArray(T* pBuf, icUInt32Number nSize, xmlNode *pNode)
 {
   icUInt32Number n;
+  
+  if (!pNode)
+    return false;
+  
   if (Tsig==icSigFloatArrayType) {
     n = icXmlNodeCount(pNode, "f");
 

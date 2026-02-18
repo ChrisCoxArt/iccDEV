@@ -70,9 +70,11 @@
 
 #include "IccIO.h"
 #include "IccUtil.h"
-#include <stdlib.h>
+#include <cstdlib>
 #include <memory.h>
-#include <string.h>
+#include <cstring>
+#include <cmath>
+
 
 #ifndef __max
 #define __max(a,b)  (((a) > (b)) ? (a) : (b))
@@ -92,6 +94,9 @@ namespace iccDEV {
 
 size_t CIccIO::ReadLine(void *pBuf8, size_t nNum/*=256*/)
 {
+  if (!pBuf8)
+    return 0;
+
   size_t n=0;
   icInt8Number c, *ptr=(icInt8Number*)pBuf8;
 
@@ -113,14 +118,22 @@ size_t CIccIO::ReadLine(void *pBuf8, size_t nNum/*=256*/)
 
 size_t CIccIO::Read16(void *pBuf16, size_t nNum)
 {
+  if (!pBuf16)
+    return 0;
+
   nNum = Read8(pBuf16, nNum<<1)>>1;
+#ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab16Array(pBuf16, nNum);
+#endif
 
   return nNum;
 }
 
 size_t CIccIO::Write16(void *pBuf16, size_t nNum)
 {
+  if (!pBuf16)
+    return 0;
+
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf16, nNum<<1)>>1;
 #else
@@ -142,8 +155,13 @@ size_t CIccIO::Write16(void *pBuf16, size_t nNum)
 
 size_t CIccIO::Read32(void *pBuf32, size_t nNum)
 {
+  if (!pBuf32)
+    return 0;
+
   nNum = Read8(pBuf32, nNum<<2)>>2;
+#ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab32Array(pBuf32, nNum);
+#endif
 
   return nNum;
 }
@@ -151,6 +169,9 @@ size_t CIccIO::Read32(void *pBuf32, size_t nNum)
 
 size_t CIccIO::Write32(void *pBuf32, size_t nNum)
 {
+  if (!pBuf32)
+    return 0;
+
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf32, nNum<<2)>>2;
 #else
@@ -172,8 +193,13 @@ size_t CIccIO::Write32(void *pBuf32, size_t nNum)
 
 size_t CIccIO::Read64(void *pBuf64, size_t nNum)
 {
+  if (!pBuf64)
+    return 0;
+
   nNum = Read8(pBuf64, nNum<<3)>>3;
+#ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab64Array(pBuf64, nNum);
+#endif
 
   return nNum;
 }
@@ -181,6 +207,9 @@ size_t CIccIO::Read64(void *pBuf64, size_t nNum)
 
 size_t CIccIO::Write64(void *pBuf64, size_t nNum)
 {
+  if (!pBuf64)
+    return 0;
+
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf64, nNum<<3)>>3;
 #else
@@ -202,6 +231,9 @@ size_t CIccIO::Write64(void *pBuf64, size_t nNum)
 
 size_t CIccIO::ReadUInt8Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt8Number tmp;
   size_t i;
@@ -218,16 +250,22 @@ size_t CIccIO::ReadUInt8Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::WriteUInt8Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt8Number tmp;
   size_t i;
 
   for (i=0; i<nNum; i++) {
-    tmp = (icUInt8Number)(__max(0.0, __min(1.0, *ptr)) * 255.0 + 0.5);
+    icFloatNumber input = ptr[i];
+    if (std::isnan(input))
+      tmp = 0;
+    else
+      tmp = (icUInt8Number)(__max(0.0, __min(1.0, input)) * 255.0 + 0.5);
 
     if (Write8(&tmp, 1)!=1)
       break;
-    ptr++;
   }
 
   return i;
@@ -235,6 +273,9 @@ size_t CIccIO::WriteUInt8Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::ReadUInt16Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt16Number tmp;
   size_t i;
@@ -251,16 +292,22 @@ size_t CIccIO::ReadUInt16Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::WriteUInt16Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt16Number tmp;
   size_t i;
 
   for (i=0; i<nNum; i++) {
-    tmp = (icUInt16Number)(__max(0.0, __min(1.0, *ptr)) * 65535.0 + 0.5);
+    icFloatNumber input = ptr[i];
+    if (std::isnan(input))
+      tmp = 0;
+    else
+      tmp = (icUInt16Number)(__max(0.0, __min(1.0, input)) * 65535.0 + 0.5);
 
     if (Write16(&tmp, 1)!=1)
       break;
-    ptr++;
   }
 
   return i;
@@ -268,6 +315,9 @@ size_t CIccIO::WriteUInt16Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::ReadFloat16Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icFloat16Number tmp;
   size_t i;
@@ -284,6 +334,9 @@ size_t CIccIO::ReadFloat16Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::WriteFloat16Float(void *pBufFloat, size_t nNum)
 {
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt16Number tmp;
   size_t i;
@@ -304,6 +357,9 @@ size_t CIccIO::ReadFloat32Float(void *pBufFloat, size_t nNum)
   if (sizeof(icFloat32Number)==sizeof(icFloatNumber))
     return Read32(pBufFloat, nNum);
 
+  if (!pBufFloat)
+    return 0;
+
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icFloat32Number tmp;
   size_t i;
@@ -322,6 +378,9 @@ size_t CIccIO::WriteFloat32Float(void *pBufFloat, size_t nNum)
 {
   if (sizeof(icFloat32Number)==sizeof(icFloatNumber))
     return Write32(pBufFloat, nNum);
+
+  if (!pBufFloat)
+    return 0;
 
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icFloat32Number tmp;
@@ -451,7 +510,7 @@ void CIccFileIO::Close()
 
 size_t CIccFileIO::Read8(void *pBuf, size_t nNum)
 {
-  if (!m_fFile)
+  if (!m_fFile || !pBuf)
     return 0;
 
   return fread(pBuf, 1, nNum, m_fFile);
@@ -460,7 +519,7 @@ size_t CIccFileIO::Read8(void *pBuf, size_t nNum)
 
 size_t CIccFileIO::Write8(void *pBuf, size_t nNum)
 {
-  if (!m_fFile)
+  if (!m_fFile || !pBuf)
     return 0;
 
   return fwrite(pBuf, 1, nNum, m_fFile);
@@ -481,7 +540,7 @@ size_t CIccFileIO::GetLength()
 }
 
 
-size_t CIccFileIO::Seek(size_t nOffset, icSeekVal pos)
+int64_t CIccFileIO::Seek(int64_t nOffset, icSeekVal pos)
 {
   if (!m_fFile)
     return -1;
@@ -490,7 +549,7 @@ size_t CIccFileIO::Seek(size_t nOffset, icSeekVal pos)
 }
 
 
-size_t CIccFileIO::Tell()
+int64_t CIccFileIO::Tell()
 {
   if (!m_fFile)
     return -1;
@@ -582,15 +641,15 @@ size_t CIccEmbedIO::GetLength()
 }
 
 
-size_t CIccEmbedIO::Seek(size_t nOffset, icSeekVal pos)
+int64_t CIccEmbedIO::Seek(int64_t nOffset, icSeekVal pos)
 {
-  size_t nPos;
+  int64_t nPos;
   if (!m_pIO)
     return -1;
 
   if (pos == icSeekSet) {
-    if (m_nSize > 0 && nOffset > m_nSize)
-      nOffset = m_nSize;
+    if (m_nSize > 0 && nOffset > int64_t(m_nSize))
+      nOffset = int64_t(m_nSize);
     else if (nOffset < 0)
       nOffset = m_nStartPos;
 
@@ -613,7 +672,7 @@ size_t CIccEmbedIO::Seek(size_t nOffset, icSeekVal pos)
   else {//pos == icSeekCur
     nOffset = m_pIO->Tell() + nOffset;
 
-    if (m_nSize && nOffset - m_nStartPos > m_nSize)
+    if (m_nSize && (nOffset - m_nStartPos) > int64_t(m_nSize))
       nOffset = m_nStartPos + m_nSize;
     else if (nOffset < m_nStartPos)
       nOffset = m_nStartPos;
@@ -628,12 +687,12 @@ size_t CIccEmbedIO::Seek(size_t nOffset, icSeekVal pos)
 }
 
 
-size_t CIccEmbedIO::Tell()
+int64_t CIccEmbedIO::Tell()
 {
   if (!m_pIO)
     return -1;
 
-  size_t nPos = m_pIO->Tell();
+  int64_t nPos = m_pIO->Tell();
 
   if (nPos >= m_nStartPos)
     return nPos - m_nStartPos;
@@ -721,7 +780,7 @@ void CIccMemIO::Close()
 
 size_t CIccMemIO::Read8(void *pBuf, size_t nNum)
 {
-  if (!m_pData)
+  if (!m_pData || !pBuf)
     return 0;
   if (nNum > 0) {
       nNum = __min((m_nSize - m_nPos), nNum);
@@ -734,7 +793,7 @@ size_t CIccMemIO::Read8(void *pBuf, size_t nNum)
 
 size_t CIccMemIO::Write8(void *pBuf, size_t nNum)
 {
-  if (!m_pData)
+  if (!m_pData || !pBuf)
     return 0;
 
   nNum = __min((m_nAvail-m_nPos), nNum);
@@ -758,12 +817,12 @@ size_t CIccMemIO::GetLength()
 }
 
 
-size_t CIccMemIO::Seek(size_t nOffset, icSeekVal pos)
+int64_t CIccMemIO::Seek(int64_t nOffset, icSeekVal pos)
 {
   if (!m_pData)
     return -1;
 
-  size_t nPos;
+  int64_t nPos;
   switch(pos) {
   case icSeekSet:
     nPos = nOffset;
@@ -797,7 +856,7 @@ size_t CIccMemIO::Seek(size_t nOffset, icSeekVal pos)
 }
 
 
-size_t CIccMemIO::Tell()
+int64_t CIccMemIO::Tell()
 {
   if (!m_pData)
     return -1;
@@ -837,6 +896,9 @@ void CIccNullIO::Close()
 
 size_t CIccNullIO::Read8(void *pBuf, size_t nNum)
 {
+  if (!pBuf)
+    return 0;
+
   size_t nLeft = m_nSize - m_nPos;
   size_t nRead = (nNum <= nLeft) ? nNum : nLeft;
 
@@ -863,9 +925,9 @@ size_t CIccNullIO::GetLength()
 }
 
 
-size_t CIccNullIO::Seek(size_t nOffset, icSeekVal pos)
+int64_t CIccNullIO::Seek(int64_t nOffset, icSeekVal pos)
 {
-  size_t nPos;
+  int64_t nPos;
   switch(pos) {
   case icSeekSet:
     nPos = nOffset;
@@ -893,7 +955,7 @@ size_t CIccNullIO::Seek(size_t nOffset, icSeekVal pos)
 }
 
 
-size_t CIccNullIO::Tell()
+int64_t CIccNullIO::Tell()
 {
   return m_nPos;
 }

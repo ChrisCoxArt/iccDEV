@@ -72,10 +72,10 @@ Copyright:  ? see ICC Software License
 #pragma warning( disable: 4786) //disable warning in <list.h>
 #include <windows.h>
 #endif
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include "IccTagEmbedIcc.h"
 #include "IccUtil.h"
 #include "IccProfile.h"
@@ -442,10 +442,10 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     TagEntryList::iterator i, j;
 
     // n is number of Tags in Tag Table
-    for (n = 0, i = m_pProfile->m_Tags->begin(); i != m_pProfile->m_Tags->end(); i++, n++) {
+    for (n = 0, i = m_pProfile->m_Tags.begin(); i != m_pProfile->m_Tags.end(); i++, n++) {
       // Find closest tag after this tag, by scanning all offsets of other tags 
       closest = pHdr->size;
-      for (j = m_pProfile->m_Tags->begin(); j != m_pProfile->m_Tags->end(); j++) {
+      for (j = m_pProfile->m_Tags.begin(); j != m_pProfile->m_Tags.end(); j++) {
         if ((i != j) && (j->TagInfo.offset >= i->TagInfo.offset + i->TagInfo.size) && ((int)j->TagInfo.offset <= closest)) {
           closest = j->TagInfo.offset;
         }
@@ -459,7 +459,7 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
       snprintf(sOffset, tempSize, "%u", i->TagInfo.offset);
       snprintf(sSize, tempSize, "%u", i->TagInfo.size);
       snprintf(sPad, tempSize, "%u", pad);
-      sDescription += fillColumns(Fmt.GetTagSigName(i->TagInfo.sig), icGetSig(sigbuf, i->TagInfo.sig, false), sOffset, sSize, sPad) + "\n";
+      sDescription += fillColumns(Fmt.GetTagSigName(i->TagInfo.sig), icGetSig(sigbuf, bufSize, i->TagInfo.sig, false), sOffset, sSize, sPad) + "\n";
     }
   }
   else {

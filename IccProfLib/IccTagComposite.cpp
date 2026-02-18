@@ -72,10 +72,10 @@
 #pragma warning( disable: 4786) //disable warning in <list.h>
 #endif
 
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include "IccTagComposite.h"
 #include "IccStructBasic.h"
 #include "IccUtil.h"
@@ -1245,9 +1245,6 @@ bool CIccTagArray::Read(icUInt32Number size, CIccIO *pIO)
   SetTagArrayType(sigArrayType);
 
   icUInt32Number count, i, j;
-  IccTagEntry TagEntry;
-
-  TagEntry.pTag = NULL;
 
   if (!pIO->Read32(&count))
     return false;
@@ -1511,8 +1508,8 @@ void CIccTagArray::Cleanup()
     pTag = m_TagVals[i].ptr;
     if (pTag) {
       for (j=i+1; j<m_nSize; j++) {
-        if (m_TagVals[i].ptr==pTag)
-          m_TagVals[i].ptr = NULL;
+        if (m_TagVals[j].ptr == pTag)
+          m_TagVals[j].ptr = NULL;
       }
       delete pTag;
       m_TagVals[i].ptr = NULL;

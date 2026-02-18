@@ -60,7 +60,7 @@
  *  
  * 
  */
-#include "stdio.h"
+#include <cstdio>
 #include "IccProfileXml.h"
 #include "IccTagXml.h"
 #include "IccUtilXml.h"
@@ -122,7 +122,7 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
   xml += blanks + line;
 
  // if (m_Header.magic != 0){
- //	  sprintf(line, "    <Signature>%s</Signature>\n", icFixXml(fix, icGetSigStr(buf, m_Header.magic)));
+ //	  sprintf(line, "    <Signature>%s</Signature>\n", icFixXml(fix, icGetSigStr(buf, bufSize, m_Header.magic)));
  //	  xml += line;
  // }
 
@@ -217,7 +217,7 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
   CIccInfo Fmt;
   IccOffsetTagSigMap offsetTags;
 
-  for (i=m_Tags->begin(); i!=m_Tags->end(); i++) {
+  for (i=m_Tags.begin(); i!=m_Tags.end(); i++) {
     if (sigSet.find(i->TagInfo.sig)==sigSet.end()) {
       CIccTag *pTag = FindTag(i->TagInfo.sig);
 
@@ -255,15 +255,15 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
             j = i;
 #if 0
             // print out the tag signature (there is at least one)
-            sprintf(line, "      <TagSignature>%s</TagSignature>\n", icFixXml(fix, icGetSigStr(buf, i->TagInfo.sig)));
+            sprintf(line, "      <TagSignature>%s</TagSignature>\n", icFixXml(fix, icGetSigStr(buf, bufSize, i->TagInfo.sig)));
             xml += line;
 
             sigSet.insert(i->TagInfo.sig);
 
             // print out the rest of the tag signatures
-            for (j++; j != m_Tags->end(); j++) {
+            for (j++; j != m_Tags.end(); j++) {
               if (j->pTag == i->pTag || j->TagInfo.offset == i->TagInfo.offset) {
-                sprintf(line, "      <TagSignature>%s</TagSignature>\n", icFixXml(fix, icGetSigStr(buf, j->TagInfo.sig)));
+                sprintf(line, "      <TagSignature>%s</TagSignature>\n", icFixXml(fix, icGetSigStr(buf, bufSize, j->TagInfo.sig)));
                 xml += line;
                 sigSet.insert(j->TagInfo.sig);
               }
@@ -342,11 +342,18 @@ static unsigned char parseVersion(const char *szVer)
 bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 {  	  
   std::string temp;
-  memset(&m_Header, 0, sizeof(m_Header));  
+  memset(&m_Header, 0, sizeof(m_Header));
+  
+  if (!pNode)
+    return false;
 
   for (pNode=pNode->children; pNode; pNode=pNode->next) {
-	  if (pNode->type==XML_ELEMENT_NODE) {
-		if (!icXmlStrCmp((const char*)pNode->name, "ProfileVersion")) {
+    if (pNode->type==XML_ELEMENT_NODE) {
+      if (!icXmlStrCmp((const char*)pNode->name, "ProfileVersion")) {
+        if (!pNode->children || !pNode->children->content) {
+          parseStr += "Cannot parse ProfileVersion, no value specified\n";
+          continue;
+        }
       const char *szVer = (const char*)pNode->children->content;
       std::string ver;
       unsigned long verMajor=0, verMinor=0, verClassMajor=0, verClassMinor=0;
@@ -388,19 +395,23 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       }
 
       m_Header.version = icUInt32Number( (verMajor << 24) | (verMinor << 16) | (verClassMajor << 8) | verClassMinor );
-		}
+    }
     else if (!icXmlStrCmp((const char*)pNode->name, "ProfileSubClassVersion")) {
+      if (!pNode->children || !pNode->children->content) {
+        parseStr += "Cannot parse ProfileSubClassVersion, no value specified\n";
+        continue;
+      }
       const char *szVer = (const char*)pNode->children->content;
       std::string ver;
       unsigned long verClassMajor = 0, verClassMinor = 0;
 
-      for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
-        ver = *szVer;
-      }
-      verClassMajor = (unsigned char)atoi(ver.c_str());
-      ver.clear();
-
       if (szVer) {
+        for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
+          ver = *szVer;
+        }
+        verClassMajor = (unsigned char)atoi(ver.c_str());
+        ver.clear();
+        
         for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
           ver = *szVer;
         }
@@ -437,15 +448,16 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 		}		
 		else if (!icXmlStrCmp(pNode->name, "ProfileFlags")) {
 			m_Header.flags = 0;			
-			xmlAttr *attr = icXmlFindAttr(pNode, "EmbeddedInFile");
+      
+      xmlAttr *attr = icXmlFindAttr(pNode, "EmbeddedInFile");
       if (attr && !strcmp(icXmlAttrValue(attr), "true")) {
-				m_Header.flags |= icEmbeddedProfileTrue; 
-			}
+		m_Header.flags |= icEmbeddedProfileTrue;
+      }
 
-			attr = icXmlFindAttr(pNode, "UseWithEmbeddedDataOnly");
+        attr = icXmlFindAttr(pNode, "UseWithEmbeddedDataOnly");
       if (attr && !strcmp(icXmlAttrValue(attr), "true")) {
-					m_Header.flags |= icUseWithEmbeddedDataOnly;
-			}
+        m_Header.flags |= icUseWithEmbeddedDataOnly;
+      }
 
       attr = icXmlFindAttr(pNode, "ExtendedRangePCS");
       if (attr && !strcmp(icXmlAttrValue(attr), "true")) {
@@ -474,15 +486,18 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 			m_Header.attributes = icGetDeviceAttrValue(pNode);
 		}
 		else if (!icXmlStrCmp(pNode->name, "RenderingIntent")) {
-			if (!strcmp((const char*)pNode->children->content, "Perceptual"))
-				m_Header.renderingIntent = icPerceptual;
-			else if (!strcmp((const char*)pNode->children->content, "Relative Colorimetric") || !strcmp((const char*)pNode->children->content, "Relative"))
-				m_Header.renderingIntent = icRelativeColorimetric;
-			else if (!strcmp((const char*)pNode->children->content, "Saturation"))
-				m_Header.renderingIntent = icSaturation;
-			else if (!strcmp((const char*)pNode->children->content, "Absolute Colorimetric") || !strcmp((const char*)pNode->children->content, "Absolute"))
-				m_Header.renderingIntent = icAbsoluteColorimetric;
-
+          if (!pNode->children || !pNode->children->content) {
+            parseStr += "Cannot parse RenderingIntent, no value specified\n";
+            continue;
+          }
+          if (!strcmp((const char*)pNode->children->content, "Perceptual"))
+            m_Header.renderingIntent = icPerceptual;
+          else if (!strcmp((const char*)pNode->children->content, "Relative Colorimetric") || !strcmp((const char*)pNode->children->content, "Relative"))
+            m_Header.renderingIntent = icRelativeColorimetric;
+          else if (!strcmp((const char*)pNode->children->content, "Saturation"))
+            m_Header.renderingIntent = icSaturation;
+          else if (!strcmp((const char*)pNode->children->content, "Absolute Colorimetric") || !strcmp((const char*)pNode->children->content, "Absolute"))
+            m_Header.renderingIntent = icAbsoluteColorimetric;
 		}
 		else if (!icXmlStrCmp(pNode->name, "PCSIlluminant")) { 
 			xmlNode *xyzNode = icXmlFindNode(pNode->children, "XYZNumber");
@@ -542,8 +557,8 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       m_Header.deviceSubClass = (icProfileClassSignature)icXmlGetChildSigVal(pNode);
     }
 		else if (!icXmlStrCmp(pNode->name, "Reserved")) {
-      if (pNode->children && pNode->content)
-		    icXmlGetHexData(&m_Header.reserved, (const char*)pNode->children->content, sizeof(m_Header.reserved));
+      if (pNode->children && pNode->children->content)
+        icXmlGetHexData(&m_Header.reserved, (const char*)pNode->children->content, sizeof(m_Header.reserved));
       else
         memset(&m_Header.reserved, 0, sizeof(m_Header.reserved));
 		}
@@ -692,6 +707,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
           parseStr += nodeName;
           snprintf(str, strSize, ") Tag on line %d\n", pTypeNode->line);
           parseStr += str;
+          delete pTag;
           return false;
         }
       }
@@ -702,6 +718,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
         parseStr += "\" (";
         snprintf(str, strSize, ") Tag on line %d\n", pTypeNode->line);
         parseStr += str;
+        delete pTag;
         return false;
       }
     }
@@ -752,6 +769,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
         parseStr += nodeName;
         snprintf(str, strSize, ") Tag on line %d\n", pNode->line);
         parseStr += str;
+        delete pTag;
         return false;
       }
     }
@@ -762,6 +780,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
       parseStr += nodeName;
       snprintf(str, strSize, ") Tag on line %d\n", pNode->line);
       parseStr += str;
+      delete pTag;
       return false;
     }
   }
@@ -858,7 +877,7 @@ bool CIccProfileXml::LoadXml(const char *szFilename, const char *szRelaxNGDir, s
   doc = xmlReadFile(szFilename, NULL, 0);
 
   if (doc == NULL) 
-    return NULL;
+    return false;
 
   if (szRelaxNGDir && szRelaxNGDir[0]) {
     xmlRelaxNGParserCtxt* rlxParser;

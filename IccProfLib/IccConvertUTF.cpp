@@ -41,7 +41,7 @@ See the header file "icConvertUTF.h" for complete documentation.
 
 #include "IccConvertUTF.h"
 #ifdef CVTUTF_DEBUG
-#include <stdio.h>
+#include <cstdio>
 #endif
 
 static const int halfShift  = 10; /* used for shifting by 10 bits */
@@ -487,6 +487,54 @@ Boolean icIsLegalUTF8Sequence(const UTF8 *source, const UTF8 *sourceEnd)
   return isLegalUTF8(source, length);
 }
 
+
+/* --------------------------------------------------------------------- */
+
+Boolean isLegalUTF8String (const UTF8* sourceStart, int length )
+{
+  const UTF8 *source = sourceStart;
+  const UTF8 *sourceEnd = sourceStart + length;
+  
+  while (source < sourceEnd) {
+    UTF32 ch = 0;
+    unsigned short extraBytesToRead = trailingBytesForUTF8[*source];
+    if (source + extraBytesToRead >= sourceEnd) {
+      // result = sourceExhausted;
+      return false;
+    }
+    /* Do this check whether lenient or strict */
+    if (! isLegalUTF8(source, extraBytesToRead+1)) {
+        // result = sourceIllegal;
+        return false;
+    }
+
+    /*
+    * The cases all fall through. See "Note A" below.
+    */
+    switch (extraBytesToRead) {
+      case 5: ch += *source++; ch <<= 6; [[fallthrough]]; /* remember, illegal UTF-8 */
+      case 4: ch += *source++; ch <<= 6; [[fallthrough]]; /* remember, illegal UTF-8 */
+      case 3: ch += *source++; ch <<= 6; [[fallthrough]];
+      case 2: ch += *source++; ch <<= 6; [[fallthrough]];
+      case 1: ch += *source++; ch <<= 6; [[fallthrough]];
+      case 0: ch += *source++;
+    }
+    ch -= offsetsFromUTF8[extraBytesToRead];
+
+    if (ch <= UNI_MAX_BMP) { /* Target is a character <= 0xFFFF */
+      /* UTF-16 surrogate values are illegal in UTF-32 */
+      if (ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_LOW_END) {
+        // result = sourceIllegal;
+        return false;
+      }
+    } else if (ch > UNI_MAX_UTF16) {
+      // result = sourceIllegal;
+      return false;
+    }
+  }
+
+  return true;
+}
 /* --------------------------------------------------------------------- */
 
 icUtfConversionResult icConvertUTF8toUTF16 (const UTF8** sourceStart, const UTF8* sourceEnd, 
@@ -593,7 +641,7 @@ icUtfConversionResult icConvertUTF8toUTF16 (const UTF8* source, const UTF8* sour
       /* UTF-16 surrogate values are illegal in UTF-32 */
       if (ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_LOW_END) {
         if (flags == strictConversion) {
-          source -= (extraBytesToRead+1); /* return to the illegal value itself */
+          //source -= (extraBytesToRead+1); /* return to the illegal value itself */
           result = sourceIllegal;
           break;
         } else {
@@ -605,7 +653,7 @@ icUtfConversionResult icConvertUTF8toUTF16 (const UTF8* source, const UTF8* sour
     } else if (ch > UNI_MAX_UTF16) {
       if (flags == strictConversion) {
         result = sourceIllegal;
-        source -= (extraBytesToRead+1); /* return to the start */
+        //source -= (extraBytesToRead+1); /* return to the start */
         break; /* Bail out; shouldn't continue */
       } else {
         target.push_back(UNI_REPLACEMENT_CHAR);
@@ -819,7 +867,7 @@ icUtfConversionResult icConvertUTF8toUTF32 (const UTF8* source, const UTF8* sour
       */
       if (ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_LOW_END) {
         if (flags == strictConversion) {
-          source -= (extraBytesToRead+1); /* return to the illegal value itself */
+          //source -= (extraBytesToRead+1); /* return to the illegal value itself */
           result = sourceIllegal;
           break;
         } else {

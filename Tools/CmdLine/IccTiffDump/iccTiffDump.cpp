@@ -69,7 +69,7 @@
 //////////////////////////////////////////////////////////////////////
 
 
-#include <stdio.h>
+#include <cstdio>
 #include "IccCmm.h"
 #include "IccUtil.h"
 #include "IccDefs.h"
@@ -168,10 +168,13 @@ void DumpProfileInfo(CIccProfile* pProfile, std::string prefix)
   
   CIccTag* pEmbedded = pProfile->FindTag(icSigEmbeddedV5ProfileTag);
   if (pEmbedded) {
-    CIccTagEmbeddedProfile* pEmbeddedTag = (CIccTagEmbeddedProfile*)pEmbedded;
-    if (pEmbeddedTag->GetProfile()) {
-      printf("%sSub-Profile:      Embedded\n", prefix.c_str());
-      DumpProfileInfo(pEmbeddedTag->GetProfile(), prefix + " ");
+    // if it has a different type, don't try to dereference it!
+    if (pEmbedded->GetType() == icSigEmbeddedProfileType) {
+      CIccTagEmbeddedProfile* pEmbeddedTag = (CIccTagEmbeddedProfile*)pEmbedded;
+      if (pEmbeddedTag->GetProfile()) {
+        printf("%sSub-Profile:      Embedded\n", prefix.c_str());
+        DumpProfileInfo(pEmbeddedTag->GetProfile(), prefix + " ");
+      }
     }
   }
 }
@@ -183,7 +186,7 @@ int main(int argc, icChar* argv[])
   int minargs = 1;
   if (argc <= minargs) {
     Usage();
-    return -1;
+    return 0;
   }
 
   CTiffImg SrcImg;
@@ -238,6 +241,7 @@ int main(int argc, icChar* argv[])
           printf("\nUnable to extract profile\n");
         }
       }
+      delete pProfile;
     }
   } else {
     printf("Profile:           None\n");

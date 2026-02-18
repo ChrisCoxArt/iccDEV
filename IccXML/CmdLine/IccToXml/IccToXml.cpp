@@ -1,7 +1,7 @@
 // IccToXml.cpp : Defines the entry point for the console application.
 //
 
-#include <stdio.h>
+#include <cstdio>
 #include "IccTagXmlFactory.h"
 #include "IccMpeXmlFactory.h"
 #include "IccProfileXml.h"
@@ -12,8 +12,9 @@
 int main(int argc, char* argv[])
 {
   if (argc<=2) {
-    printf("IccToXml built with IccProfLib Version " ICCPROFLIBVER ", IccLibXML Version " ICCLIBXMLVER "\n\nUsage: IccToXml src_icc_profile dest_xml_file\n");
-    return -1;
+    printf("IccToXml built with IccProfLib Version " ICCPROFLIBVER ", IccLibXML Version " ICCLIBXMLVER "\n\n");
+    printf("Usage: IccToXml src_icc_profile dest_xml_file\n");
+    return 0;
   }
   
   CIccTagCreator::PushFactory(new CIccTagXmlFactory());

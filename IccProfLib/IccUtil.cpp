@@ -75,11 +75,11 @@
 #include "IccArrayFactory.h"
 #include "IccMpeFactory.h"
 #include "IccDefs.h"
-#include <stdlib.h>
+#include <cstdlib>
 #include <memory.h>
-#include <ctype.h>
-#include <math.h>
-#include <string.h>
+#include <cctype>
+#include <cmath>
+#include <cstring>
 #include <time.h>
 
 #define PI 3.1415926535897932384626433832795
@@ -112,6 +112,11 @@ ICCPROFLIB_API const char* icMsgValidateInformation = "Information - ";
 */void* icRealloc(void *ptr, size_t size)
 {
   void *nptr;
+  
+  if (size == 0) {
+    free(ptr);
+    return NULL;
+  }
   
   if (ptr)
     nptr = realloc(ptr, size);
@@ -547,7 +552,9 @@ icS15Fixed16Number icDtoF(icFloatNumber num)
 {
   icS15Fixed16Number rv;
 
-  if (num<-32768.0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<-32768.0)
     num = -32768.0;
   else if (num>32767.0)
     num = 32767.0;
@@ -568,7 +575,9 @@ icU16Fixed16Number icDtoUF(icFloatNumber num)
 {
   icU16Fixed16Number rv;
 
-  if (num<0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<0)
     num = 0;
   else if (num>65535.0)
     num = 65535.0;
@@ -589,7 +598,9 @@ icU1Fixed15Number icDtoUSF(icFloatNumber num)
 {
   icU1Fixed15Number rv;
 
-  if (num<0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<0)
     num = 0;
   else if (num>65535.0/32768.0)
     num = 65535.0/32768.0;
@@ -610,7 +621,9 @@ icU8Fixed8Number icDtoUCF(icFloatNumber num)
 {
   icU8Fixed8Number rv;
 
-  if (num<0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<0)
     num = 0;
   else if (num>255.0)
     num = 255.0;
@@ -630,7 +643,8 @@ icFloatNumber icUCFtoD(icU8Fixed8Number num)
 icFloatNumber ICCPROFLIB_API icF16toF(icFloat16Number num)
 {
   icUInt16Number numsgn, numexp, nummnt;
-  icUInt32Number rv, rvsgn, rvexp, rvmnt;
+  icUInt32Number rv = 0;    // because static analysis isn't perfect
+  icUInt32Number rvsgn, rvexp, rvmnt;
   icInt32Number tmpexp;
   icFloatNumber * rvfp, rvf;
   int exp;
@@ -726,7 +740,9 @@ icUInt8Number icFtoU8(icFloatNumber num)
 {
   icUInt8Number rv;
 
-  if (num<0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<0)
     num = 0;
   else if (num>1.0)
     num = 1.0;
@@ -747,7 +763,9 @@ icUInt16Number icFtoU16(icFloatNumber num)
 {
   icUInt16Number rv;
 
-  if (num<0)
+  if (std::isnan(num))
+    num = 0;
+  else if (num<0)
     num = 0;
   else if (num>1.0)
     num = 1.0;
@@ -767,7 +785,10 @@ icFloatNumber icU16toF(icUInt16Number num)
 icUInt8Number icABtoU8(icFloatNumber num)
 {
   icFloatNumber v = num + 128.0f;
-  if (v<0)
+  
+  if (std::isnan(num))
+    num = 0;
+  else if (v<0)
     v=0;
   else if (v>255)
     v=255;
@@ -974,15 +995,15 @@ void icMemDump(std::string &sDump, void *pBuf, size_t nNum)
       buf[76] = ' ';
       buf[77] = '\n';
       buf[78] = '\0';
-      snprintf(num, numSize, "%08zX:", i);
-      strncpy(buf, num, 9);
+      snprintf(num, numSize, "%08X:", uint32_t(i));    // NOTE - this formatting will have to change if we want to move beyond 4 Gig.
+      memcpy(buf, num, 9); // 8 hex digits, plus ':', and no terminating NULL
     }
 
     snprintf(num, numSize, "%02X", *pData);
-    strncpy(buf+10+j*3, num, 2);
+    memcpy(buf+10+j*3, num, 2);    // 2 hex digits, no terminating NULL
 
     c=*pData;
-    if (!isprint(c))
+    if (!isprint(c) || c > 126)
       c='.';
     buf[10+16*3 + 1 + j] = c;
   }
@@ -1006,27 +1027,32 @@ const icChar* icGet16bitSig(icChar* pBuf, size_t bufSize, icUInt16Number nSig, b
 {
     icUInt16Number sig = nSig;
     icUInt8Number c;
-// TODO - really need to check bufSize for minimum limits
 
     if (!nSig) {
-        strcpy(pBuf, "NULL");
-        return pBuf;
+      strcpy(pBuf, "NULL");
+      return pBuf;
+    }
+
+    if (bufSize < 5 || bufSize > 256) {
+      // this is caused by bad parameters, usually with bufSize replaced by the sig
+      strcpy(pBuf, "BADP");
+      return pBuf;
     }
 
     pBuf[0] = '\'';
     c = (icUInt8Number)(sig >> 8);
-    if (!isprint(c))
-        c = '?';
+    if (!isprint(c) || c > 126)
+      c = '?';
     pBuf[1] = c;
     c = (icUInt8Number)(sig & 0x00FF);
-    if (!isprint(c))
-        c = '?';
+    if (!isprint(c) || c > 126)
+      c = '?';
     pBuf[2] = c;
 
     if (bGetHexVal)
-        snprintf(pBuf + 3, bufSize-3, "' = %04X", nSig);
+      snprintf(pBuf + 3, bufSize-3, "' = %04X", nSig);
     else
-        snprintf(pBuf + 3, bufSize-3, "'");
+      snprintf(pBuf + 3, bufSize-3, "'");
 
     return pBuf;
 }
@@ -1036,26 +1062,36 @@ const icChar *icGetSig(icChar *pBuf, size_t bufSize, icUInt32Number nSig, bool b
   int i;
   icUInt32Number sig=nSig;
   icUInt8Number c;
-// TODO - really need to check bufSize for minimum limits
 
   if (!nSig) {
     strcpy(pBuf, "NULL");
     return pBuf;
   }
+  
+  if (bufSize < 7 || bufSize > 65535) {
+    // this is caused by bad parameters, usually with bufSize replaced by the sig
+    strcpy(pBuf, "BADP");
+    return pBuf;
+  }
 
   pBuf[0] = '\'';
+  
+  // 126 is ~, and 127 is DEL, over 127 is undefined and depends on local code page
+  // isprint() lies about values > 127 on MacOS and Linux, haven't tested Windows
   for (i=1; i<5; i++) {
     c=(icUInt8Number)(sig>>24);
-    if (!isprint(c))
+    if (!isprint(c) || c > 126) {
       c='?';
+      bGetHexVal = true;
+    }
     pBuf[i]=c;
     sig <<=8;
   }
 
   if (bGetHexVal)
-    snprintf(pBuf+5, bufSize-5, "' = %08X", nSig);
+    snprintf(pBuf+5, bufSize-5, "' = %08X", nSig);  // 17 characcter plus NULL
   else
-    snprintf(pBuf+5, bufSize-5, "'");
+    snprintf(pBuf+5, bufSize-5, "'");   // 6 characters plus NULL
 
   return pBuf;
 }
@@ -1066,7 +1102,17 @@ const icChar *icGetSigStr(icChar *pBuf, size_t bufSize, icUInt32Number nSig)
   icUInt32Number sig=nSig;
   icUInt8Number c;
   bool bGetHexVal = false;
-// TODO - really need to check bufSize for minimum limits
+
+  if (!nSig) {
+    strcpy(pBuf, "NULL");
+    return pBuf;
+  }
+  
+  if (bufSize < 5 || bufSize > 65535) {
+    // this is caused by bad parameters, usually with bufSize replaced by the sig
+    strcpy(pBuf, "BADP");
+    return pBuf;
+  }
 
   for (i=0; i<4; i++) {
     c=(icUInt8Number)(sig>>24);
@@ -1076,7 +1122,7 @@ const icChar *icGetSigStr(icChar *pBuf, size_t bufSize, icUInt32Number nSig)
     else if (j!=-1) {
       bGetHexVal = true;
     }
-    else if (!isprint(c) ||c==':') {
+    else if (!isprint(c) || c==':' || c > 126) {
       c='?';
       bGetHexVal = true;
     }
@@ -1096,7 +1142,17 @@ const icChar *icGetSigStr(icChar *pBuf, size_t bufSize, icUInt32Number nSig)
 const icChar *icGetColorSig(icChar *pBuf, size_t bufSize, icUInt32Number nSig, bool bGetHexVal)
 {
   icUInt32Number sig=nSig;
-// TODO - really need to check bufSize for minimum limits
+
+  if (!nSig) {
+    strcpy(pBuf, "NULL");
+    return pBuf;
+  }
+  
+  if (bufSize < 7 || bufSize > 65535) {
+    // this is caused by bad parameters, usually with bufSize replaced by the sig
+    strcpy(pBuf, "BADP");
+    return pBuf;
+  }
 
   switch (icGetColorSpaceType(nSig)) {
     case icSigNChannelData:
@@ -1123,7 +1179,7 @@ const icChar *icGetColorSig(icChar *pBuf, size_t bufSize, icUInt32Number nSig, b
       pBuf[0] = '\'';
       for (i=1; i<5; i++) {
         c=(icUInt8Number)(sig>>24);
-        if (!isprint(c)) {
+        if (!isprint(c) || c > 126) {
           c = '?';
           bNeedHexVal = true;
         }
@@ -1148,7 +1204,17 @@ const icChar *icGetColorSig(icChar *pBuf, size_t bufSize, icUInt32Number nSig, b
 const icChar *icGetColorSigStr(icChar *pBuf, size_t bufSize, icUInt32Number nSig)
 {
   icUInt32Number sig=nSig;
-// TODO - really need to check bufSize for minimum limits
+
+  if (!nSig) {
+    strcpy(pBuf, "NULL");
+    return pBuf;
+  }
+  
+  if (bufSize < 7 || bufSize > 65535) {
+    // this is caused by bad parameters, usually with bufSize replaced by the sig
+    strcpy(pBuf, "BADP");
+    return pBuf;
+  }
 
   switch (icGetColorSpaceType(nSig)) {
     case icSigNChannelData:
@@ -1179,7 +1245,7 @@ const icChar *icGetColorSigStr(icChar *pBuf, size_t bufSize, icUInt32Number nSig
           else if (j!=-1) {
             bGetHexVal = true;
           }
-          else if (!isprint(c) ||c==':') {
+          else if (!isprint(c) || c==':' || c > 126) {
             c='?';
             bGetHexVal = true;
           }
@@ -1268,6 +1334,9 @@ icSignature icGetSecondSigPathSig(std::string sigPath)
 icUInt32Number icGetSigVal(const icChar *pBuf)
 {
   icUInt32Number v;
+  
+  if (!pBuf)    // can't return an error, so do something sane to avoid a segfault
+    return 0;
 
   switch(strlen(pBuf)) {
     case 0:
@@ -1922,6 +1991,12 @@ const icChar *CIccInfo::GetCmmSigName(icCmmSignature sig)
 
   case icSigHeidelberg:
     return "Heidelberg";
+  
+  case icSigLinoColor:
+    return "LinoColor";
+  
+  case icSigMonaco:
+    return "Monaco";
 
   case icSigLittleCMS:
     return "Little CMS";

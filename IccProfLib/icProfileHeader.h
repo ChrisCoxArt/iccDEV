@@ -166,7 +166,7 @@ authorization from SunSoft Inc.
 #ifndef icPROFILEHEADER_H
 #define icPROFILEHEADER_H
 
-#if !defined(ICCCONFIG_h)
+#if !defined(_ICCCONFIG_h)
     #error Include IccProfLibConf.h before this file
 #endif
 
@@ -320,18 +320,23 @@ typedef double icFloat64Number;
 /** 16-bit unicode characters **/
 typedef icUInt16Number icUnicodeChar;
 
-#define icDataTypeMask 0x0000ffff
-#define icCompressedData 0x00010000
-
 /*------------------------------------------------------------------------*/
 
-typedef enum {     /* Used in dataType Tags */
+// This is actually a bitfield, be careful when defining new values
+typedef enum : uint32_t {     /* Used in dataType Tags */
   icAsciiData                             = 0x0000,
   icBinaryData                            = 0x0001,
   icUtfData                               = 0x0002,
+  
+  icDataTypeMask                          = 0x0000ffff,
+  icCompressedData                        = 0x00010000,
+  
   icCompressedAsciiData                   = icCompressedData|icAsciiData,
   icCompressedBinaryData                  = icCompressedData|icBinaryData,
   icCompressedUtfData                     = icCompressedData|icUtfData,
+  
+/* Convenience Enum Definitions - Not defined in ICC specification */
+  icMaxDataBlockType                      = 0xFFFFFFFF,
 } icDataBlockType;
 
 
@@ -941,10 +946,13 @@ typedef enum {
 } icColorSpaceSignature;
 
 
-typedef enum {
+typedef enum : icUInt32Number {
   icSigNoMCSData                 = 0x00000000,
   icSigMCSData                   = 0x6d630000,  /* "mc0000" */
-  /*Note: "nc0001" through "ncFFFF" are also valid signatures defined using macro icNColorSpaceSig()*/
+  /*Note: "mc0001" through "mcFFFF" are also valid signatures defined using macro icNColorSpaceSig()*/
+  icSigMCSDataEnd                = 0x6d63FFFF,   // provide clues to UBSan
+
+  icSigMCSMaxEnumData            = 0xFFFFFFFF,
 } icMaterialColorSignature;
 
 #define icGetColorSpaceType(sig) ((icColorSpaceSignature)(((icUInt32Number)sig)&0xffff0000))
@@ -1014,6 +1022,8 @@ typedef enum {
     icSigArgyllCMS                      = 0x6172676C,  /* 'argl' */
     icSigLogoSync                       = 0x44676f53,  /* 'LgoS' */
     icSigHeidelberg                     = 0x48444d20,  /* 'HDM ' */
+    icSigLinoColor                      = 0x4C696E6F,  /* 'Lino' */
+    icSigMonaco                         = 0x6D6E636F,  /* 'mnco' */
     icSigLittleCMS                      = 0x6C636D73,  /* 'lcms' */
     icSigKodak                          = 0x4b434d53,  /* 'KCMS' */
     icSigKonicaMinolta                  = 0x4d434d44,  /* 'MCML' */
@@ -1355,21 +1365,26 @@ typedef enum {
                                                   are >= 256 */
 } icDMHalftoneType;
 
-typedef enum {
+typedef enum : uint16_t {
   icSparseMatrixUInt8                = 0x0001,
   icSparseMatrixUInt16               = 0x0002,
   icSparseMatrixFloat16              = 0x0003,
   icSparseMatrixFloat32              = 0x0004,
 
 /* Convenience Enum Definitions - Not defined in ICC specification */
-    icSparseMatrixFloatNum          = 0x0000,//Use internal icFloatNumber encoding
+  icSparseMatrixFloatNum            = 0x0000,//Use internal icFloatNumber encoding
+  icSparseMatrixMaximum             = 0xffff,
 } icSparseMatrixType;
 
 
-/* Image encoding type encodings for embeddedHeightImageType and embeddedNormalImageType*/
-typedef enum {
+/** Image encoding type encodings for embeddedHeightImageType and embeddedNormalImageType*/
+/* Despite looking like a bool, it must be capable of holding an unsigned 32 bit value as written in profiles */
+typedef enum : icUInt32Number {
   icPngImageType                     = 0x0000,
   icTiffImageType                    = 0x0001,
+  
+/* Convenience Enum Definitions - Not defined in ICC specification */
+  icImageTypeMaximum                 = 0xffffffff,      /* maximum to define range */
 } icImageEncodingType;
 
 

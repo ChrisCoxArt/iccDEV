@@ -85,11 +85,13 @@ bool CIccMpeXmlUnknown::ToXml(std::string &xml, std::string blanks/* = ""*/)
   //icUInt8Number *m_ptr = m_pData;
 
   const size_t bufSize = 256;
-  char line[bufSize];
-  char buf[bufSize];
+  const size_t smallBufSize = 20;
+  char line[bufSize*2];
+  char buf[smallBufSize];
   char fix[bufSize];
-  snprintf(line, bufSize, "<UnknownElement Type=\"%s\" InputChannels=\"%d\" OutputChannels=\"%d\"", 
-           icFixXml(fix, icGetSigStr(buf, bufSize, GetType())), NumInputChannels(), NumOutputChannels());
+  
+  snprintf(line, bufSize*2, "<UnknownElement Type=\"%s\" InputChannels=\"%d\" OutputChannels=\"%d\"",
+           icFixXml(fix, icGetSigStr(buf, smallBufSize, GetType())), NumInputChannels(), NumOutputChannels());
   xml += blanks + line;
 
   if (m_nReserved) {
@@ -129,6 +131,8 @@ class CIccFormulaCurveSegmentXml : public CIccFormulaCurveSegment
 {
 public:
   CIccFormulaCurveSegmentXml(icFloatNumber start, icFloatNumber end) : CIccFormulaCurveSegment(start, end) {}
+  CIccFormulaCurveSegmentXml( const CIccFormulaCurveSegment &parent ) : CIccFormulaCurveSegment(parent) {}
+  CIccFormulaCurveSegmentXml( const CIccFormulaCurveSegment *parent ) : CIccFormulaCurveSegment(*parent) {}
 
   bool ToXml(std::string &xml, std::string blanks/* = ""*/);
   bool ParseXml(xmlNode *pNode, std::string &parseStr);
@@ -162,13 +166,14 @@ icFloatNumber icGetSegPos(const char *str)
 bool CIccFormulaCurveSegmentXml::ToXml(std::string &xml, std::string blanks)
 {
   const size_t bufSize = 256;
-  char buf[bufSize];
+  const size_t smallBufSize = 20;
+  char buf[smallBufSize];
   char line[bufSize];
 
-  snprintf(line, bufSize, "<FormulaSegment Start=\"%s\"", icSegPos(buf, bufSize, m_startPoint));
+  snprintf(line, bufSize, "<FormulaSegment Start=\"%s\"", icSegPos(buf, smallBufSize, m_startPoint));
   xml += blanks + line;
 
-  snprintf(line, bufSize, " End=\"%s\"",icSegPos(buf, bufSize, m_endPoint));
+  snprintf(line, bufSize, " End=\"%s\"", icSegPos(buf, smallBufSize, m_endPoint));
   xml += line;
     
   snprintf(line, bufSize, " FunctionType=\"%d\"", m_nFunctionType);
@@ -261,6 +266,8 @@ class CIccSampledCurveSegmentXml : public CIccSampledCurveSegment
 {
 public:
   CIccSampledCurveSegmentXml(icFloatNumber start, icFloatNumber end) : CIccSampledCurveSegment(start, end) {}
+  CIccSampledCurveSegmentXml( const CIccSampledCurveSegment &parent ) : CIccSampledCurveSegment(parent) {}
+  CIccSampledCurveSegmentXml( const CIccSampledCurveSegment *parent ) : CIccSampledCurveSegment(*parent) {}
 
   bool ToXml(std::string &xml, std::string blanks/* = ""*/);
   bool ParseXml(xmlNode *pNode, std::string &parseStr);
@@ -269,13 +276,14 @@ public:
 bool CIccSampledCurveSegmentXml::ToXml(std::string &xml, std::string blanks)
 {
   const size_t bufSize = 256;
-  char buf[bufSize];
+  const size_t smallBufSize = 20;
+  char buf[smallBufSize];
   char line[bufSize];
 
-  snprintf(line, bufSize, "<SampledSegment Start=\"%s\"", icSegPos(buf, bufSize, m_startPoint));
+  snprintf(line, bufSize, "<SampledSegment Start=\"%s\"", icSegPos(buf, smallBufSize, m_startPoint));
   xml += blanks + line;
 
-  snprintf(line, bufSize, " End=\"%s\">\n",icSegPos(buf, bufSize, m_endPoint));
+  snprintf(line, bufSize, " End=\"%s\">\n",icSegPos(buf, smallBufSize, m_endPoint));
   xml += line;
 
   CIccFloatArray::DumpArray(xml, blanks+"  ", m_pSamples, m_nCount, icConvertFloat, 8);
@@ -512,6 +520,8 @@ class CIccSampledCalculatorCurveXml : public CIccSampledCalculatorCurve
 {
 public:
   CIccSampledCalculatorCurveXml(icFloatNumber first=0, icFloatNumber last=0) : CIccSampledCalculatorCurve(first, last) {}
+  CIccSampledCalculatorCurveXml( const CIccSampledCalculatorCurve &parent ) : CIccSampledCalculatorCurve(parent) {}
+  CIccSampledCalculatorCurveXml( const CIccSampledCalculatorCurve *parent ) : CIccSampledCalculatorCurve(*parent) {}
 
   bool ToXml(std::string &xml, std::string blanks/* = ""*/);
   bool ParseXml(xmlNode *pNode, std::string &parseStr);
@@ -603,16 +613,18 @@ bool CIccSampledCalculatorCurveXml::ParseXml(xmlNode *pNode, std::string &parseS
 }
 
 
-class CIccSinglSampledeCurveXml : public CIccSingleSampledCurve
+class CIccSingleSampledCurveXml : public CIccSingleSampledCurve
 {
 public:
-  CIccSinglSampledeCurveXml(icFloatNumber first = 0, icFloatNumber last = 0) : CIccSingleSampledCurve(first, last) {}
+  CIccSingleSampledCurveXml(icFloatNumber first = 0, icFloatNumber last = 0) : CIccSingleSampledCurve(first, last) {}
+  CIccSingleSampledCurveXml( const CIccSingleSampledCurve &parent ) : CIccSingleSampledCurve(parent) {}
+  CIccSingleSampledCurveXml( const CIccSingleSampledCurve *parent ) : CIccSingleSampledCurve(*parent) {}
 
   bool ToXml(std::string &xml, std::string blanks/* = ""*/);
   bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-bool CIccSinglSampledeCurveXml::ToXml(std::string &xml, std::string blanks)
+bool CIccSingleSampledCurveXml::ToXml(std::string &xml, std::string blanks)
 {
   const size_t lineSize = 256;
   char line[lineSize];
@@ -638,7 +650,7 @@ bool CIccSinglSampledeCurveXml::ToXml(std::string &xml, std::string blanks)
 }
 
 
-bool CIccSinglSampledeCurveXml::ParseXml(xmlNode *pNode, std::string &parseStr)
+bool CIccSingleSampledCurveXml::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
   xmlAttr *attr = icXmlFindAttr(pNode, "FirstEntry");
 
@@ -970,14 +982,18 @@ bool CIccSegmentedCurveXml::ToXml(std::string &xml, std::string blanks)
 {
   CIccCurveSegmentList::iterator seg;
   xml += blanks + "<SegmentedCurve>\n";
-  for (seg = m_list->begin(); seg!=m_list->end(); seg++) {
+  for (seg = m_list->begin(); seg!=m_list->end(); ++seg) {
     CIccCurveSegment* pSeg = *seg;
     if (pSeg && pSeg->GetType() == icSigFormulaCurveSeg) {
-      if (!((CIccFormulaCurveSegmentXml*)pSeg)->ToXml(xml, blanks+"  "))
+      CIccFormulaCurveSegment *fcs = static_cast<CIccFormulaCurveSegment*>(pSeg);
+      CIccFormulaCurveSegmentXml xmlSeg( fcs );
+      if (!xmlSeg.ToXml(xml, blanks+"  "))
         return false;
     }
     else if (pSeg && pSeg->GetType() == icSigSampledCurveSeg) {
-      if (!((CIccSampledCurveSegmentXml*)pSeg)->ToXml(xml, blanks+"  "))
+      CIccSampledCurveSegment *scs = static_cast<CIccSampledCurveSegment*>(pSeg);
+      CIccSampledCurveSegmentXml xmlSeg( scs );
+      if (!xmlSeg.ToXml(xml, blanks+"  "))
         return false;
     }
     else
@@ -1029,21 +1045,21 @@ bool CIccSegmentedCurveXml::ParseXml(xmlNode *pNode, std::string &parseStr)
 static bool ToXmlCurve(std::string& xml, std::string blanks, icCurveSetCurvePtr pCurve)
 {
   if (pCurve->GetType() == icSigSingleSampledCurve) {
-    CIccSinglSampledeCurveXml* m_ptr = (CIccSinglSampledeCurveXml*)pCurve;
-
-    if (!(m_ptr->ToXml(xml, blanks + "  ")))
+    CIccSingleSampledCurve *ssc = static_cast<CIccSingleSampledCurve *>(pCurve);
+    CIccSingleSampledCurveXml sscXml( ssc );
+    if (!sscXml.ToXml(xml, blanks + "  "))
       return false;
   }
   else if (pCurve->GetType() == icSigSegmentedCurve) {
-    CIccSegmentedCurveXml* m_ptr = (CIccSegmentedCurveXml*)pCurve;
-
-    if (!(m_ptr->ToXml(xml, blanks + "  ")))
+    CIccSegmentedCurve *sc = static_cast<CIccSegmentedCurve *>(pCurve);
+    CIccSegmentedCurveXml scXml( sc );
+    if (!scXml.ToXml(xml, blanks + "  "))
       return false;
   }
   else if (pCurve->GetType() == icSigSampledCalculatorCurve) {
-    CIccSampledCalculatorCurveXml* m_ptr = (CIccSampledCalculatorCurveXml*)pCurve;
-
-    if (!(m_ptr->ToXml(xml, blanks + "  ")))
+    CIccSampledCalculatorCurve *scc = static_cast<CIccSampledCalculatorCurve *>(pCurve);
+    CIccSampledCalculatorCurveXml sccXml( scc );
+    if (!sccXml.ToXml(xml, blanks + "  "))
       return false;
   }
   else
@@ -1106,7 +1122,7 @@ static icCurveSetCurvePtr ParseXmlCurve(xmlNode* pNode, std::string parseStr)
       delete pCurve;
   }
   else if (!strcmp((const char*)pNode->name, "SingleSampledCurve")) {
-    CIccSinglSampledeCurveXml* pCurve = new CIccSinglSampledeCurveXml();
+    CIccSingleSampledCurveXml* pCurve = new CIccSingleSampledCurveXml();
 
     if (pCurve->ParseXml(pNode, parseStr)) {
       rv = pCurve;
@@ -1819,6 +1835,7 @@ bool CIccMpeXmlToneMap::ParseXml(xmlNode* pNode, std::string& parseStr)
   }
   else {
     parseStr += "Missing Luminance Curve";
+    return false;
   }
 
   pSubNode = icXmlFindNode(pNode->children, "ToneMapFunctions");
@@ -1872,6 +1889,7 @@ bool CIccMpeXmlToneMap::ParseXml(xmlNode* pNode, std::string& parseStr)
     }
     if (nIndex < m_nOutputChannels) {
       parseStr += "Missing ToneMap Functions\n";
+      return false;
     }
   }
 
@@ -1962,11 +1980,12 @@ bool CIccMpeXmlExtCLUT::ParseXml(xmlNode *pNode, std::string &parseStr)
 bool CIccMpeXmlBAcs::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   const size_t bufSize = 256;
-  char line[bufSize];
-  char buf[bufSize], fix[bufSize];
+  char line[bufSize*2];
+  char buf[bufSize/2];
+  char fix[bufSize];
 
-  snprintf(line, bufSize, "<BAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
-                icFixXml(fix, icGetSigStr(buf, bufSize, m_signature)));
+  snprintf(line, bufSize*2, "<BAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
+                icFixXml(fix, icGetSigStr(buf, bufSize/2, m_signature)));
   xml += blanks + line;
 
   if (m_nReserved) {
@@ -2017,11 +2036,12 @@ bool CIccMpeXmlBAcs::ParseXml(xmlNode *pNode, std::string &parseStr)
 bool CIccMpeXmlEAcs::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   const size_t bufSize = 256;
-  char line[bufSize];
-  char buf[bufSize], fix[bufSize];
+  char line[bufSize*2];
+  char buf[bufSize/2];
+  char fix[bufSize];
 
-  snprintf(line, bufSize, "<EAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
-    icFixXml(fix, icGetSigStr(buf, bufSize, m_signature)));
+  snprintf(line, bufSize*2, "<EAcsElement InputChannels=\"%d\" OutputChannels=\"%d\" Signature=\"%s\"", NumInputChannels(), NumOutputChannels(),
+    icFixXml(fix, icGetSigStr(buf, bufSize/2, m_signature)));
   xml += blanks + line;
 
   if (m_nReserved) {
@@ -2632,14 +2652,40 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
   return true;
 }
 
+// macros can be call{a} or #a, and both could be used in the same expression!
+static
+const char *FindNextMacro(const char *macroText)
+{
+  const char *ptr = strstr(macroText, "call{");
+  const char *ptrHash = strchr(macroText, '#');
+  
+  // if only one is found, choose that one
+  // if both are found, choose the first one in the string
+  if (ptrHash && (!ptr || ptrHash < ptr))
+    ptr = ptrHash;
+
+  return ptr;
+}
+
 bool CIccMpeXmlCalculator::ValidMacroCalls(const char *szMacroText, std::string macroStack, std::string &parseStr) const
 {
   const char *ptr;
-  for (ptr = strstr(szMacroText, "call{"); ptr; ptr = strstr(ptr, "call{")) {
-    CIccFuncTokenizer parse(ptr, true);
-    parse.GetNext();
 
-    std::string name = parse.GetReference();
+  for (ptr = FindNextMacro(szMacroText); ptr; ptr = FindNextMacro(ptr)) {
+    bool isHash = false;
+    if (ptr[0] == '#') {
+      isHash = true;
+      ptr++;
+    }
+    CIccFuncTokenizer parse(ptr, true); // tokenizer doesn't seem to recoginze # syntax
+    parse.GetNext();
+    
+    std::string name;
+    if (isHash)
+      name = parse.GetName();
+    else
+      name = parse.GetReference();
+    
     MacroMap::const_iterator m = m_macroMap.find(name);
     if (m == m_macroMap.end()) {
       parseStr += "Call to undefined macro '" + name + "'\n";
@@ -2664,7 +2710,7 @@ bool CIccMpeXmlCalculator::ValidateMacroCalls(std::string &parseStr) const
   MacroMap::const_iterator m;
 
   for (m = m_macroMap.begin(); m != m_macroMap.end(); m++) {
-    if (!ValidMacroCalls(m->second.c_str(), "*", parseStr)) {
+    if (!ValidMacroCalls(m->second.c_str(), std::string("*") + m->first + "*", parseStr)) {
       return false;
     }
   }
@@ -3096,6 +3142,9 @@ bool CIccMpeXmlCalculator::ParseChanMap(ChanVarMap& chanMap, const char *szNames
 bool CIccMpeXmlCalculator::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
   xmlNode *pChild;
+
+  if (!pNode)
+    return false;
   
   SetSize(atoi(icXmlAttrValue(pNode, "InputChannels")),
           atoi(icXmlAttrValue(pNode, "OutputChannels")));
@@ -3120,7 +3169,7 @@ bool CIccMpeXmlCalculator::ParseXml(xmlNode *pNode, std::string &parseStr)
   }
 
   pChild = icXmlFindNode(pNode->children, "MainFunction");
-  if (pChild && pNode->children && pChild->children->content) {
+  if (pChild && pChild->children && pChild->children->content) {
     char *content = (char*)pChild->children->content;
     std::string flatFunc;
 
@@ -3241,7 +3290,7 @@ bool CIccMpeXmlEmissionCLUT::ParseXml(xmlNode *pNode, std::string &parseStr)
 
   m_nInputChannels = atoi(icXmlAttrValue(pNode, "InputChannels"));
   m_nOutputChannels = atoi(icXmlAttrValue(pNode, "OutputChannels"));
-  m_flags = atoi(icXmlAttrValue(pNode, "Flags", 0));
+  m_flags = atoi(icXmlAttrValue(pNode, "Flags", "0"));
 
   if (!m_nInputChannels || !m_nOutputChannels) {
     parseStr += "Invalid InputChannels or OutputChannels In CLutElement\n";
@@ -3355,7 +3404,7 @@ bool CIccMpeXmlReflectanceCLUT::ParseXml(xmlNode *pNode, std::string &parseStr)
 
   m_nInputChannels = atoi(icXmlAttrValue(pNode, "InputChannels"));
   m_nOutputChannels = atoi(icXmlAttrValue(pNode, "OutputChannels"));
-  m_flags = atoi(icXmlAttrValue(pNode, "Flags", 0));
+  m_flags = atoi(icXmlAttrValue(pNode, "Flags", "0"));
 
   if (!m_nInputChannels || !m_nOutputChannels) {
     parseStr += "Invalid InputChannels or OutputChannels In CLutElement\n";
@@ -3425,7 +3474,7 @@ bool CIccMpeXmlEmissionObserver::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
   icUInt16Number nInputChannels = atoi(icXmlAttrValue(pNode, "InputChannels"));
   icUInt16Number nOutputChannels = atoi(icXmlAttrValue(pNode, "OutputChannels"));
-  m_flags = atoi(icXmlAttrValue(pNode, "Flags"));
+  m_flags = atoi(icXmlAttrValue(pNode, "Flags", "0"));
 
   if (!nInputChannels || !nOutputChannels) {
     parseStr += "Invalid InputChannels or OutputChannels In EmissionObserverElement\n";
@@ -3508,7 +3557,7 @@ bool CIccMpeXmlReflectanceObserver::ParseXml(xmlNode *pNode, std::string &parseS
 {
   icUInt16Number nInputChannels = atoi(icXmlAttrValue(pNode, "InputChannels"));
   icUInt16Number nOutputChannels = atoi(icXmlAttrValue(pNode, "OutputChannels"));
-  m_flags = atoi(icXmlAttrValue(pNode, "Flags"));
+  m_flags = atoi(icXmlAttrValue(pNode, "Flags", "0"));
 
   if (!nInputChannels || !nOutputChannels) {
     parseStr += "Invalid InputChannels or OutputChannels In ReflectanceObserverElement\n";
