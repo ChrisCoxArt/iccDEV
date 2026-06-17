@@ -1268,6 +1268,19 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1355-roundtrip-mattrc-invertibility-regression.sh"
 )
 
+# #1395 - CIccInfo::GetProfileClassSigName appended a glued "Class" suffix to its
+# display labels ("DisplayClass", "OutputClass", ...), which is not an ICC.1/ICC.2
+# spec identifier and is redundant in every (display-only) caller. The suffix was
+# dropped; this asserts iccDumpProfile now prints the de-suffixed name ("Display",
+# "Output", ...) for one committed profile per deviceClass, with no trailing "Class".
+iccdev_add_script_test(
+  iccdev.issue-1395-profileclass-signame
+  120
+  "iccdev;tools;dump;signame;issue-1395;regression"
+  "${ICCDEV_REPO_ROOT}"
+  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1395-profileclass-signame.sh"
+)
+
 # #1394 - CIccTagXmlNum::ToXml walked m_nSize without a bound, so a malformed
 # ui08/ui16/ui32/ui64 array drove an unbounded serialization loop (CWE-400/834):
 # a ~16 MB ui08 tag ballooned to ~80 MB of XML. Asserts the 0xffffff cap refuses
