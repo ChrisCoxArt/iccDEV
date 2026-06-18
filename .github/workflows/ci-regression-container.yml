@@ -10,6 +10,10 @@
 
 name: ci-regression-container
 
+# Existing pinned SHAs, labels, and smoke commands exceed line length.
+# Keep this yamllint disable local to this workflow.
+# yamllint disable rule:line-length
+
 permissions:
   contents: read
 
@@ -38,6 +42,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     defaults:
       run:
         shell: bash --noprofile --norc {0}
@@ -81,7 +86,7 @@ jobs:
             type=ref,event=branch
 
       - name: Log in to GHCR
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
@@ -97,17 +102,19 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           no-cache: true
           pull: true
-          load: ${{ github.ref != 'refs/heads/master' }}
-          push: ${{ github.ref == 'refs/heads/master' }}
-          provenance: ${{ github.ref == 'refs/heads/master' && 'mode=max' || 'false' }}
-          sbom: ${{ github.ref == 'refs/heads/master' }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          load: ${{ github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/master' }}
+          push: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
+          provenance: ${{ (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master') && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.ref.name=${{ github.ref_name }}
 
       - name: Attest build provenance
-        if: github.ref == 'refs/heads/master'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
         uses: actions/attest-build-provenance@f14352a605c57b0a66e0d49bba5825967f1dbedf  # v3.2.0
         with:
           subject-name: ${{ steps.image.outputs.name }}
@@ -121,7 +128,7 @@ jobs:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
           EXPECTED_REF_NAME: ${{ github.ref_name }}
           EXPECTED_SHA: ${{ github.sha }}
-          PUBLISH_IMAGE: ${{ github.ref == 'refs/heads/master' }}
+          PUBLISH_IMAGE: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -149,39 +156,59 @@ jobs:
 
           docker run --rm "$TEST_IMAGE" bash -lc '
             set -euo pipefail
-            command -v git clang clang++ cmake make realpath
+            command -v git clang clang++ gcc g++ cmake make realpath afl-fuzz llvm-symbolizer
+            command -v clang-tidy cppcheck scan-build valgrind gdb lcov gcovr jq curl shellcheck
             clang --version | sed -n "1p"
             clang++ --version | sed -n "1p"
+            clang-tidy --version | sed -n "1p"
+            gcc --version | sed -n "1p"
+            g++ --version | sed -n "1p"
             cmake --version | sed -n "1p"
+            afl-fuzz -V 1 2>&1 | sed -n "1p" || true
             /usr/bin/time --version | sed -n "1p"
             printf "int main(void){return 0;}\n" > /tmp/asan-smoke.c
             clang -fsanitize=address,undefined,integer,bounds,null,float-divide-by-zero,alignment,vla-bound \
               -fno-omit-frame-pointer -g -O0 /tmp/asan-smoke.c -o /tmp/asan-smoke
             /tmp/asan-smoke
+            gcc -Wall -Wextra -Werror /tmp/asan-smoke.c -o /tmp/gcc-warning-smoke
+            /tmp/gcc-warning-smoke
           '
 
-          docker run --rm \
-            -v "$PWD":/workspace/iccDEV-src:ro \
-            "$TEST_IMAGE" bash -lc '
+          docker run --rm "$TEST_IMAGE" bash -lc '
             set -euo pipefail
-            work="$(mktemp -d)"
-            git config --global --add safe.directory /workspace/iccDEV-src
-            git config --global --add safe.directory /workspace/iccDEV-src/.git
-            git clone /workspace/iccDEV-src "$work/iccDEV"
-            cd "$work/iccDEV/Build"
+            test "$PWD" = /workspace/iccDEV
+            test -d .git
+            test -f IccProfLib/IccProfile.cpp
+            git remote get-url origin
+            command -v iccDumpProfile
+            test -d "$ICCDEV_BUILD_DIR"
+            cmake --build "$ICCDEV_BUILD_DIR" --target iccDumpProfile --parallel "$(nproc)"
             git branch && echo "---" && git log --oneline -1
+            git status --short | sed -n "1,20p"
+            git fetch --dry-run origin
+            banner="$(/usr/local/bin/iccdev-banner)"
+            grep -q "Reference ICC profiles present:" <<< "$banner"
+            work="$(mktemp -d)"
+            cd "$work"
             SAN_FLAGS="-fsanitize=address,undefined,integer,bounds,null,float-divide-by-zero,alignment,vla-bound"
+            export CFLAGS="$SAN_FLAGS -fno-omit-frame-pointer -g -O0"
             export CXXFLAGS="$SAN_FLAGS -fno-omit-frame-pointer -g -O0"
             export LDFLAGS="$SAN_FLAGS"
-            CC=clang CXX=clang++ cmake Cmake \
+            CC=clang CXX=clang++ cmake /workspace/iccDEV/Build/Cmake \
               -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_C_COMPILER=clang \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_C_FLAGS="$SAN_FLAGS -fno-omit-frame-pointer -g -O0" \
+              -DCMAKE_CXX_FLAGS="$SAN_FLAGS -fno-omit-frame-pointer -g -O0 -std=c++17" \
               -DENABLE_ASAN=ON \
               -DENABLE_UBSAN=ON \
+              -DENABLE_INTEGER_SANITIZER=ON \
+              -DENABLE_FLOAT_SANITIZER=ON \
               -DENABLE_TOOLS=ON
             make -j"$(nproc)" iccDumpProfile
-            cd ../Testing/
+            cd /workspace/iccDEV/Testing/
             echo "=== Updating PATH ==="
-            for d in ../Build/Tools/*; do
+            for d in "$ICCDEV_BUILD_DIR"/Tools/*; do
               [ -d "$d" ] && export PATH="$(realpath "$d"):$PATH"
             done
             printf "%s\n%s\n%s\n" \
@@ -203,7 +230,7 @@ jobs:
           BASH_ENV: /dev/null
           IMAGE_REF: ${{ steps.image.outputs.name }}@${{ steps.build-push.outputs.digest }}
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-          PUBLISH_IMAGE: ${{ github.ref == 'refs/heads/master' }}
+          PUBLISH_IMAGE: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
           TRIVY_IMAGE: aquasec/trivy@sha256:5c59e08f980b5d4d503329773480fcea2c9bdad7e381d846fbf9f2ecb8050f6b
         run: |
           set -euo pipefail
