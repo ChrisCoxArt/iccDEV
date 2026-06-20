@@ -123,6 +123,7 @@ public:
   unsigned int GetCompress() { return m_nCompress; }
   unsigned int GetPlanar() { return m_nPlanar; }
   unsigned int GetSampleFormat() { return m_nSampleFormat; }
+  unsigned int GetOrientation() { return m_nOrientation; }
   float GetXRes() {return m_fXRes;}
   float GetYRes() {return m_fYRes;}
 
@@ -145,6 +146,7 @@ protected:
   icUInt16Number m_nPlanar;
   icUInt16Number m_nCompress;
   icUInt16Number m_nSampleFormat;
+  icUInt16Number m_nOrientation;
 
   float m_fXRes;
   float m_fYRes;
