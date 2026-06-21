@@ -200,6 +200,53 @@ function(iccdev_add_tag_layout_shared_data_test)
   endif()
 endfunction()
 
+# Guards iccPawgReport's internal-PCS-XYZ decode in the quality metrics (#1454):
+# iccquality::pcs_to_lab must un-scale an XYZ-PCS sample (a CMM output is
+# internal PCS XYZ, ~0.5x actual) with icXyzFromPcs before icXYZtoLab, exactly as
+# IccEval.cpp does -- without it an XYZ-PCS white decoded to L* ~= 76 and every
+# Q1/Q3/Q4 dE was computed in a distorted Lab space.  The test decodes an
+# internal-PCS D50 white (must be L*=100, not ~76) and runs Q4 on an in-memory
+# XYZ-PCS matrix profile against an absolute-colorimetric target (must reproduce
+# to ~0 dE).  Header-only metrics, so it just needs the IccPawgReport include dir
+# + IccProfLib.
+function(iccdev_add_pawg_q4_xyz_pcs_decode_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccPawgQ4XyzPcsDecodeTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/pawg-q4-xyz-pcs-decode.cpp"
+  )
+  target_include_directories(iccPawgQ4XyzPcsDecodeTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/Tools/CmdLine/IccPawgReport"
+  )
+  target_link_libraries(iccPawgQ4XyzPcsDecodeTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccPawgQ4XyzPcsDecodeTest)
+
+  add_test(
+    NAME iccdev.pawg-q4-xyz-pcs-decode
+    COMMAND "$<TARGET_FILE:iccPawgQ4XyzPcsDecodeTest>"
+  )
+  set_tests_properties(iccdev.pawg-q4-xyz-pcs-decode PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;pawg;quality;characterization;regression"
+  )
+  if(WIN32)
+    set(_pawg_q4_xyz_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccPawgQ4XyzPcsDecodeTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _pawg_q4_xyz_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.pawg-q4-xyz-pcs-decode PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_pawg_q4_xyz_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # Guards iccPawgReport's Q2 curve-invertibility scope (#1458): the round-trip
 # inverse-error metric must apply to tone-reproduction curves (rTRC/gTRC/bTRC/
 # kTRC) only, not to LUT A/B/M shaper curves.  A B2A output shaper curve
@@ -755,6 +802,7 @@ if(WIN32)
   iccdev_add_tag_layout_shared_data_test()
   iccdev_add_pawg_q2_tonecurves_test()
   iccdev_add_pawg_q4_characterization_test()
+  iccdev_add_pawg_q4_xyz_pcs_decode_test()
   iccdev_add_cmmsearch_namedcolor_ownership_test()
   iccdev_add_xform_create_tag_ownership_test()
   iccdev_add_windows_iccdevcmm_smoke_test()
@@ -816,6 +864,7 @@ iccdev_add_parser_restore_calls_test()
 iccdev_add_tag_layout_shared_data_test()
 iccdev_add_pawg_q2_tonecurves_test()
 iccdev_add_pawg_q4_characterization_test()
+iccdev_add_pawg_q4_xyz_pcs_decode_test()
 iccdev_add_cmmsearch_namedcolor_ownership_test()
 iccdev_add_xform_create_tag_ownership_test()
 
