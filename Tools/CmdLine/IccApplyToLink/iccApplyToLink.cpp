@@ -71,6 +71,8 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
+#include <list>
 #include "IccCmm.h"
 #include "IccUtil.h"
 #include "IccDefs.h"
@@ -88,15 +90,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
-
-
-// ============================================================================
-
-static
-FILE* icOpenWriteBinaryFile(const char* szFname)
-{
-  return icOpenRegularWriteBinaryFile(szFname);
-}
 
 // ============================================================================
 
@@ -187,7 +180,7 @@ public:
       return false;
     }
 
-    m_f = icOpenWriteBinaryFile(m_filename.c_str());
+    m_f = icOpenRegularWriteBinaryFile(m_filename.c_str());
     if (!m_f) {
       printf("Unable to open '%s'\n", m_filename.c_str());
       return false;
@@ -205,7 +198,7 @@ public:
     fprintf(m_f, "LUT_3D_SIZE %d\n", m_grid);
 
     if (!icIsNear(m_fMinInput, 0.0f) || !icIsNear(m_fMaxInput, 1.0f)) {
-      const size_t fmtSize = 100;
+      const size_t fmtSize = 100;   // allow for twice precision
       char fmt[fmtSize];
       snprintf(fmt, fmtSize, "LUT_3D_INPUT_RANGE %%.%df %%.%df\n", m_precision, m_precision);
       fprintf(m_f, fmt, m_fMinInput, m_fMaxInput);
@@ -234,7 +227,7 @@ public:
 
   virtual void setNextNode(icFloatNumber* pPixel)
   {
-    const size_t fmtSize = 30;
+    const size_t fmtSize = 50;  // must be larger than allowed precision
     char fmt[fmtSize];
     snprintf(fmt, fmtSize, "%%.%df", m_precision);
 
@@ -601,10 +594,6 @@ protected:
   CIccTagProfileSeqDesc* m_pTagSeq = nullptr;
 };
 
-
-typedef std::list<CIccProfile*> IccProfilePtrList;
-
-
 void Usage() 
 {
   printf("iccApplyToLink built with IccProfLib version " ICCPROFLIBVER "\n\n");
@@ -665,13 +654,15 @@ void Usage()
 
 //===================================================
 
+typedef std::vector<CIccProfile*> IccProfilePtrList;
+
 // The tool owns every -PCC profile it opens until cmm.Begin() has consumed the
 // connection conditions; they are tracked in pccList and must be released on
 // every exit path.  Centralizing the release here keeps the early-return error
 // paths from stranding them (#1336).
 static void releasePccList(IccProfilePtrList& pccList)
 {
-  for (IccProfilePtrList::iterator pcc = pccList.begin(); pcc != pccList.end(); pcc++) {
+  for (IccProfilePtrList::iterator pcc = pccList.begin(); pcc != pccList.end(); ++pcc) {
     delete *pcc;
   }
   pccList.clear();
@@ -890,30 +881,25 @@ int main(int argc, icChar* argv[])
   //Get and validate the destination color space from theCmm.
   icColorSpaceSignature DestspaceSig = theCmm.GetDestSpace();
   int nDestSamples = icGetSpaceSamples(DestspaceSig);
-
-  int* idx = new int[nSrcSamples];
   
-  //init idx;
   size_t lutCount = 1;
   size_t lutLimit = (((1ULL<<32)-1) / nLutSize);     // limit to 4 Gig(32 bits) instead of size_t(64 bits)
   for (auto si = 0; si < nSrcSamples; si++) {
-    idx[si] = 0;
     if (lutCount > lutLimit ) {    // avoid overflow
       printf("LUT size too large\n");
-      delete[] idx;
       return -1;
     }
     lutCount *= nLutSize;
   }
 
-  icFloatNumber* srcPixel = new icFloatNumber[nSrcSamples];
-  icFloatNumber* dstPixel = new icFloatNumber[nDestSamples];
+  std::vector<int> idx(nSrcSamples,0);
+  std::vector<icFloatNumber> srcPixel(nSrcSamples);
+  std::vector<icFloatNumber> dstPixel(nDestSamples);
 
   // 2 <= nLutSize <= 255, so maxLUT cannot be zero
   icUInt32Number maxLut = nLutSize - 1;
-
-  int curPer, lastPer = -1;
-
+  int lastPer = -1;
+  
   int j = 0;
   for (int c = 0; j >= 0; c++) {
 
@@ -922,9 +908,9 @@ int main(int argc, icChar* argv[])
     }
 
     //Use CMM to convert SrcPixel to DestPixel
-    theCmm.Apply(dstPixel, srcPixel);
+    theCmm.Apply(&dstPixel[0], &srcPixel[0]);
 
-    pWriter->setNextNode(dstPixel);
+    pWriter->setNextNode(&dstPixel[0]);
 
     for (j = nSrcSamples - 1; j >= 0;) {
       idx[j]++;
@@ -938,17 +924,13 @@ int main(int argc, icChar* argv[])
  
     //Display status of how much we have accomplished
     if (lutCount > 0) {     // explicit check to avoid divide by zero
-        curPer = ((c + 1) * 100) / lutCount;
+        int curPer = ((c + 1) * 100) / lutCount;
         if (curPer != lastPer) {
           printf("\r%d%%", curPer);
           lastPer = curPer;
         }
     }
   }
-  
-  delete[] dstPixel;
-  delete[] srcPixel;
-  delete[] idx;
 
   if (pWriter->finish()) {
     printf("\nLUT successfully written to '%s'\n", argv[1]);
