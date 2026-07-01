@@ -737,6 +737,169 @@ function(iccdev_add_dpcc_pcc_replacement_test)
   endif()
 endfunction()
 
+# Guards the IccVizModel CLUT->raster lattice walk against heap-buffer-overflow
+# reads (#1548): buildClutRaster() derived its tile-packing geometry
+# (tiles/tileWidth/tileHeight strides) from the grid arrangement, NOT from the
+# CLUT's actual sample array, so a malformed / non-square CLUT drove the computed
+# input index past the end of clut->GetData() -- a 4-byte heap OOB read ASan
+# trapped both while Enumerate() probed the tag and on an explicit `raster`
+# render.  The test renders the A2B0 CLUT of a minimized fuzz profile through the
+# built iccProfilePlot CLI; the read is now bounded by the true element count, so
+# it exits 0, whereas the pre-fix code aborts under ASan.  This drives the real
+# tool binary (the bug lives in tool sources, not IccProfLib), so it is most
+# meaningful under the ASAN+UBSAN tool job but also a plain smoke test elsewhere.
+function(iccdev_add_iccprofileplot_clut_oob_test)
+  if(NOT TARGET iccProfilePlot)
+    return()
+  endif()
+  add_dependencies(check iccProfilePlot)
+
+  # Invoke the tool directly (no ICCDEV_TEST_ENV wrapper): ASan's default
+  # abort-on-error already yields a non-zero exit on the OOB read, which is the
+  # failure signal ctest needs; on a non-sanitizer build the bounded walk simply
+  # renders and exits 0.
+  add_test(
+    NAME iccdev.iccprofileplot-clut-oob
+    COMMAND "$<TARGET_FILE:iccProfilePlot>"
+      "${ICCDEV_REPO_ROOT}/.github/ci/test-data/fuzz-clut-hbo-69197729.icc"
+      raster clut:A2B0
+  )
+  set_tests_properties(iccdev.iccprofileplot-clut-oob PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofileplot;viz;clut;oob;issue-1548;regression"
+  )
+  if(WIN32)
+    set(_clut_oob_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccProfilePlot>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _clut_oob_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.iccprofileplot-clut-oob PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_clut_oob_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards PDFWriter object ownership in the IccProfilePlot report writer (#1547):
+# PDFWriter::CloseFile() cleared its owning m_objects vector on the success path
+# (and early-returned on the write-failure path) BEFORE the unified delete loop,
+# leaking every PDFObject -- including the per-page PDFPage allocations from
+# AddPage() (the 3456-byte / 36-object direct leak in the CI report).  The test
+# runs the built iccProfileVisualizePlot CLI over the stock sRGB v4 profile, which
+# emits a multi-page LUT PDF and so exercises AddPage(), under forced
+# LeakSanitizer; with cleanup routed through the single delete loop it exits 0,
+# whereas the pre-fix writer leaks (non-zero exit).
+function(iccdev_add_iccprofileplot_pdf_leak_test)
+  if(NOT TARGET iccProfileVisualizePlot)
+    return()
+  endif()
+  add_dependencies(check iccProfileVisualizePlot)
+
+  # The pass/fail signal IS the LeakSanitizer at-exit scan, but the CI tool job
+  # and ICCDEV_TEST_ENV export ASAN_OPTIONS=...detect_leaks=0 to silence unrelated
+  # tool leaks.  Inheriting that would make this a false pass, so launch through
+  # `cmake -E env ASAN_OPTIONS=detect_leaks=1` to force leak detection on for this
+  # process only (same mechanism as the cmmsearch/xform ownership tests).  The
+  # tool writes its PDF/TIFF beside the CWD, so run inside the ctest output dir.
+  add_test(
+    NAME iccdev.iccprofileplot-pdf-leak
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "ASAN_OPTIONS=detect_leaks=1"
+      "$<TARGET_FILE:iccProfileVisualizePlot>"
+      "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+  )
+  set_tests_properties(iccdev.iccprofileplot-pdf-leak PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofileplot;viz;pdf;leak;issue-1547;regression"
+  )
+  if(WIN32)
+    set(_pdf_leak_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccProfileVisualizePlot>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _pdf_leak_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.iccprofileplot-pdf-leak PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_pdf_leak_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards the process exit codes of the IccProfilePlot tools (#1550 QA findings):
+# both tools previously returned 0 even when the work failed, so scripts and CI
+# would treat a bad run as success.  Two WILL_FAIL tests assert the deliberate
+# nonzero exit:
+#   * Finding 1 -- iccProfileVisualizePlot on a non-ICC input must exit nonzero
+#     (it parses nothing and produces no output).  We feed it the tool's own
+#     Readme.md, a guaranteed-present file that is clearly not a profile.
+#   * Finding 2 -- iccProfilePlot raster with an unwritable raw-output path must
+#     exit nonzero.  We point the optional out.raw at the ctest output DIRECTORY:
+#     icOpenRegularWriteBinaryFile rejects it (not a regular file), reproducing
+#     the "could not open output file" path portably, without an OS-specific
+#     "/no/such/dir".  The render itself still succeeds, isolating the exit-code
+#     contract.  WILL_FAIL passes iff the process returns nonzero.
+function(iccdev_add_iccprofileplot_exitcode_test)
+  if(TARGET iccProfileVisualizePlot)
+    add_dependencies(check iccProfileVisualizePlot)
+    add_test(
+      NAME iccdev.iccprofileplot-viz-badinput-exitcode
+      COMMAND "$<TARGET_FILE:iccProfileVisualizePlot>"
+        "${ICCDEV_REPO_ROOT}/Tools/CmdLine/IccProfilePlot/Readme.md"
+    )
+    set_tests_properties(iccdev.iccprofileplot-viz-badinput-exitcode PROPERTIES
+      WILL_FAIL TRUE
+      WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+      TIMEOUT 60
+      LABELS "iccdev;iccprofileplot;viz;exitcode;issue-1550;regression"
+    )
+  endif()
+
+  if(TARGET iccProfilePlot)
+    add_dependencies(check iccProfilePlot)
+    add_test(
+      NAME iccdev.iccprofileplot-raster-badoutput-exitcode
+      COMMAND "$<TARGET_FILE:iccProfilePlot>"
+        "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+        raster clut:A2B0 "${ICCDEV_TEST_OUTDIR}"
+    )
+    set_tests_properties(iccdev.iccprofileplot-raster-badoutput-exitcode PROPERTIES
+      WILL_FAIL TRUE
+      WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+      TIMEOUT 60
+      LABELS "iccdev;iccprofileplot;raster;exitcode;issue-1550;regression"
+    )
+  endif()
+
+  if(WIN32)
+    set(_exitcode_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _exitcode_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    if(TARGET iccProfileVisualizePlot)
+      set_tests_properties(iccdev.iccprofileplot-viz-badinput-exitcode PROPERTIES
+        ENVIRONMENT_MODIFICATION
+          "${_exitcode_windows_env_mods};PATH=path_list_prepend:$<TARGET_FILE_DIR:iccProfileVisualizePlot>"
+      )
+    endif()
+    if(TARGET iccProfilePlot)
+      set_tests_properties(iccdev.iccprofileplot-raster-badoutput-exitcode PROPERTIES
+        ENVIRONMENT_MODIFICATION
+          "${_exitcode_windows_env_mods};PATH=path_list_prepend:$<TARGET_FILE_DIR:iccProfilePlot>"
+      )
+    endif()
+  endif()
+endfunction()
+
 function(iccdev_add_fileio_getlength_position_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -1152,6 +1315,9 @@ if(WIN32)
   iccdev_add_gbd_zero_pcs_test()
   iccdev_add_extended_device_colorspace_test()
   iccdev_add_dpcc_pcc_replacement_test()
+  iccdev_add_iccprofileplot_clut_oob_test()
+  iccdev_add_iccprofileplot_pdf_leak_test()
+  iccdev_add_iccprofileplot_exitcode_test()
   iccdev_add_windows_iccdevcmm_smoke_test()
 
   return()
@@ -1242,6 +1408,9 @@ iccdev_add_getvalues_nstart_test()
 iccdev_add_gbd_zero_pcs_test()
 iccdev_add_extended_device_colorspace_test()
 iccdev_add_dpcc_pcc_replacement_test()
+iccdev_add_iccprofileplot_clut_oob_test()
+iccdev_add_iccprofileplot_pdf_leak_test()
+iccdev_add_iccprofileplot_exitcode_test()
 
 function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
   if(NOT EXISTS "${SCRIPT}")
