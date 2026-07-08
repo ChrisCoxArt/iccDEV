@@ -21,6 +21,16 @@ permissions:
   contents: read
 
 on:
+  push:
+    branches:
+      - master
+      - ci-qa-flags
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.nixos"
+      - "Dockerfile.ci-regression"
+      - "Dockerfile.mcp"
+      - ".github/workflows/ci-docker.yml"
   workflow_dispatch:
 
 concurrency:
@@ -94,6 +104,14 @@ jobs:
             workdir: /workspace/iccDEV
             tools_dir: /workspace/build/Tools
             run_shell: bash
+          - variant: mcp
+            runner: ubuntu-latest
+            image: iccdev-mcp
+            dockerfile: Dockerfile.mcp
+            suffix: "-mcp"
+            workdir: /opt/iccdev
+            tools_dir: /opt/iccdev/Build/Tools
+            run_shell: bash
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
@@ -126,18 +144,21 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
 
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           if [[ ! "$owner" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
             echo "Invalid repository owner for image name" >&2
             exit 1
           fi
-          if [[ ! "$MATRIX_IMAGE" =~ ^iccdev(-nixos|-ci-regression)?$ ]]; then
+          if [[ ! "$MATRIX_IMAGE" =~ ^iccdev(-nixos|-ci-regression|-mcp)?$ ]]; then
             echo "Invalid Docker image name" >&2
             exit 1
           fi
 
-          printf 'name=ghcr.io/%s/%s\n' "$owner" "$MATRIX_IMAGE" >> "$GITHUB_OUTPUT"  # elements-sanitized
+          printf 'name=ghcr.io/%s/%s\n' \
+            "$(sanitize_line "$owner")" \
+            "$(sanitize_line "$MATRIX_IMAGE")" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
         with:
@@ -580,7 +601,12 @@ jobs:
             command -v iccDumpProfile
             test -d "$ICCDEV_BUILD_DIR"
             cmake --build "$ICCDEV_BUILD_DIR" --target iccDumpProfile --parallel "$(nproc)"
-            git branch && echo "---" && git log --oneline -1
+            git branch && echo "---"
+            if git rev-parse --verify HEAD >/dev/null 2>&1; then
+              git log --oneline -1
+            else
+              echo "Synthetic Docker source tree has no local commits"
+            fi
             git status --short | sed -n "1,20p"
             git fetch --dry-run origin
             banner="$(/usr/local/bin/iccdev-banner)"
