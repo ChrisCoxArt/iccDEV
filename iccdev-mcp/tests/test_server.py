@@ -242,9 +242,19 @@ class TestNativeTools:
         assert isinstance(result, dict)
         assert "version_string" in result
         assert "color_space_name" in result
+        assert "color_space_display" in result
         assert "device_class_name" in result
+        assert "pcs_display" in result
+        assert "platform_display" in result
         assert "profile_id" in result
         assert result["file_size"] > 0
+        assert all(0x20 <= ord(ch) <= 0x7E for ch in result["color_space_display"])
+
+    def test_printable_signature_accepts_int_and_str(self):
+        from iccdev_mcp.server import _printable_signature
+        assert _printable_signature(0x52474220) == "RGB "
+        assert _printable_signature(0x6E630011) == "nc.."
+        assert _printable_signature("\x00\x00\x00\x00") == "...."
 
     def test_enum_spaces(self):
         from iccdev_mcp.server import enum_spaces
