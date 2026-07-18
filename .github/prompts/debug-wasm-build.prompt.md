@@ -2,6 +2,10 @@
 
 Use this prompt when the WASM CI workflow fails (ci-pr-wasm.yml).
 
+The current WASM target is the staged Node/npm-style module package. The legacy
+browser UI under `wasm/` has been removed; do not debug or restore HTML pages,
+CSS, browser runtime JavaScript, or Playwright HTML tests for this workflow.
+
 ## Quick Diagnosis
 
 ### 1. Check if emsdk fetch failed
@@ -53,13 +57,21 @@ emcmake cmake ../Build/Cmake \
 - **17 JS modules** (one per published WASM CLI tool, excluding IccDumpProfileGui)
 - **17 WASM binaries** (matching .wasm files)
 - Third-party: `libIccProfLib2.a`, `libIccXML2.a`, `libxml2.a`
+- Staged package from `Build/Cmake/wasm-package/stage.sh`; no `wasm/*.html`,
+  `wasm/*.css`, or `wasm/*.js` browser assets are required.
 
 ### Validation Step
 ```bash
 # Verify JS modules are valid (not truncated)
-for js in Build/Tools/*/icc*.js; do
-  node -e "require('$js')" 2>/dev/null && echo "OK: $js" || echo "FAIL: $js"
+for js in Tools/*/icc*.js; do
+  node -e "require('./$js')" 2>/dev/null && echo "OK: $js" || echo "FAIL: $js"
 done
+
+repo_root="$(cd .. && pwd)"
+bash "$repo_root/Build/Cmake/wasm-package/stage.sh" "$PWD" "$repo_root/wasm-stage" 0.0.0-local
+cd "$repo_root/wasm-stage"
+node test_all.js
+node regression.js
 ```
 
 ## Common Pitfalls
