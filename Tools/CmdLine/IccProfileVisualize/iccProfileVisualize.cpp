@@ -1,7 +1,7 @@
 /*
   File:     iccProfileVisualize.cpp
 
-  Contains:   Console app to output LUTs as images and PDF plots
+  Contains:   Console app to output parts of a profile as images and PDF plots
 
   Version:  V1
 
@@ -77,31 +77,14 @@
 #include "IccProfLibVer.h"
 #include "../IccCmdLineUtil.h"
 #include "MiniTIFF.hpp"
-#include "MiniSVG.hpp"
 #include "MiniPDF.hpp"
 #include "spectralLocus.hpp"
 #include "errorLog.hpp"
 
-// #define MEMORY_LEAK_CHECK to enable C RTL memory leak checking (slow!)
-#define MEMORY_LEAK_CHECK
-
-#if defined(_WIN32) || defined(WIN32)
-#include <crtdbg.h>
-#elif defined(__GLIBC__)
-#include <mcheck.h>
-#endif
 
 #ifdef _WIN32
 // work around Windows non-standard headers
   #define strcasecmp _stricmp
-#endif
-
-/******************************************************************************/
-
-// NOTE - ccox - multipage SVG doesn't work, but we may want to use SVG for UI drawing.
-// So I'm keeping the code, but disabling output.
-#ifndef USE_SVG
-#define USE_SVG     false
 #endif
 
 /******************************************************************************/
@@ -187,6 +170,7 @@ void LogAnError(FILE *stream, const char* format, ...)
 
 struct XYColor
 {
+  XYColor () : x(0), y(0) {}
   XYColor (float xx, float yy) : x(xx), y(yy) {}
 
   bool operator<(const XYColor& o) const {
@@ -256,45 +240,177 @@ std::vector<P> convex_hull2D(std::vector<P> points_in)
 
 /******************************************************************************/
 
-#if USE_SVG
-static
-void DrawAxisSVG( SVGOut &svgfile, const point2D &basepoint, const point2D &range,
-        const point2D &tickLength, const std::string &label )
-{
-  // main line
-  svgfile.AddLine( basepoint, basepoint+range );
+struct namedXY {
+    namedXY() : x(0), y(0) {}
 
-  // big marks for 0.0, 0.5, and 1.0
-  point2D start0 = basepoint;
-  svgfile.AddLine( start0, start0+tickLength );
-  point2D start1 = basepoint + range;
-  svgfile.AddLine( start1, start1+tickLength );
-  point2D start2 = basepoint + range*0.5f;
-  svgfile.AddLine( start2, start2+tickLength );
+    namedXY( std::string nn, float xx, float yy ) :
+        name(nn), x(xx), y(yy) {}
 
-  // small marks for each tenth that isn't 0.5
-  for (int i = 1; i < 10; ++i) {
-    if (i == 5) continue;
-    point2D startN = basepoint + range*(i/10.0f);
-    svgfile.AddLine( startN, startN+tickLength*0.5f);
+    std::string name;
+    float x, y;
+};
+
+typedef std::vector<namedXY> namedXYList;
+
+/******************************************************************************/
+
+struct namedLAB {
+    namedLAB() : L(0), a(0), b(0) {}
+
+    namedLAB( std::string nn, float LL, float aa, float bb ) :
+        name(nn), L(LL), a(aa), b(bb) {}
+
+    std::string name;
+    float L, a, b;
+};
+
+typedef std::vector<namedLAB> namedLabList;
+
+/******************************************************************************/
+
+// parent classs for abstraction
+struct dataAbstractionBase {
+  virtual ~dataAbstractionBase() {};
+  virtual std::string getDataType() const = 0;
+};
+
+/******************************************************************************/
+
+// document class
+struct profileVisualizationData {
+
+  // because this class owns the pointers
+  ~profileVisualizationData() {
+    for (auto ptr : pages)
+        delete ptr;
   }
 
-  // small marks for each hundredth
-  for (int i = 1; i < 100; ++i) {
-    if ((i % 10) == 0) continue;
-    point2D startN = basepoint + range*(i/100.0f);
-    svgfile.AddLine( startN, startN+tickLength*0.25f);
+  // this class takes ownership of the pointers
+  void addPage( dataAbstractionBase *obj ) {
+    pages.push_back(obj);
   }
 
-  // label near halfway
-  std::string font = "Arial";
-  std::string style = "Regular";
-  std::string align = "Center";
-  point2D labelPt = basepoint + range*0.5f + tickLength*2.0f;
-  float rotation = (range.x == 0.0) ? 90 : 0;   // horiz or vertical
-  svgfile.AddText( labelPt.x, labelPt.y, label, 14, font, style, align, rotation );
-}
-#endif  // USE_SVG
+  std::string name;             // sanitized filename
+  std::vector<dataAbstractionBase *> pages;
+};
+
+/******************************************************************************/
+
+// xy chromaticity
+struct xyPlotData : dataAbstractionBase {
+
+  xyPlotData() : printLabels(true) {}
+
+  xyPlotData(const std::string &name, const std::string &label, bool printLabelFlag,
+              const namedXYList &points_alone, const namedXYList &points_outlined ) {
+    object_name = name;
+    object_label = label;
+    printLabels = printLabelFlag;
+    points_unconnected = points_alone;
+    points_connected = points_outlined;
+  }
+
+  virtual std::string getDataType() const { return "xyPlotData"; };
+
+  std::string object_name;        // page name in PDF
+  std::string object_label;       // graph label, may be multiline
+  bool printLabels;
+  namedXYList points_unconnected;
+  namedXYList points_connected;     // always connected and closed
+};
+
+/******************************************************************************/
+
+// ab chromaticity
+struct abPlotData : dataAbstractionBase {
+
+  abPlotData() : printLabels(true) {}
+
+  abPlotData(const std::string &name, const std::string &label, bool printLabelFlag,
+              const namedLabList &points_alone, const namedLabList &points_outlined ) {
+    object_name = name;
+    object_label = label;
+    printLabels = printLabelFlag;
+    points_unconnected = points_alone;
+    points_connected = points_outlined;
+  }
+
+  virtual std::string getDataType() const { return "abPlotData"; };
+
+  std::string object_name;           // page name in PDF
+  std::string object_label;          // graph label, may be multiline
+  bool printLabels;
+  namedLabList points_unconnected;
+  namedLabList points_connected;     // always connected and closed, TODO - sort and convex hull
+};
+
+/******************************************************************************/
+
+// LookUpTable Graph
+struct lutPlotData : dataAbstractionBase {
+
+  lutPlotData() : isIdentity(false) {}
+
+  lutPlotData(const std::string &name, const std::string &label, bool identityFlag,
+              const pointList &points_input ) {
+    object_name = name;
+    object_label = label;
+    isIdentity = identityFlag;
+    points = points_input;
+  }
+
+  virtual std::string getDataType() const { return "lutPlotData"; };
+
+  std::string object_name;        // page name in PDF
+  std::string object_label;       // graph label, may be multiline
+  bool isIdentity;
+  pointList points;               // always connected, but not closed
+};
+
+/******************************************************************************/
+
+enum {
+    IMAGE_MODE_GRAY_BLACKZERO = TIFF_MODE_GRAY_BLACKZERO,
+    IMAGE_MODE_GRAY_WHITEZERO = TIFF_MODE_GRAY_WHITEZERO,
+    IMAGE_MODE_RGB = TIFF_MODE_RGB,
+    IMAGE_MODE_CIELAB = TIFF_MODE_CIELAB,
+    IMAGE_MODE_CMYK = TIFF_MODE_CMYK,
+};
+
+struct imageData : dataAbstractionBase {
+
+  imageData() : width(0), height(0), channels(0), depth(0),
+                mode(IMAGE_MODE_GRAY_BLACKZERO),
+                isFloatingPoint(false), data(NULL) {}
+
+  imageData(const std::string &name, void *imageData, int imageWidth, int imageHeight,
+            int imageChannels, int imageDepth, int imageMode,
+            bool dataIsFloatingPoint = false ) {
+    object_name = name;
+    width = imageWidth;
+    height = imageHeight;
+    channels = imageChannels,
+    depth = imageDepth;
+    mode = imageMode;
+    isFloatingPoint = dataIsFloatingPoint;
+    data = (uint8_t*)imageData;
+  }
+
+  ~imageData() {
+    delete[] data;
+  }
+
+  virtual std::string getDataType() const { return "imageData"; };
+
+  std::string object_name;  // page name in PDF, filename on disk
+  int width;
+  int height;
+  int channels;
+  int depth;                // bits per sample [8,16,32,64]
+  int mode;                 // interpretation of channels, matches TIFF modes
+  bool isFloatingPoint;     // because 32 bit integer can be useful, as well as 32 bit float
+  uint8_t *data;
+};
 
 /******************************************************************************/
 
@@ -381,6 +497,9 @@ void CreateAxesXobject( PDFWriter &pdfout )
   const float top = pdfout.PageHeight();
   const float right = pdfout.PageWidth();
   const Rect2D bounds ( left, right, bottom, top );
+
+  if (pdfout.xobjectExists("Axes"))
+    return;
 
   // draw axes
   // horizontal
@@ -487,11 +606,15 @@ point2D spectrumLabelOffset( int nm, float textSize, PDFTextAlignment &align )
   if (nm < 515) {
     // go left
     align = kPDFTextAlignRight;
-    return point2D( -2.0f, 0.0f );
-  } else if (nm <= 520) {
+    return point2D( -0.5*textSize, 0.0f );
+  } else if (nm == 515) {
+    // go left a little bit more
+    align = kPDFTextAlignRight;
+    return point2D( -0.9*textSize, 0.0f );
+  } else if (nm <= 525) {
     // go up
     align = kPDFTextAlignCenter;
-    return point2D( -3.0f, textSize*1.55f );
+    return point2D( 0.0f, textSize*1.5f );
   } else {
     // go right
     align = kPDFTextAlignLeft;
@@ -525,6 +648,9 @@ void CreateXYPlotXobject( PDFWriter &pdfout )
   const point2D rangeX( right-left-2*margin, 0 );
   const point2D rangeY( 0, top-bottom-2*margin );
 
+
+  if (pdfout.xobjectExists("xyPlot"))
+    return;
 
   // draw grid
   commands << "q\n";
@@ -654,6 +780,8 @@ void CreateABPlotXobject( PDFWriter &pdfout )
   const point2D center = 0.5f * (basepoint + point2D(right-margin,top-margin));
   const float maxRadius = std::max( right-left-2*margin, top-bottom-2*margin );
 
+  if (pdfout.xobjectExists("abPlot"))
+    return;
 
   // draw grid
   commands << "q\n";
@@ -762,8 +890,8 @@ std::string plotSquarePDF( const point2D &center, float size )
   point2D pt2(center.x+half,center.y+half);
   point2D pt3(center.x+half,center.y-half);
 
-  commands << pt0 << " m " << pt1 << " l\n";
-  commands << pt2 << " l\n";
+  commands << pt0 << " m " << pt1 << " l ";
+  commands << pt2 << " l ";
   commands << pt3 << " l s\n";
 
   return commands.str();
@@ -772,9 +900,7 @@ std::string plotSquarePDF( const point2D &center, float size )
 /******************************************************************************/
 
 static
-std::string plotXYZTag( CIccTag *tag, std::string label, const point2D &basepoint,
-                        const point2D &scaling, float symbolSize, float textSize,
-                        point2D *result = NULL )
+bool getXYZTag( CIccTag *tag, XYColor *result = NULL )
 {
   std::ostringstream commands;
 
@@ -783,33 +909,91 @@ std::string plotXYZTag( CIccTag *tag, std::string label, const point2D &basepoin
     auto theXYZ = theXYZTag->GetXYZ(0);
     if (theXYZ) {
       auto theXY = xyFromICCXYZ( theXYZ );
-      point2D thePt = basepoint + scaling * point2D( theXY.x, theXY.y );
-      commands << plotSquarePDF( thePt, symbolSize );
-      point2D textOffset( 0, symbolSize+2+textSize );
-      commands << PDFSingleLineTextLabel( thePt + textOffset, false, point2D(0,0),
-                                    textSize, label, kPDFTextAlignLeft );
       if (result)
-        *result = thePt;
+        *result = theXY;
+      return true;
     }
   }
 
-  return commands.str();
+  return false;
 }
 
 /******************************************************************************/
 
 static
-int graphChromaticityPDF( CIccProfile *pIcc, PDFWriter &pdffile )
+float cctFromXY( const XYColor &theXY )
 {
-  std::ostringstream commands;
+  // McCamy's forumula
+  // McCamy, Calvin S. (April 1992).
+  // "Correlated color temperature as an explicit function of chromaticity coordinates"
+  float n = (theXY.x - 0.3320f) / (0.1858f - theXY.y);
+  float n2 = n*n;
+  float n3 = n*n*n;
+  //float cct = -437.0f *n3 + 3601.0f *n2 - 6861.0f *n + 5514.31f;    // first eq. from article
+  //float cct = -449.0f *n3 + 3525.0f *n2 - 6823.3f *n + 5520.33f;  // second eq. from article
+  float cct = 437.0f *n3 + 3601.0f *n2 + 6861.0f *n + 5514.31f;    // first eq.  CLOSEST!
+  //float cct = 449.0f *n3 + 3525.0f *n2 + 6823.3f *n + 5520.33f;  // second eq. CLOSE!
 
-  float bottom = 0.0f;
-  float left = 0.0f;
-  float top = pdffile.PageHeight();
-  float right = pdffile.PageWidth();
-  Rect2D bounds ( left, right, bottom, top );
-  float margin = 0.25f*inch2point;
+  return cct;
+}
 
+/******************************************************************************/
+
+struct XYName {
+  std::string name;
+  float x, y;
+};
+
+static
+bool matches( const XYColor &u, const XYName &k )
+{
+  float tolerance = 0.002;
+  bool matchx = fabs(u.x - k.x) < tolerance;
+  bool matchy = fabs(u.y - k.y) < tolerance;
+  return matchx && matchy;
+}
+
+// Are any FL or LED illuminants needed?
+static const
+std::vector<XYName> namedIlluminants = {
+  { "D50", 0.34567, 0.35850 },
+  { "D65", 0.31272, 0.32903 },
+  { "D75", 0.29902, 0.31485 },
+  { "D93", 0.28315, 0.29711 },
+  { "D55", 0.33242, 0.34743 },
+  { "Illuminant A", 0.44758, 0.40745 },	   // incandescent / tungsten
+  { "Illuminant B", 0.34842, 0.35161 },    // direct sunlight at noon
+  { "Illuminant C", 0.31006, 0.31616 },    // North sky daylight
+  { "Illuminant E", 0.33333, 0.33333 },    // equal energy
+};
+
+/******************************************************************************/
+
+static
+std::string cctStringFromXYZ( const icXYZNumber *theXYZ )
+{
+  if (!theXYZ)
+    return std::string();
+
+  XYColor theXY = xyFromICCXYZ( theXYZ );
+
+  // test known, named illuminants first
+  for ( const auto &illum : namedIlluminants ) {
+    if ( matches( theXY, illum ) )
+        return std::string("(") + illum.name + std::string(")");
+  }
+
+  // if we can't find a match of common whitepoints, estimate the CCT
+  float cct = cctFromXY( theXY );
+  int32_t cctI = (int32_t)cct; // we want the integer part, don't need precision
+  return std::string("(~") + std::to_string(cctI) + std::string("K)");;
+}
+
+/******************************************************************************/
+
+static
+void processChromaticity( CIccProfile *pIcc, profileVisualizationData &data )
+{
     // icSigMediaBlackPointTag ????
   auto whiteTag = pIcc->FindTag( icSigMediaWhitePointTag );
   bool hasWhite = (whiteTag != NULL);
@@ -822,140 +1006,44 @@ int graphChromaticityPDF( CIccProfile *pIcc, PDFWriter &pdffile )
   // bail if there is nothing to plot
   // NOTE - plotting white alone just seems weird, and produces a lot of noise
   if (!hasRGB)
-    return 0;
+    return;
 
-
-  // if the xyPlot xobject doesn't exist, create it now
-  if (!pdffile.xobjectExists("xyPlot"))
-    CreateXYPlotXobject( pdffile );
-
-  // add the common axes
-  commands << "/xyPlot Do\n";
-
-  // add label
-  point2D range( right - left, 0 );
-  point2D labelBase( left, top );
-  point2D tickLength(0,0);
-  commands << PDFSingleLineTextLabel( labelBase + range*0.5, false, tickLength, 12.0f, "Chromaticity xy" );
-
-
-  // gsave, color black
-  commands << "q 0 0 0 1 K\n";
-
-  point2D basepoint( left+margin, bottom+margin );
-  point2D rangeX( right-bottom-2*margin, 0 );
-  point2D rangeY( 0, top-bottom-2*margin );
-  point2D scaling = (rangeX + rangeY) / chromaticityChartScale;
-  float markSize = 4.0f;
-  float textSize = 10.0f;
+  namedXYList points_alone;
+  namedXYList points_connected;
 
   if (hasWhite) {
     std::string CCTText;
-#if 0
-// not working correctly with 9300 whitepoint displays, gives 3175K
     auto theXYZTag = dynamic_cast<CIccTagXYZ*>(whiteTag);
     if (theXYZTag) {
-      auto theXYZ = theXYZTag->GetXYZ(0);
-      if (theXYZ) {
-        auto theXY = xyFromICCXYZ( theXYZ );
-        // McCamy's forumula
-        // McCamy, Calvin S. (April 1992).
-        // "Correlated color temperature as an explicit function of chromaticity coordinates"
-        float n = (theXY.x - 0.3320f) / (0.1858f - theXY.y);
-        float n2 = n*n;
-        float n3 = n*n*n;
-        //float cct = -437.0f *n3 + 3601.0f *n2 - 6861.0f *n + 5514.31f;    // first eq.
-        float cct = -449.0f *n3 + 3525.0f *n2 - 6823.3f *n + 5520.33f;  // second eq.
-        int32_t cctI = (int32_t)cct; // we want the integer part, don't need precision
-        CCTText = std::string("( ~") + std::to_string(cctI) + std::string("K)");
-      }
+      icXYZNumber *theXYZ = theXYZTag->GetXYZ(0);
+      if (theXYZ)
+        CCTText = cctStringFromXYZ( theXYZ );
     }
-#endif
+    XYColor xyVal;
 
-    std::string label = std::string("White") + CCTText;
-    commands << plotXYZTag( whiteTag, label, basepoint,
-                        scaling, markSize, textSize );
+    if (getXYZTag(whiteTag,&xyVal)) {
+      std::string label = std::string("White") + CCTText;
+      points_alone.push_back( namedXY(label,xyVal.x,xyVal.y) );
+    }
   }
 
   if (hasRGB) {
-    point2D redPt, greenPt, bluePt;
-    commands << plotXYZTag( redTag, "R", basepoint,
-                        scaling, markSize, textSize, &redPt );
-    commands << plotXYZTag( greenTag, "G", basepoint,
-                        scaling, markSize, textSize, &greenPt );
-    commands << plotXYZTag( blueTag, "B", basepoint,
-                        scaling, markSize, textSize, &bluePt );
-
-    // draw lines between points for gamut
-    commands << "0 0 0 0.5 K\n";
-    commands << redPt << " m " << greenPt << " l\n";
-    commands << bluePt << " l s\n";
+    XYColor redPt, greenPt, bluePt;
+    if (getXYZTag(redTag,&redPt)) {
+      points_connected.push_back( namedXY("R",redPt.x,redPt.y) );
+    }
+    if (getXYZTag(greenTag,&greenPt)) {
+      points_connected.push_back( namedXY("G",greenPt.x,greenPt.y) );
+    }
+    if (getXYZTag(blueTag,&bluePt)) {
+      points_connected.push_back( namedXY("B",bluePt.x,bluePt.y) );
+    }
   }
 
-  // grestore
-  commands << "Q\n";
-
-  // and finally create the graphics object and page
-  PDFGraphic *graphics = new PDFGraphic( commands.str() );
-  pdffile.AddObject( graphics );
-  size_t content = pdffile.ObjectCount();
-  std::string pageName( "Profile Chromaticities");
-
-  pdffile.AddPage( pageName, content, "xyPlot" );
-
-  return 1;
+  xyPlotData *plot = new xyPlotData( "Profile Chromaticities", "Chromaticity xy", true,
+                                    points_alone, points_connected );
+  data.addPage(plot);
 }
-
-/******************************************************************************/
-
-#if USE_SVG
-static
-void graph1DLUTSVG( CIccCurve *curve, const std::string &name,
-        const std::string &description, SVGOut &svgfile, int steps )
-{
-  svgfile.NextPage();
-  svgfile.StartGroup( name );
-
-  // draw title/description
-  std::string font = "Arial";
-  std::string style = "Bold";
-  std::string align = "Center";
-
-  std::string clean_description( description );
-  // remove any line breaks from our text, because SVG doesn't do line breaks
-  std::replace( clean_description.begin(), clean_description.end(), '\n', ' ');
-  // and wrap our text in CDATA, because SVG doesn't like < > &
-  std::string outdescription = "<![CDATA[" + name + " " + clean_description + "]]>";
-  svgfile.AddText( 8*0.5*inch2mm, 0.25f*inch2mm, outdescription, 14.0f, font, style, align );
-
-  // draw axes
-  point2D basepoint( 0.5f*inch2mm, 7.5f*inch2mm );
-  point2D rangeX( 7.0f*inch2mm, 0.0f );
-  point2D tickLengthX( 0, 5 );
-  DrawAxisSVG( svgfile, basepoint, rangeX, tickLengthX, "Input" );
-
-  point2D rangeY( 0.0, -7.0*inch2mm );
-  point2D tickLengthY( -5, 0 );
-  DrawAxisSVG( svgfile, basepoint, rangeY, tickLengthY, "Output" );
-
-  // draw the curve
-  pointList points(steps+1);
-  float scale = (7.5f-0.5f)*inch2mm;
-  point2D base( 0.5f*inch2mm, 7.5f*inch2mm );
-  for (int i = 0; i <= steps; ++i ) {
-    float input = i / (float)steps;
-    float output = curve->Apply( input );
-    if (std::isnan(output)) output = 0.0;
-    if (std::isinf(output)) output = 1.0;
-    if (output > 1.0f) output = 1.0f;
-    if (output < 0.0f) output = 0.0f;
-    points[i] = point2D( input*scale, -output*scale ) + base;
-  }
-  svgfile.AddPolyLine( points, false, false );
-
-  svgfile.EndGroup();
-}
-#endif  // USE_SVG
 
 /******************************************************************************/
 
@@ -975,8 +1063,7 @@ std::string extract_LUTNameForBookmark(const std::string& str)
 /******************************************************************************/
 
 static
-void graph1DLUTPDF( CIccCurve *curve, const std::string &name,
-        const std::string &description, PDFWriter &pdffile, int steps )
+void output1DLUTPDF( lutPlotData *lut, PDFWriter &pdffile )
 {
   std::ostringstream commands;
 
@@ -987,8 +1074,7 @@ void graph1DLUTPDF( CIccCurve *curve, const std::string &name,
   Rect2D bounds ( left, right, bottom, top );
 
   // if the axes xobject doesn't exist, create it now
-  if (!pdffile.xobjectExists("Axes"))
-    CreateAxesXobject( pdffile );
+  CreateAxesXobject( pdffile );
 
   // add the common axes
   commands << "/Axes Do\n";
@@ -997,29 +1083,22 @@ void graph1DLUTPDF( CIccCurve *curve, const std::string &name,
   float labelSize = 12.0f;     // points
   float leading = labelSize * 1.1f;
   float indent = 0.5f * inch2point;
-  std::string fullName = name + " " + description;
+  std::string fullName = lut->object_name + " " + lut->object_label;;
   commands << PDFMultiLineText( labelPt, labelSize, leading, indent,
                                     fullName, kPDFTextAlignCenterLeft );
 
   // draw the curve
   // optimization - draw only 3 points for identity curve
-  if (curve->IsIdentity())
-    steps = 2;
-  float scale = (7.5f-0.5f)*inch2point;
-  const point2D base( 0.5f*inch2point, 0.5f*inch2point );
+  size_t steps = lut->points.size();
   if (steps > 0) {
-      commands << base << " m\n";
-      for (int i = 0; i <= steps; ++i ) {
-        float input = i / (float)steps;
-        float output = curve->Apply( input );
-        if (std::isnan(output)) output = 0.0f;
-        if (std::isinf(output)) output = 1.0f;
-        if (output > 1.0f) output = 1.0f;
-        if (output < 0.0f) output = 0.0f;
-        point2D currentPt( input*scale, output*scale );
-        commands << (base+currentPt) << " l\n";
-      }
-      commands << "S\n";
+    float scale = (7.5f-0.5f)*inch2point;
+    const point2D base( 0.5f*inch2point, 0.5f*inch2point );
+    commands << base << " m\n";
+    for (size_t i = 0; i < steps; ++i ) {
+      point2D currentPt = lut->points[i] * scale;
+      commands << (base+currentPt) << " l\n";
+    }
+    commands << "S\n";
   }
 
   // and finally create the graphics object and page
@@ -1028,6 +1107,36 @@ void graph1DLUTPDF( CIccCurve *curve, const std::string &name,
   size_t content = pdffile.ObjectCount();
   std::string pageName = extract_LUTNameForBookmark( fullName );
   pdffile.AddPage( pageName, content, "Axes" );
+}
+
+/******************************************************************************/
+
+static
+lutPlotData * graph1DLUT( CIccCurve *curve, const std::string &name,
+                            const std::string &description, int steps )
+{
+  pointList points;
+
+  // iterate the curve
+  // optimization - draw only 3 points for identity curve
+  if (curve->IsIdentity())
+    steps = 2;
+  if (steps > 0) {
+      points.resize(steps+1);
+      for (int i = 0; i <= steps; ++i ) {
+        float input = i / (float)steps;
+        float output = curve->Apply( input );
+        if (std::isnan(output)) output = 0.0f;
+        if (std::isinf(output)) output = 1.0f;
+        if (output > 1.0f) output = 1.0f;
+        if (output < 0.0f) output = 0.0f;
+        points[i] = point2D( input, output );  // x is input, y is output
+      }
+  }
+
+  lutPlotData *out = new lutPlotData( name, description, curve->IsIdentity(), points );
+
+  return out;
 }
 
 /******************************************************************************/
@@ -1044,7 +1153,7 @@ bool describe1DLUT( CIccTagCurve *curve, std::string &description,
     description = "simpleCurve";
     return true;
   }
-  
+
   auto size = curve->GetSize();
   if (size == 0) {
     description += "Y = X";
@@ -1055,7 +1164,7 @@ bool describe1DLUT( CIccTagCurve *curve, std::string &description,
   } else {
     description += "LookupTable[" + std::to_string(size) + "]";
   }
-  
+
   return false;
 }
 
@@ -1134,20 +1243,20 @@ bool describe3DLUT( CIccMBB *curve, CIccProfile *pIcc, std::string &description,
 /******************************************************************************/
 
 // output graphic representation of 1D LUTs
-// return 1 if output created, 0 if none
 static
-int output1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDesc,
-        PDFWriter &pdffile, const std::string &filename )
+void process1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDesc,
+                const std::string &filename, profileVisualizationData &data )
 {
   const size_t bufSize = 64;
   char buf[bufSize];
 
   if (!tag) {
     LogAnError(stderr, "%s: ERROR - missing data for %s\n", filename.c_str(), sigDesc.c_str() );
-    return 0;
+    return;
   }
 
   icTagTypeSignature typeSig = tag->GetType();
+
 
   switch(typeSig) {
     case icSigCurveType:
@@ -1156,15 +1265,12 @@ int output1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDe
       if (curve) {
         std::string description;
         if (describe1DLUT(curve, description, sigDesc, filename)) {
-          return 0;
+          return;
         }
         int size = curve->GetSize();
         int steps = std::max( 1000, size );
-#if USE_SVG
-        graph1DLUTSVG( curve, sigDesc, description, svgfile, steps );
-#endif
-        graph1DLUTPDF( curve, sigDesc, description, pdffile, steps );
-        return 1;
+        lutPlotData * lutData = graph1DLUT( curve, sigDesc, description, steps );
+        data.addPage( lutData );
         }
       }
       break;
@@ -1175,13 +1281,10 @@ int output1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDe
       if (pCurve) {
         std::string description;
         if (describe1DLUT(pCurve, description, sigDesc, filename)) {
-          return 0;
+          return;
         }
-#if USE_SVG
-        graph1DLUTSVG( pCurve, sigDesc, description, svgfile, 1000 );
-#endif
-        graph1DLUTPDF( pCurve, sigDesc, description, pdffile, 1000 );
-        return 1;
+        lutPlotData * lutData = graph1DLUT( pCurve, sigDesc, description, 1000 );
+        data.addPage( lutData );
         }
       }
       break;
@@ -1192,13 +1295,10 @@ int output1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDe
       if (sCurve) {
         std::string description;
         if (describe1DLUT(sCurve, description, sigDesc, filename)) {
-          return 0;
+          return;
         }
-#if USE_SVG
-        graph1DLUTSVG( sCurve, sigDesc, description, svgfile, 1000 );
-#endif
-        graph1DLUTPDF( sCurve, sigDesc, description, pdffile, 1000 );
-        return 1;
+        lutPlotData * lutData = graph1DLUT( sCurve, sigDesc, description, 1000 );
+        data.addPage( lutData );
         }
       }
       break;
@@ -1212,29 +1312,23 @@ int output1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDe
       if (uCurve) {
         std::string description;
         if (describe1DLUT( uCurve, description, sigDesc, filename)) {
-          return 0;
+          return;
         }
-#if USE_SVG
-        graph1DLUTSVG( uCurve, sigDesc, description, svgfile, 1000 );
-#endif
-        graph1DLUTPDF( uCurve, sigDesc, description, pdffile, 1000 );
-        return 1;
+        lutPlotData * lutData = graph1DLUT( uCurve, sigDesc, description, 1000 );
+        data.addPage( lutData );
         }
       }
       break;
 
   }   // end switch by type
 
-  return 0; // no output created
-
-}   // end output1DLUT()
+}   // end process1DLUT()
 
 /******************************************************************************/
 
 #if 0
 // output graphic representation of response curve 1D LUTs
 //     or would, if I could find any example of profiles using response curves...
-// return number of output items created
 static
 int outputResponseCurves(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDesc,
                         PDFWriter &pdffile, const std::string &filename )
@@ -1259,7 +1353,7 @@ int outputResponseCurves(CIccProfile * /* pIcc */, CIccTag *tag, const std::stri
       LogAnError(stderr, "%s: Skipping %s: unable to convert response curves\n", filename.c_str(), sigDesc.c_str());
       return 0;
   }
-  
+
   //icUInt16Number channels = curves->GetNumChannels();
   CIccResponseCurveStruct *curveIter = curves->GetFirstCurves();
   while (curveIter != NULL) {
@@ -1274,6 +1368,149 @@ int outputResponseCurves(CIccProfile * /* pIcc */, CIccTag *tag, const std::stri
 
 }   // end outputResponseCurves()
 #endif
+
+/********************************************************************************/
+
+inline
+float Edge3( float a, float b, float c )
+{
+  return std::abs( b - (a+c)*0.5f );
+}
+
+/********************************************************************************/
+
+inline
+double Edge3( double a, double b, double c )
+{
+  return std::abs( b - (a+c)*0.5f );
+}
+
+/********************************************************************************/
+
+inline
+uint8_t Edge3( uint8_t a, uint8_t b, uint8_t c )
+{
+  return (uint8_t) std::abs( (int)b - ((int)(a+c)>>1) );
+}
+
+/********************************************************************************/
+
+inline
+uint16_t Edge3( uint16_t a, uint16_t b, uint16_t c )
+{
+  return (uint16_t) std::abs( (int)b - ((int)(a+c)>>1) );
+}
+
+/********************************************************************************/
+
+template<typename T>
+void FindEdgesInner( const T *input, T *output,
+            const std::vector<size_t> &dimensions_in,
+            const std::vector<size_t> &steps_in,
+            size_t channels, size_t totalSize, size_t depth )
+{
+  memset(output,0,totalSize*(depth>>3));
+
+  size_t dimensionCount = dimensions_in.size();
+  if (dimensionCount < 1)
+    return;
+
+  std::vector<size_t> wsteps( steps_in );
+  std::vector<size_t> wdimensions( dimensions_in );
+  std::vector<size_t> loopIndices( dimensionCount );
+
+  if (dimensionCount == 1) {
+    // fake a second dimension so the loops work
+    wdimensions.push_back(1);
+    wsteps.push_back(0);
+    loopIndices.push_back(0);
+    dimensionCount = 2;
+  }
+
+  for (size_t m = 0; m < dimensionCount; ++m) {
+    size_t lastDimension = wdimensions[dimensionCount-1];
+
+    if (lastDimension <= 2)    // nothing to operate on in this dimension
+      continue;
+
+    size_t innerLimit = lastDimension-1;
+    size_t colStep = wsteps[dimensionCount-1];
+
+    std::fill( loopIndices.begin(), loopIndices.end(), 0 );
+
+    while( loopIndices[0] < wdimensions[0] ) {
+
+      size_t index = 0;
+      for (size_t n = 0; n < (dimensionCount-1); ++n)
+        index += loopIndices[n] * wsteps[n];
+
+      // ignore first pixel, edge duplication doesn't work well with edge detection
+      index += colStep;
+
+      for (size_t k = 1; k < innerLimit; ++k) {
+        for (size_t c = 0; c < channels; ++c) {
+          T prev = input[ index - colStep + c ];
+          T current = input[ index + c ];
+          T next = input[ index + colStep + c ];
+          T result = Edge3( prev, current, next );
+          T old = output[ index + c ];
+          output[ index + c ] = std::max( result, old );
+        }
+        index += colStep;
+      }
+
+      // ignore last pixel, edge duplication doesn't work well with edge detection
+
+      // increment loop counters, ignoring last dimension we iterated above
+      //    if incremented is >= limit[j], reset and roll upward in list
+      //    if we don't overflow, save the incremented value and break out of the loop
+      for (int j = ((int)dimensionCount-2); j >= 0; --j) {
+        auto increment_temp = loopIndices[(size_t)j] + 1;
+        if (increment_temp >= wdimensions[(size_t)j] && j != 0)   // we want counter 0 to overflow, to end the big loop
+          loopIndices[(size_t)j] = 0;
+        else {
+          loopIndices[(size_t)j] = increment_temp;
+          break;
+        }
+      }   // end loop counter update
+
+    }   // end voxel loop
+
+  // prepare for next dimension
+  (void)std::rotate( wsteps.begin(), wsteps.begin()+1, wsteps.end() );
+  (void)std::rotate( wdimensions.begin(), wdimensions.begin()+1, wdimensions.end() );
+
+  }   // end outer dimension loop
+
+}
+
+/********************************************************************************/
+
+template<typename T>
+void FindEdgesN( const T *input, T *output, const std::vector<size_t> &dimensions_in,
+            const std::vector<size_t> &steps_in,
+            size_t channels, size_t totalSize, size_t depth )
+{
+  if (depth == 8) {
+    FindEdgesInner( (uint8_t *)input, (uint8_t *)output,
+                    dimensions_in, steps_in,
+                    channels, totalSize, 8 );
+  } else if (depth == 16) {
+    FindEdgesInner( (uint16_t *)input, (uint16_t *)output,
+                    dimensions_in, steps_in,
+                    channels, totalSize, 16 );
+  } else if (depth == 32) {
+    FindEdgesInner( (float *)input, (float *)output,
+                    dimensions_in, steps_in,
+                    channels, totalSize, 32 );
+  } else if (depth == 64) {
+    FindEdgesInner( (double *)input, (double *)output,
+                    dimensions_in, steps_in,
+                    channels, totalSize, 64 );
+  } else {
+    LogAnError(stderr,"ERROR - unknown clut data depth %z\n", depth );
+  }
+}
 
 /******************************************************************************/
 
@@ -1310,7 +1547,37 @@ int TIFFColorModelFromICCModel( icColorSpaceSignature colorSig )
       // where white = no ink, black = full ink
       return TIFF_MODE_GRAY_WHITEZERO;
       break;
+  }
 
+  // some compilers are picky, and stupid
+  return TIFF_MODE_GRAY_BLACKZERO;
+}
+
+/******************************************************************************/
+
+// where black = no problem, white = big problem
+static
+int TIFFEdgeColorModelFromICCModel( icColorSpaceSignature colorSig )
+{
+  switch(colorSig) {
+    case icSigRgbData:
+    case icSigCmyData:
+    case icSigXYZData:
+    case icSigLuvData:
+    case icSigYCbCrData:
+    case icSigYxyData:
+    case icSigHsvData:
+    case icSigHlsData:
+    case icSigLabData:
+      return TIFF_MODE_RGB;
+      break;
+
+    default:
+    case icSigCmykData:
+    case icSigGrayData:
+    case icSigGamutData:
+      return TIFF_MODE_GRAY_BLACKZERO;
+      break;
   }
 
   // some compilers are picky, and stupid
@@ -1367,24 +1634,111 @@ uint16_t ClipU16( const icFloatNumber &input )
 /******************************************************************************/
 
 static
-int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-                const std::string &basename, PDFWriter &pdffile )
+icFloatNumber ClipFloat( const icFloatNumber &input )
+{
+  if (std::isnan(input))
+    return 0;
+  if (std::isinf(input))
+    return 1000.0;
+  return input;
+}
+
+/******************************************************************************/
+
+void CopyLUTtoTIFF( icFloatNumber *clutData, uint8_t *imageBuf,
+            int tileWidth, int tileHeight, int tiles,
+            int outputChannels, int inputChannels,
+            int /* gridPoints */, int tilesWide, int imageWidth,
+            int bytes )
+{
+  uint16_t *imageBuf16 = (uint16_t *)imageBuf;
+  float *imageBuf32 = (float *)imageBuf;
+  double *imageBuf64 = (double *)imageBuf;
+
+#if 0
+// TEST - same as below, just more expensive calculation
+    size_t gridCount = (size_t)tileWidth * (size_t)tileHeight * (size_t)tiles;
+    for (size_t k = 0; k < gridCount; ++k ) {
+        size_t y = (gridPoints -1) - (k % gridPoints);  // turn LAB to look as expected
+        size_t x = (k / gridPoints) % gridPoints;
+        size_t tile = k / (gridPoints*gridPoints);
+        size_t tileX = tile % tilesWide;
+        size_t tileY = tile / tilesWide;
+        size_t outputIndex = outputChannels * ((tileY * gridPoints * imageWidth) + (tileX * gridPoints) + (y * imageWidth) + x);
+        size_t inputIndex = outputChannels * k;
+        if (bytes == 8)
+          for (int c = 0; c < outputChannels; ++c)
+            imageBuf64[outputIndex+c] = ClipFloat(clutData[inputIndex+c]);
+        else if (bytes == 4)
+          for (int c = 0; c < outputChannels; ++c)
+            imageBuf32[outputIndex+c] = ClipFloat(clutData[inputIndex+c]);
+        else if (bytes == 2)
+          for (int c = 0; c < outputChannels; ++c)
+            imageBuf16[outputIndex+c] = ClipU16( clutData[inputIndex+c] * 65535.0f );
+        else
+          for (int c = 0; c < outputChannels; ++c)
+            imageBuf[outputIndex+c] = ClipU8( clutData[inputIndex+c] * 255.0f );
+    }
+
+#else
+      size_t n001 = (size_t)tileWidth * (size_t)tileHeight * (size_t)outputChannels;
+      size_t n010 = (size_t)tileHeight * (size_t)outputChannels;
+      size_t n100 = (size_t)outputChannels;
+
+      if (inputChannels < 2)
+        std::swap(n010,n100);
+
+      size_t outTileStepV = (size_t)imageWidth * (size_t)tileHeight * (size_t)outputChannels;
+      size_t outTileStepH = (size_t)tileWidth * (size_t)outputChannels;
+      size_t outColStep = (size_t)outputChannels;
+      size_t outRowStep = (size_t)imageWidth * (size_t)outputChannels;
+
+      for (int z = 0; z < tiles; ++z) {
+        int z2 = z % tilesWide; // tile # horiz
+        int z3 = z / tilesWide; // tile # vert
+        for (int x = 0; x < tileWidth; ++x)
+        for (int y = 0; y < tileHeight; ++y) {
+          size_t inputIndex = z * n001 + x * n010 + (tileHeight-1-y) * n100;  // turn LAB to look as expected
+          size_t outputIndex = z3 * outTileStepV + z2 * outTileStepH + y * outRowStep + x * outColStep;
+          if (bytes == 8)
+            for (int c = 0; c < outputChannels; ++c)
+              imageBuf64[outputIndex+c] = ClipFloat(clutData[inputIndex+c]);
+          else if (bytes == 4)
+            for (int c = 0; c < outputChannels; ++c)
+              imageBuf32[outputIndex+c] = ClipFloat(clutData[inputIndex+c]);
+          else if (bytes == 2)
+            for (int c = 0; c < outputChannels; ++c)
+              imageBuf16[outputIndex+c] = ClipU16( clutData[inputIndex+c] * 65535.0f );
+          else
+            for (int c = 0; c < outputChannels; ++c)
+              imageBuf[outputIndex+c] = ClipU8( clutData[inputIndex+c] * 255.0f );
+        }
+      }
+#endif
+
+}
+
+/******************************************************************************/
+
+static
+void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+                const std::string &basename,  profileVisualizationData &data,
+                bool doEdges = true )
 {
   const size_t bufSize = 128;
   char buf[bufSize];
-  int outputCount = 0;
 
   icTagTypeSignature typeSig = tag->GetType();
-  
+
     CIccMBB *lut = dynamic_cast<CIccMBB*> (tag);
     if (!lut) {
       LogAnError(stderr, "%s: Skipping %s: unable to convert LUT\n", basename.c_str(), sigDesc.c_str());
-      return outputCount;
+      return;
     }
 
     std::string description;
     if (describe3DLUT( lut, pIcc, description, sigDesc, basename)) {
-      return outputCount;
+      return;
     }
 
     // output input and output curves
@@ -1401,7 +1755,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
 
     if (inputChannels <= 0 || outputChannels <= 0) {
       LogAnError(stderr, "%s: Skipping %s: invalid channel count\n", basename.c_str(), sigDesc.c_str());
-      return outputCount;
+      return;
     }
 
     if (curveA) {
@@ -1411,7 +1765,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
           std::string channel = channelName( i, !isInputMatrix,
                     inputSpace, outputSpace, inputChannels, outputChannels );
           std::string channelDesc = curveDesc + "curveA[ " + channel + " ]";
-          outputCount += output1DLUT( pIcc, curveA[i], channelDesc, pdffile, basename );
+          process1DLUT( pIcc, curveA[i], channelDesc, basename, data );
         }
       }
     }
@@ -1423,7 +1777,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
           std::string channel = channelName( i, isInputMatrix,
                     inputSpace, outputSpace, inputChannels, outputChannels );
           std::string channelDesc = curveDesc + "curveB[ " + channel + " ]";
-          outputCount += output1DLUT( pIcc, curveB[i], channelDesc, pdffile, basename );
+          process1DLUT( pIcc, curveB[i], channelDesc, basename, data );
         }
       }
     }
@@ -1435,7 +1789,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
           std::string channel = channelName( i, isInputMatrix,
                     inputSpace, outputSpace, inputChannels, outputChannels );
           std::string channelDesc = curveDesc + "curveM[ " + channel + " ]";
-          outputCount += output1DLUT( pIcc, curveM[i], channelDesc, pdffile, basename );
+          process1DLUT( pIcc, curveM[i], channelDesc, basename, data );
         }
       }
     }
@@ -1451,7 +1805,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
         LogAnError(stderr,"%s: ERROR - clut data could not be read for tag '%s' of type '%s'\n",
                 basename.c_str(), sigDesc.c_str(), typeDesc.c_str() );
       }
-      return outputCount;
+      return;
     }
 
     // validate is called back before the Describe call
@@ -1461,7 +1815,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     int tiles = gridPoints;
     if (gridPoints <= 0) {
       LogAnError(stderr, "%s: Skipping %s: invalid CLUT grid\n", basename.c_str(), sigDesc.c_str());
-      return outputCount;
+      return;
     }
 
     int tileWidth = 1;
@@ -1471,7 +1825,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
       tileWidth = clut->GridPoint(1);
       if (tileWidth <= 0) {
         LogAnError(stderr, "%s: Skipping %s: invalid CLUT width\n", basename.c_str(), sigDesc.c_str());
-        return outputCount;
+        return;
       }
     }
 
@@ -1479,7 +1833,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
       tileHeight = clut->GridPoint(2);
       if (tileHeight <= 0) {
         LogAnError(stderr, "%s: Skipping %s: invalid CLUT height\n", basename.c_str(), sigDesc.c_str());
-        return outputCount;
+        return;
       }
     }
 
@@ -1488,7 +1842,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
         int extraGridPoints = clut->GridPoint(i);
         if (extraGridPoints <= 0) {
           LogAnError(stderr, "%s: Skipping %s: invalid CLUT tile count\n", basename.c_str(), sigDesc.c_str());
-          return outputCount;
+          return;
         }
         tiles *= extraGridPoints;
       }
@@ -1538,7 +1892,7 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     int imageHeight = tilesHigh * tileHeight;
     if (imageWidth <= 0 || imageHeight <= 0 || bytes <= 0) {
       LogAnError(stderr, "%s: Skipping %s: invalid image geometry\n", basename.c_str(), sigDesc.c_str());
-      return outputCount;
+      return;
     }
 
     //size_t clutSize = (size_t)tiles * (size_t)tileWidth * (size_t)tileHeight * (size_t)outputChannels;
@@ -1546,82 +1900,63 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     // NOTE that bufferSize will usually be greater than clutSize
     if (!bufferSize) {
       LogAnError(stderr, "%s: Skipping %s: empty image buffer\n", basename.c_str(), sigDesc.c_str());
-      return outputCount;
+      return;
     }
 
     std::unique_ptr<uint8_t[]> imageBuffer( new uint8_t[ bufferSize ] );
     uint8_t *imageBuf = imageBuffer.get();
-    uint16_t *imageBuf16 = (uint16_t *)imageBuf;
-    float *imageBuf32 = (float *)imageBuf;
     memset( imageBuf, 0, bufferSize );
 
     // copy data from CLUT to image buffer
     icFloatNumber *clutData = clut->GetData(0);
+    CopyLUTtoTIFF( clutData, imageBuf, tileWidth, tileHeight, tiles, outputChannels, inputChannels,
+                gridPoints, tilesWide, imageWidth, bytes );
 
+    // write the LUT as TIFF
+    std::string tiffPath2 = basename + "_" + sigDesc;
+    int tiffColor = TIFFColorModelFromICCModel( outputSpace );
+    imageData *image = new imageData( tiffPath2, imageBuffer.release(),
+                            imageWidth, imageHeight, outputChannels, 8*bytes, tiffColor, bytes>=4 );
+    data.addPage( image );
 
-#if 0
-// TEST - same as below, just more expensive calculation
-    size_t gridCount = (size_t)tileWidth * (size_t)tileHeight * (size_t)tiles;
-    for (size_t k = 0; k < gridCount; ++k ) {
-        size_t y = (gridPoints -1) - (k % gridPoints);  // turn LAB to look as expected
-        size_t x = (k / gridPoints) % gridPoints;
-        size_t tile = k / (gridPoints*gridPoints);
-        size_t tileX = tile % tilesWide;
-        size_t tileY = tile / tilesWide;
-        size_t outputIndex = outputChannels * ((tileY * gridPoints * imageWidth) + (tileX * gridPoints) + (y * imageWidth) + x);
-        size_t inputIndex = outputChannels * k;
-        if (bytes == 4 || bytes == 8)
-          for (int c = 0; c < outputChannels; ++c)
-            imageBuf32[outputIndex+c] = clutData[inputIndex+c];
-        else if (bytes == 2)
-          for (int c = 0; c < outputChannels; ++c)
-            imageBuf16[outputIndex+c] = ClipU16( clutData[inputIndex+c] * 65535.0f );
-        else
-          for (int c = 0; c < outputChannels; ++c)
-            imageBuf[outputIndex+c] = ClipU8( clutData[inputIndex+c] * 255.0f );
-    }
+    if (doEdges) {
+      imageBuffer.reset( new uint8_t[ bufferSize ] );
+      imageBuf = imageBuffer.get();
+      memset( imageBuf, 0, bufferSize );
 
-#else
-      size_t n001 = (size_t)tileWidth * (size_t)tileHeight * (size_t)outputChannels;
-      size_t n010 = (size_t)tileHeight * (size_t)outputChannels;
-      size_t n100 = (size_t)outputChannels;
+      // build edge data from CLUT
+      bufferSize = (size_t)imageWidth * (size_t)imageHeight * (size_t)outputChannels;
+      std::unique_ptr<icFloatNumber[]> edgeBuffer( new icFloatNumber[ bufferSize ] );
+      icFloatNumber *edgeData = edgeBuffer.get();
 
-      if (inputChannels < 2)
-        std::swap(n010,n100);
+      // build data for N-dimensional edge finding
+      size_t step = outputChannels;     // innermost column step == output channels
+      std::vector<size_t> dimensions(inputChannels);
+      std::vector<size_t> loopSteps(inputChannels);
 
-      size_t outTileStepV = (size_t)imageWidth * (size_t)tileHeight * (size_t)outputChannels;
-      size_t outTileStepH = (size_t)tileWidth * (size_t)outputChannels;
-      size_t outColStep = (size_t)outputChannels;
-      size_t outRowStep = (size_t)imageWidth * (size_t)outputChannels;
-
-      for (int z = 0; z < tiles; ++z) {
-        int z2 = z % tilesWide; // tile # horiz
-        int z3 = z / tilesWide; // tile # vert
-        for (int x = 0; x < tileWidth; ++x)
-        for (int y = 0; y < tileHeight; ++y) {
-          size_t inputIndex = z * n001 + x * n010 + (tileHeight-1-y) * n100;  // turn LAB to look as expected
-          size_t outputIndex = z3 * outTileStepV + z2 * outTileStepH + y * outRowStep + x * outColStep;
-          if (bytes == 4 || bytes == 8)
-            for (int c = 0; c < outputChannels; ++c)
-              imageBuf32[outputIndex+c] = clutData[inputIndex+c];
-          else if (bytes == 2)
-            for (int c = 0; c < outputChannels; ++c)
-              imageBuf16[outputIndex+c] = ClipU16( clutData[inputIndex+c] * 65535.0f );
-          else
-            for (int c = 0; c < outputChannels; ++c)
-              imageBuf[outputIndex+c] = ClipU8( clutData[inputIndex+c] * 255.0f );
-        }
-      }
-#endif
-
-      std::string tiffPath2 = basename + "_" + sigDesc + ".tif";
-      int tiffColor = TIFFColorModelFromICCModel( outputSpace );
-      if (!WriteTIFF( tiffPath2.c_str(), 100, tiffColor, imageBuf,
-                        imageWidth, imageHeight, outputChannels, 8*bytes )) {
-        LogAnError(stderr, "%s: Failed to write TIFF: %s\n", basename.c_str(), tiffPath2.c_str());
+      for (int i = inputChannels-1; i >= 0; --i) {
+        loopSteps[i] = step;
+        dimensions[i] = clut->GridPoint(i);
+        step *= dimensions[i];
       }
 
-  return 1;
+      // process edges from CLUT
+      FindEdgesInner( clutData, edgeData, dimensions, loopSteps, outputChannels,
+                        bufferSize, 8*sizeof(icFloatNumber) );
+
+      // copy edge data to image
+      memset( imageBuf, 0, bufferSize );
+      CopyLUTtoTIFF( edgeData, imageBuf, tileWidth, tileHeight, tiles, outputChannels, inputChannels,
+                    gridPoints, tilesWide, imageWidth, bytes );
+
+      // write edge data as TIFF
+      std::string tiffPath3 = basename + "_" + sigDesc + "_edges";
+      int edgeColor = TIFFEdgeColorModelFromICCModel( outputSpace );
+      imageData *edgeImage = new imageData( tiffPath3, imageBuffer.release(),
+                            imageWidth, imageHeight, outputChannels, 8*bytes, edgeColor, bytes>=4 );
+      data.addPage( edgeImage );
+
+    }   // end if doEdges
 }
 
 /******************************************************************************/
@@ -1629,15 +1964,16 @@ int outputMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
 // output graphic representation of nD LUTs
 // return count of output objects created, 0 if none
 static
-int output3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        const std::string &basename, PDFWriter &pdffile )
+void process3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+        const std::string &basename, profileVisualizationData &data,
+        bool doEdges = true )
 {
   const size_t bufSize = 128;
   char buf[bufSize];
 
   if (!tag) {
     LogAnError(stderr, "%s: Skipping %s: unable to load tag\n", basename.c_str(), sigDesc.c_str());
-    return 0;
+    return;
   }
 
   icTagTypeSignature typeSig = tag->GetType();
@@ -1648,7 +1984,7 @@ int output3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     case icSigLut16Type:  // CIccTagLut16
     case icSigLutAtoBType:  // CIccTagLutAtoB
     case icSigLutBtoAType:  // CIccTagLutBtoA
-      return outputMBBType( pIcc, tag, sigDesc, basename, pdffile );
+      processMBBType( pIcc, tag, sigDesc, basename, data, doEdges );
       break;
 
     case icSigMultiProcessElementType:
@@ -1664,29 +2000,57 @@ int output3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
 
   }   // end switch by type
 
-  return 0; // no output was created
-
-}   // end output3DLUT()
-
-/******************************************************************************/
-
-struct namedLAB {
-    namedLAB() : L(0), a(0), b(0) {}
-
-    namedLAB( std::string nn, float LL, float aa, float bb ) :
-        name(nn), L(LL), a(aa), b(bb) {}
-
-    std::string name;
-    float L, a, b;
-};
-
-typedef std::vector<namedLAB> namedLabList;
+}   // end process3DLUT()
 
 /******************************************************************************/
 
 static
-int graphNamedColorsXYPDF( namedLabList &colorsOut, const std::string &description,
-                        icFloatNumber *XYZIlluminant, PDFWriter &pdffile )
+void processNamedColorListXY( namedLabList &colorsOut, const std::string &description,
+                        icFloatNumber *XYZIlluminant, profileVisualizationData &data )
+{
+  namedXYList xyList;
+  xyList.reserve( colorsOut.size() );
+
+  for (auto &sample : colorsOut) {
+    icFloatNumber icLAB[3];
+    icFloatNumber xyzOut[3];
+    icLAB[0] = sample.L;
+    icLAB[1] = sample.a;
+    icLAB[2] = sample.b;
+    icLabtoXYZ( xyzOut, icLAB, XYZIlluminant );
+    XYColor theXY = xyFromICCXYZFloat( xyzOut );
+    namedXY temp( sample.name, theXY.x, theXY.y );
+    xyList.push_back( temp );
+  }
+
+  xyPlotData *plot = new xyPlotData( description + " xy Plot", description,
+                                    true, xyList, namedXYList() );
+  data.addPage( plot );
+}
+
+/******************************************************************************/
+
+static
+void processNamedColorListAB( namedLabList &colorsOut, const std::string &description,
+                            profileVisualizationData &data )
+{
+  namedLabList abList;
+  abList.reserve( colorsOut.size() );
+
+  for (auto &sample : colorsOut) {
+    namedLAB temp( sample.name, sample.L, sample.a, sample.b );
+    abList.push_back( temp );
+  }
+
+  abPlotData *plot = new abPlotData( description + " ab Plot", description,
+                                    true, abList, namedLabList() );
+  data.addPage( plot );
+}
+
+/******************************************************************************/
+
+static
+void outputNamedColorsXYPDF( xyPlotData *plot, PDFWriter &pdffile )
 {
   std::ostringstream commands;
 
@@ -1704,50 +2068,70 @@ int graphNamedColorsXYPDF( namedLabList &colorsOut, const std::string &descripti
   float textSize = 10.0f;
 
   // plot on AB grid
-  // if the xyPlot xobject doesn't exist, create it now
-  if (!pdffile.xobjectExists("xyPlot"))
-    CreateXYPlotXobject( pdffile );
+  // create the xyPlot xobject if doesn't exist
+  CreateXYPlotXobject( pdffile );
 
   // add the common axes
   commands << "/xyPlot Do\n";
+
+  // gsave, color black
+  commands << "q 0 0 0 1 K\n";
 
   // add label
   point2D range( right - left, 0 );
   point2D labelBase( left, top );
   point2D tickLength(0,0);
-  commands << PDFSingleLineTextLabel( labelBase + range*0.5, false, tickLength, 12, description );
+  commands << PDFSingleLineTextLabel( labelBase + range*0.5, false, tickLength, 12, plot->object_label );
 
   point2D labelOffset( 0, markSize + 2 + textSize );
-  for (auto &sample : colorsOut) {
-    icFloatNumber icLAB[3];
-    icFloatNumber xyzOut[3];
-    icLAB[0] = sample.L;
-    icLAB[1] = sample.a;
-    icLAB[2] = sample.b;
-    icLabtoXYZ( xyzOut, icLAB, XYZIlluminant );
-    XYColor theXY = xyFromICCXYZFloat( xyzOut );
-
-    point2D plotCenter = basepoint + scaling * point2D( theXY.x, theXY.y );
+  for ( auto &sample : plot->points_unconnected ) {
+    point2D plotCenter = basepoint + scaling * point2D( sample.x, sample.y );
     commands << plotSquarePDF( plotCenter, markSize);
     commands << PDFSingleLineTextLabel( plotCenter+labelOffset, false, point2D(0,0),
                                 textSize, sample.name, kPDFTextAlignLeft );
   }
+
+  // connected line
+  size_t connected_count = plot->points_connected.size();
+  if (connected_count > 1) {
+    // gsave and 50% gray
+    commands << "q 0 0 0 0.5 K\n";
+    auto &sampleC = plot->points_connected[0];
+    point2D plotCenter = basepoint + scaling * point2D( sampleC.x, sampleC.y );
+    commands << plotCenter << " m ";
+    for (size_t i = 1; i < connected_count; ++i) {
+      auto &sample = plot->points_connected[i];
+      plotCenter = basepoint + scaling * point2D( sample.x, sample.y );
+      commands << plotCenter << " l ";
+    }
+    // stroke and grestore
+    commands << "s Q\n";
+  }
+
+  // connected marks and labels
+  for (size_t i = 0; i < connected_count; ++i) {
+    auto &sample = plot->points_connected[i];
+    point2D plotCenter = basepoint + scaling * point2D( sample.x, sample.y );
+    commands << plotSquarePDF( plotCenter, markSize );
+    commands << PDFSingleLineTextLabel( plotCenter+labelOffset, false, point2D(0,0),
+                                textSize, sample.name, kPDFTextAlignLeft );
+  }
+
+  // grestore
+  commands << "Q\n";
 
   // and finally create the graphics object and page
   PDFGraphic *graphics = new PDFGraphic( commands.str() );
   pdffile.AddObject( graphics );
   size_t content = pdffile.ObjectCount();
 
-  pdffile.AddPage( description + " xy Plot", content, "xyPlot" );
-
-  return 1;
+  pdffile.AddPage( plot->object_name, content, "xyPlot" );
 }
 
 /******************************************************************************/
 
 static
-int graphNamedColorsABPDF( namedLabList &colorsOut, const std::string &description,
-                        icFloatNumber * /*XYZIlluminant*/, PDFWriter &pdffile )
+void outputNamedColorsABPDF( abPlotData *plot, PDFWriter &pdffile )
 {
   std::ostringstream commands;
 
@@ -1765,23 +2149,24 @@ int graphNamedColorsABPDF( namedLabList &colorsOut, const std::string &descripti
 
   // plot on AB grid
   // if the abPlot xobject doesn't exist, create it now
-  if (!pdffile.xobjectExists("abPlot"))
-    CreateABPlotXobject( pdffile );
+  CreateABPlotXobject( pdffile );
 
   // add the common axes
   commands << "/abPlot Do\n";
+
+  // gsave, color black
+  commands << "q 0 0 0 1 K\n";
 
   // add label
   point2D range( right - left, 0 );
   point2D labelBase( left, top );
   point2D tickLength(0,0);
-  commands << PDFSingleLineTextLabel( labelBase + range*0.5, false, tickLength, 12, description );
-
+  commands << PDFSingleLineTextLabel( labelBase + range*0.5, false, tickLength, 12, plot->object_label );
 
   float symbolSize = 4.0f;
   float labelSize = 10.0f;
   point2D labelOffset( 0, symbolSize + 2 + labelSize );
-  for (auto &sample : colorsOut) {
+  for ( auto &sample : plot->points_unconnected ) {
     point2D colorPt( sample.a*maxRadius/abChartScale, sample.b*maxRadius/abChartScale );
     point2D plotCenter = center + colorPt;
     commands << plotSquarePDF( plotCenter, symbolSize);
@@ -1789,53 +2174,76 @@ int graphNamedColorsABPDF( namedLabList &colorsOut, const std::string &descripti
                                 labelSize, sample.name, kPDFTextAlignLeft );
   }
 
+  // connected line
+  size_t connected_count = plot->points_connected.size();
+  if (connected_count > 1) {
+    // gsave and 50% gray
+    commands << "q 0 0 0 0.5 K\n";
+    auto &sampleC = plot->points_connected[0];
+    point2D colorPt( sampleC.a*maxRadius/abChartScale, sampleC.b*maxRadius/abChartScale );
+    point2D plotCenter = center + colorPt;
+    commands << plotCenter << " m ";
+    for (size_t i = 1; i < connected_count; ++i) {
+      auto &sample = plot->points_connected[i];
+      colorPt = point2D( sample.a*maxRadius/abChartScale, sample.b*maxRadius/abChartScale );
+      plotCenter = center + colorPt;
+      commands << plotCenter << " l ";
+    }
+    // stroke and grestore
+    commands << "s Q\n";
+  }
+
+  // connected marks and labels
+  for (size_t i = 0; i < connected_count; ++i) {
+    auto &sample = plot->points_connected[i];
+    point2D colorPt( sample.a*maxRadius/abChartScale, sample.b*maxRadius/abChartScale );
+    point2D plotCenter = center + colorPt;
+    commands << plotSquarePDF( plotCenter, symbolSize );
+    commands << PDFSingleLineTextLabel( plotCenter+labelOffset, false, point2D(0,0),
+                                labelSize, sample.name, kPDFTextAlignLeft );
+  }
+
+  // grestore
+  commands << "Q\n";
+
 
   // and finally create the graphics object and page
   PDFGraphic *graphics = new PDFGraphic( commands.str() );
   pdffile.AddObject( graphics );
   size_t content = pdffile.ObjectCount();
 
-  pdffile.AddPage( description + " ab Plot", content, "abPlot" );
-
-  return 1;
+  pdffile.AddPage( plot->object_name, content, "abPlot" );
 }
 
 /******************************************************************************/
 
 static
-int graphNamedColorsPDF( namedLabList &colorsOut, const std::string &description,
-                        icFloatNumber *XYZIlluminant, PDFWriter &pdffile )
+void processNamedColorList( namedLabList &colorsOut, const std::string &description,
+                           icFloatNumber *XYZIlluminant, profileVisualizationData &data )
 {
-  std::ostringstream commands;
-  int outputObjects = 0;
+  processNamedColorListAB( colorsOut, description, data );
+  processNamedColorListXY( colorsOut, description, XYZIlluminant, data );
 
-  outputObjects += graphNamedColorsABPDF( colorsOut, description, XYZIlluminant, pdffile );
-
-  outputObjects += graphNamedColorsXYPDF( colorsOut, description, XYZIlluminant, pdffile );
-
-// TODO - CIECAM16 plot as well?
+// DEFERRED - CIECAM16 plot as well?
     //#include "IccCAM.h" -- is CIECAM02
     // would have to add CAM16 code
-
-  return outputObjects;
 }
 
 /******************************************************************************/
 
 static
-int outputColorantTable(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        PDFWriter &pdffile, const std::string &filename )
+void processColorantTable(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+                        profileVisualizationData &data, const std::string &filename )
 {
   const size_t bufSize = 64;
   char buf[bufSize];
-  int outputCount = 0;
-  
+
   namedLabList colorsOut;
-  
+
   CIccTagColorantTable *table = dynamic_cast<CIccTagColorantTable*> (tag);
   if (!table) {
     LogAnError(stderr, "%s: Skipping %s: unable to convert colorantTable\n", filename.c_str(), sigDesc.c_str());
-    return 0;
+    return;
   }
 
   std::string path(":");
@@ -1843,19 +2251,19 @@ int outputColorantTable(CIccProfile *pIcc, CIccTag *tag, const std::string &sigD
   std::string report;
   if (table->Validate(path, report, NULL) > icValidateWarning) {
     LogAnError(stderr,"%s: WARNING - colorantTable failed validation:\n%s\n", filename.c_str(), report.c_str() );
-    return 0;
+    return;
   }
 
 
   icFloatNumber XYZIlluminant[3];
   pIcc->getNormIlluminantXYZ( XYZIlluminant );
-  
+
   icColorSpaceSignature pcs = pIcc->m_Header.pcs;
   if (pcs != icSigXYZData && pcs != icSigLabData) {
     if (pcs != icSigNoColorData)                                // TODO - remove this once we can handle spectral data
       LogAnError(stderr,"%s: WARNING - unknown pcs for colors: %s\n",
                         filename.c_str(), icGetSig(buf, bufSize, pcs) );
-    return 0;
+    return;
   }
 
 
@@ -1896,28 +2304,24 @@ This value is not written, or read as part of the table -- so we must assume tha
   }
 
   std::string description("Colorant Table: ");
-  outputCount += graphNamedColorsPDF( colorsOut, description + sigDesc,
-                    XYZIlluminant, pdffile );
-
-  return outputCount;
+  processNamedColorList( colorsOut, description + sigDesc, XYZIlluminant, data );
 }
 
 /******************************************************************************/
 
 static
-int outputNamedColor2(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        PDFWriter &pdffile, const std::string &filename )
+void processNamedColor2(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+                        profileVisualizationData &data, const std::string &filename )
 {
   const size_t bufSize = 64;
   char buf[bufSize];
-  int outputCount = 0;
-  
+
   namedLabList colorsOut;
-  
+
   CIccTagNamedColor2 *table = dynamic_cast<CIccTagNamedColor2*> (tag);
   if (!table) {
     LogAnError(stderr, "%s: Skipping %s: unable to convert namedColorTable\n", filename.c_str(), sigDesc.c_str());
-    return 0;
+    return;
   }
 
   std::string path(":");
@@ -1925,25 +2329,25 @@ int outputNamedColor2(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDes
   std::string report;
   if (table->Validate(path, report, NULL) > icValidateWarning) {
     LogAnError(stderr,"%s: WARNING - namedColorTable failed validation:\n%s\n", filename.c_str(), report.c_str() );
-    return 0;
+    return;
   }
-  
+
   icFloatNumber XYZIlluminant[3];
   pIcc->getNormIlluminantXYZ( XYZIlluminant );
-  
+
   icColorSpaceSignature pcs = pIcc->m_Header.pcs;
   if (pcs != icSigXYZData && pcs != icSigLabData) {
     if (pcs != icSigNoColorData)                                // TODO - remove this once we can handle spectral data
       LogAnError(stderr,"%s: WARNING - unknown pcs for colors: %s\n",
                         filename.c_str(), icGetSig(buf, bufSize, pcs) );
-    return 0;
+    return;
   }
-  
+
   icColorSpaceSignature table_pcs = table->GetPCS();
   if (pcs != table_pcs) {
     LogAnError(stderr,"%s: WARNING - bad pcs for namedColorTable: %s\n",
                         filename.c_str(), icGetSig(buf, bufSize, pcs) );
-    return 0;
+    return;
   }
 
   icUInt32Number colorCount = table->GetSize();
@@ -1978,30 +2382,26 @@ int outputNamedColor2(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDes
   }
 
   std::string description("Named Color Table: ");
-  outputCount += graphNamedColorsPDF( colorsOut, description + sigDesc,
-                        XYZIlluminant, pdffile );
-
-  return outputCount;
+  processNamedColorList( colorsOut, description + sigDesc, XYZIlluminant, data );
 }
 
 /******************************************************************************/
 
 static
-int outputNamedColorArray(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        PDFWriter &pdffile, const std::string &filename )
+void processNamedColorArray(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+                            profileVisualizationData &data, const std::string &filename )
 {
   const size_t bufSize = 64;
   char buf[bufSize];
-  int outputCount = 0;
-  
+
   namedLabList colorsOut;
 
   CIccTagArray *array = dynamic_cast<CIccTagArray*> (tag);
   if (!array) {
     LogAnError(stderr, "%s: Skipping %s: unable to convert named color array\n", filename.c_str(), sigDesc.c_str());
-    return 0;
+    return;
   }
-  
+
   icArraySignature arrayType = array->GetTagArrayType();
   if (arrayType != icSigColorantInfoArray
     && arrayType != icSigNamedColorArray) {
@@ -2009,7 +2409,7 @@ int outputNamedColorArray(CIccProfile *pIcc, CIccTag *tag, const std::string &si
                     filename.c_str(),
                     icGetSig(buf, bufSize, arrayType),
                     sigDesc.c_str() );
-    return 0;
+    return;
   }
 
   std::string path(":");
@@ -2017,18 +2417,18 @@ int outputNamedColorArray(CIccProfile *pIcc, CIccTag *tag, const std::string &si
   std::string report;
   if (array->Validate(path, report, NULL) > icValidateWarning) {
     LogAnError(stderr,"%s: WARNING - named color array failed validation:\n%s\n", filename.c_str(), report.c_str() );
-    return 0;
+    return;
   }
 
   icFloatNumber XYZIlluminant[3];
   pIcc->getNormIlluminantXYZ( XYZIlluminant );
-  
+
   icColorSpaceSignature pcs = pIcc->m_Header.pcs;
   if (pcs != icSigXYZData && pcs != icSigLabData) {
     if (pcs != icSigNoColorData)                                // TODO - remove this once we can handle spectral data
       LogAnError(stderr,"%s: WARNING - unknown pcs for colors: %s\n",
                         filename.c_str(), icGetSig(buf, bufSize, pcs) );
-    return 0;
+    return;
   }
 
   namedLabList tempColorValues;
@@ -2043,18 +2443,18 @@ int outputNamedColorArray(CIccProfile *pIcc, CIccTag *tag, const std::string &si
     tempColorValues.clear();
 
     auto structType = thisItem->GetTagStructType();
-    
+
     if (structType != icSigColorantInfoStruct
         && structType != icSigTintZeroStruct
         && structType != icSigNamedColorStruct) {
-        
+
         LogAnError(stderr,"%s: Unknown named color struct %s for tag %s\n",
                 filename.c_str(),
                 icGetSig(buf, bufSize, structType),
                 sigDesc.c_str() );
         continue;
     }
-    
+
     CIccTagStruct *structPtr = dynamic_cast<CIccTagStruct*> (thisItem);
     if (!structPtr)
       continue;
@@ -2070,13 +2470,13 @@ CIccPcsXform::pushBiRef2Xyz
       continue;
 
     tempColorValues.clear();
-    
+
     icTagTypeSignature pcsDataType = pcsElem->GetType();
-    
+
     if (pcsDataType != icSigFloat64ArrayType
         && pcsDataType != icSigFloat32ArrayType
         && pcsDataType != icSigFloat16ArrayType) {
-        
+
         LogAnError(stderr,"%s: Unknown named color struct data type %s for tag %s\n",
                 filename.c_str(),
                 icGetSig(buf, bufSize, pcsDataType),
@@ -2087,7 +2487,7 @@ CIccPcsXform::pushBiRef2Xyz
     CIccTagNumArray *flt16 = dynamic_cast<CIccTagNumArray*> (pcsElem);
     if (!flt16)
       continue;
-    
+
     icUInt32Number dataCount = flt16->GetNumValues();
     icUInt32Number colorCount = dataCount / 3; // ignoring any partials
 
@@ -2095,9 +2495,9 @@ CIccPcsXform::pushBiRef2Xyz
     for (icUInt32Number k = 0; k < colorCount; ++k) {
         icFloatNumber valueTemp[3];
         icFloatNumber labTemp[3];
-        
+
         flt16->GetValues(valueTemp, k*3, 3);
-        
+
         if (pcs == icSigXYZData) {
             // XYZ float
             icXYZtoLab( labTemp, valueTemp, XYZIlluminant );
@@ -2115,13 +2515,13 @@ CIccPcsXform::pushBiRef2Xyz
         tempNamed.b = labTemp[2];
         tempColorValues.push_back( tempNamed );
     }
-    
-    
+
+
     // now we try to find names to match the colors
     CIccTag *nameElem = structPtr->FindElem(icSigCinfNameMbr);
     if (!nameElem)      // fallback to other tag type
       nameElem = structPtr->FindElem(icSigCinfLocalizedNameMbr);        // unused so far?
-    
+
     // if we don't have names, just skip it and still plot the color valuess
     if (nameElem) {
       icTagTypeSignature nameDataType = nameElem->GetType();
@@ -2134,7 +2534,7 @@ CIccPcsXform::pushBiRef2Xyz
             nameString = std::string( (char *)nameUTF8->GetText() );
           }
           break;
-        
+
         case icSigUtf16TextType:
           {
           CIccTagUtf16Text *nameUTF16 = dynamic_cast<CIccTagUtf16Text*> (nameElem);
@@ -2144,7 +2544,7 @@ CIccPcsXform::pushBiRef2Xyz
             }
           }
           break;
-        
+
         case icSigTextType:
           {
           CIccTagText *nameText = dynamic_cast<CIccTagText*> (nameElem);
@@ -2152,7 +2552,7 @@ CIccPcsXform::pushBiRef2Xyz
             nameString = std::string( (char *)nameText->GetText() );
           }
           break;
-          
+
         case icSigDictType: // supposed to be multiLocalizedUnicodeType, but so far unused?
         case icSigMultiLocalizedUnicodeType:
           {
@@ -2165,7 +2565,7 @@ CIccPcsXform::pushBiRef2Xyz
             }
           }
           break;
-        
+
         default:
           LogAnError(stderr,"%s: Unknown named color struct name type %s for tag %s\n",
                 filename.c_str(),
@@ -2173,12 +2573,12 @@ CIccPcsXform::pushBiRef2Xyz
                 sigDesc.c_str() );
           break;
       }
-      
+
       if (nameString.size() > 0) {
         for (auto &color: tempColorValues)
           color.name = nameString;
       }
-    
+
     } // end name element handling
 
 
@@ -2217,24 +2617,21 @@ CIccPcsXform::pushBiRef2Xyz
             // skipping this still allows colors and names, even if we don't have tint percentages
             // so don't call continue
         }
-      
+
     }   // end tint value handling
 
     // add temp values to our list
     if (tempColorValues.size() > 0)
       colorsOut.insert( colorsOut.end(), tempColorValues.begin(), tempColorValues.end() );
-    
+
   } // end loop over items in array
 
   // make sure we found some usable colors and names
   if (colorsOut.size() == 0)
-    return 0;
+    return;
 
   std::string description("Color Array: ");
-  outputCount += graphNamedColorsPDF( colorsOut, description + sigDesc,
-                    XYZIlluminant, pdffile );
-
-  return outputCount;
+  processNamedColorList( colorsOut, description + sigDesc, XYZIlluminant, data );
 }
 
 /******************************************************************************/
@@ -2242,18 +2639,17 @@ CIccPcsXform::pushBiRef2Xyz
 // convert all types of color lists to a known vector of names and LAB or XYZ colors
 // then plot that
 static
-int outputNamedColors(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        PDFWriter &pdffile, const std::string &filename )
+void processNamedColors(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
+                        profileVisualizationData &data, const std::string &filename )
 {
   const size_t bufSize = 64;
   char buf[bufSize];
-  int outputCount = 0;
-  
+
   namedLabList colorsOut;
 
   if (!tag) {
     LogAnError(stderr, "%s: Skipping %s: unable to load tag\n", filename.c_str(), sigDesc.c_str());
-    return 0;
+    return;
   }
 
   icTagTypeSignature typeSig = tag->GetType();
@@ -2261,15 +2657,15 @@ int outputNamedColors(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDes
   switch(typeSig) {
 
     case icSigColorantTableType:    // colorant tables -- name and PCS only
-      return outputColorantTable( pIcc, tag, sigDesc, pdffile, filename );
+      processColorantTable( pIcc, tag, sigDesc, data, filename );
       break;
 
     case icSigNamedColor2Type:      // named color - PCS and colorspace (PCS optional?)
-      return outputNamedColor2( pIcc, tag, sigDesc, pdffile, filename );
+      processNamedColor2( pIcc, tag, sigDesc, data, filename );
       break;
 
     case icSigTagArrayType:         // v5 only
-      return outputNamedColorArray( pIcc, tag, sigDesc, pdffile, filename );
+      processNamedColorArray( pIcc, tag, sigDesc, data, filename );
       break;
 
     default:
@@ -2280,8 +2676,6 @@ int outputNamedColors(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDes
       break;
   }
 
-
-  return outputCount;
 }
 
 /******************************************************************************/
@@ -2298,33 +2692,19 @@ std::string remove_extension( const std::string& filename)
 
 /******************************************************************************/
 
-// output graphic representation of 1D and nD LUTs
+// create graphic representation of LUTs, named colors, etc.
 static
-int processLuts(CIccProfile *pIcc, const std::string &profilePath )
+void processProfile( CIccProfile *pIcc, const std::string &basename,
+                    profileVisualizationData &data )
 {
   const size_t bufSize = 64;
   char buf1[bufSize];
-  int outputItems = 0;
 
-  std::string tmpName = remove_extension( profilePath );
-  std::string basename = icSanitizeFileName( tmpName );
-
-// write next to input file
-// write output to basename + _luts.pdf
-// write basename + _ + tag + .tiff for nD LUTs
-
-#if USE_SVG
-  std::string svgPath = basename + "_luts.svg";
-  SVGOut svgfile( svgPath );
-  svgfile.SetPageSize( 8*inch2mm, 8*inch2mm );
-#endif
-
-  std::string pdfPath = basename + "_luts.pdf";
-  PDFWriter pdffile( pdfPath, 8*inch2point, 8*inch2point );
+  data.name = basename;
 
 
   // plot RGB chromaticities, white point
-  outputItems += graphChromaticityPDF( pIcc, pdffile );
+  processChromaticity( pIcc, data );
 
 
   for ( auto &tag: pIcc->m_Tags ) {
@@ -2341,15 +2721,18 @@ int processLuts(CIccProfile *pIcc, const std::string &profilePath )
       case icSigGreenTRCTag:
       case icSigBlueTRCTag:
       case icSigGrayTRCTag:
+      case icSigAppleAltRedTRC:
+      case icSigAppleAltGreenTRC:
+      case icSigAppleAltBlueTRC:
         {
         const char *sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
-        outputItems += output1DLUT(pIcc, pTag, sigDesc, pdffile, basename );
+        process1DLUT(pIcc, pTag, sigDesc, basename, data );
         }
         break;
 
 #if 0
-// I can't find any examples that use the response tag
+// I can't find any profiles that use the response tag!
 // which makes it difficult to test
       case icSigOutputResponseTag:
         {
@@ -2377,11 +2760,12 @@ int processLuts(CIccProfile *pIcc, const std::string &profilePath )
         {
         std::string sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
-        outputItems += output3DLUT(pIcc, pTag, sigDesc, basename, pdffile );
+        process3DLUT(pIcc, pTag, sigDesc, basename, data, sig != icSigGamutTag  );
 // TODO - plot gamut from A2B and B2A tags into xy and LAB plots
         }
         break;
 
+      // named color lists
       case icSigNamedColorTag:
       case icSigNamedColor2Tag:
       case icSigColorantTableTag:
@@ -2392,7 +2776,7 @@ int processLuts(CIccProfile *pIcc, const std::string &profilePath )
 // TODO - plot named spectra as graphs?
         const char *sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
-        outputItems += outputNamedColors(pIcc, pTag, sigDesc, pdffile, basename );
+        processNamedColors(pIcc, pTag, sigDesc, data, basename );
        }
         break;
 
@@ -2404,7 +2788,7 @@ int processLuts(CIccProfile *pIcc, const std::string &profilePath )
 // TODO - all XYZ type tags?
 // TODO - curveSetElement
 // TODO - singleSampledCurve
-// TODO - segmentedCurve
+/* need Apple tag structures: 'vcgt', 'vcgp', 'ndin' */
 
       // ignore everything else
       default:
@@ -2413,15 +2797,59 @@ int processLuts(CIccProfile *pIcc, const std::string &profilePath )
     }   // end switch over tag signatures
   }   // end loop over tags
 
+}   // end processProfile()
 
-#if USE_SVG
-  svgfile.CloseFile();
-#endif
+/******************************************************************************/
+
+static
+size_t outputDataToPDF( profileVisualizationData &data, const std::string &basename )
+{
+  if (data.pages.size() == 0)
+    return 0;
+
+// write next to input file
+// write output to basename + _luts.pdf
+// write basename + _ + tag + .tif for nD LUTs
+
+  std::string pdfPath = basename + "_luts.pdf";
+  PDFWriter pdffile( pdfPath, 8*inch2point, 8*inch2point );
+
+  // iterate over pages in data
+  for (auto &page : data.pages ) {
+    std::string pageType = page->getDataType();
+
+    if (pageType == std::string("lutPlotData")) {
+      lutPlotData *lutData = dynamic_cast<lutPlotData*>(page);
+      output1DLUTPDF( lutData, pdffile );
+    }
+    else if (pageType == std::string("abPlotData")) {
+      abPlotData *abData = dynamic_cast<abPlotData*>(page);
+      outputNamedColorsABPDF( abData, pdffile );
+    }
+    else if (pageType == std::string("xyPlotData")) {
+      xyPlotData *xyData = dynamic_cast<xyPlotData*>(page);
+      outputNamedColorsXYPDF( xyData, pdffile );
+    }
+    else if (pageType == std::string("imageData")) {
+      imageData *image = dynamic_cast<imageData*>(page);
+      std::string tiffPath2 = image->object_name + ".tif";
+      if (!WriteTIFF( tiffPath2.c_str(), 100, image->mode, image->data,
+                    image->width, image->height, image->channels, image->depth )) {
+        LogAnError(stderr, "%s: Failed to write TIFF: %s\n", basename.c_str(), tiffPath2.c_str());
+      }
+    }
+    else {
+      LogAnError(stderr, "%s: unknown data type %s\n", basename.c_str(), pageType.c_str());
+    }
+  } // end iteration over pages
+
+  size_t objectCount = pdffile.PageCount(); // grab page count before destroying the pages
+
   pdffile.CloseFile();
 
-  return outputItems;
+  return objectCount;
 
-}   // end processLuts()
+}   // end outputDataToPDF()
 
 /******************************************************************************/
 
@@ -2465,7 +2893,7 @@ filename_list parse_arguments( int argc, char *argv[] )
       exit (1);
     }
     else {
-      // not a switch, treat it as a json input file
+      // not a switch, treat it as an input file
       filenames.push_back( argv[c] );
     }
 
@@ -2484,61 +2912,49 @@ filename_list parse_arguments( int argc, char *argv[] )
 
 int main(int argc, char* argv[])
 {
-#if defined(MEMORY_LEAK_CHECK) && defined(_DEBUG)
-#if defined(WIN32) || defined(_WIN32)
-#if 0
-  // Suppress windows dialogs for assertions and errors - send to stderr instead during batch CLI processing
-  _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-  _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-  _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
-  _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
-#endif
-  int tmp = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG);
-  tmp = tmp | _CRTDBG_LEAK_CHECK_DF | _CRTDBG_ALLOC_MEM_DF; // | _CRTDBG_CHECK_ALWAYS_DF;
-  _CrtSetDbgFlag(tmp);
-  //_CrtSetBreakAlloc(1163);
-#elif __GLIBC__
-  mcheck(NULL);
-#endif // WIN32
-#endif // MEMORY_LEAK_CHECK && _DEBUG
-
   if (argc <= 1) {
     printUsage();
     return 0;
   }
 
-  filename_list files = parse_arguments(argc,argv);
+  filename_list fileList = parse_arguments(argc,argv);
 
-  for (auto &file : files) {
+  for (auto &file : fileList) {
+    std::string sanitizedFile = icSanitizeFileName( file );
+
     try {
-      ClearErrorLogs();
-      
-      // DEBUGGING printf("Processing profile '%s'\n", file.c_str() );
-// TODO - read XML and JSON profiles
-// try each in-turn, or sniff file contents for clues?
+      ClearErrorLogs(); // NOTE - this is so we can get logs per input file
+
+//printf("Processing profile '%s'\n", file.c_str() );     // DEBUGGING
       CIccProfile *pIcc = OpenIccProfile( file.c_str() );
       if (!pIcc) {
-        LogAnError(stderr,"Unable to parse '%s' as ICC profile!\n", file.c_str() );
+        LogAnError(stderr,"Unable to parse '%s' as ICC profile!\n", sanitizedFile.c_str() );
         continue;
       }
 
-      auto count = processLuts( pIcc, file );
+      std::string basename = remove_extension( sanitizedFile );
+
+      profileVisualizationData data;
+      processProfile( pIcc, basename, data );
+
+// TODO - output to other types (JSON)
+      auto count = outputDataToPDF( data, basename );
       if (!count) {
-        LogAnError(stderr,"Profile %s had no content for output\n", file.c_str() );
+        LogAnError(stderr,"Profile %s had no content for output\n", sanitizedFile.c_str() );
       }
 
       delete pIcc;
     }   // end try
     catch (const std::exception& e) {
-      LogAnError(stderr, "%s: ERROR exception: '%s'\n", file.c_str() , e.what() );
+      LogAnError(stderr, "%s: ERROR exception: '%s'\n", sanitizedFile.c_str() , e.what() );
     }
     catch (...) {
-      LogAnError(stderr, "%s: ERROR: unknown exception\n", file.c_str() );
+      LogAnError(stderr, "%s: ERROR: unknown exception\n", sanitizedFile.c_str() );
     }
-    
+
     // NOTE - consume error logs here if needed, so exceptions are included
 
-  } // end for argc
+  } // end for file list
 
   return 0;
 }

@@ -67,7 +67,69 @@
 #include <vector>
 #include <string>
 #include <map>
-#include "MiniSVG.hpp"
+
+/******************************************************************************/
+
+const float inch2mm = 25.4f;                 // 25.4 millimeters per inch, international standard
+const float mm2point = 72.0f / inch2mm;      // 2.834645669 (Shows up severeal places)
+const float inch2point = 72.0f;              // 72 points per inch, DTP and W3C standard
+
+
+struct point2D {
+  point2D(float xx, float yy) : x(xx), y(yy) {}
+  point2D() : x(0.0), y(0.0) {}
+  
+  bool operator<(const point2D& o) const {
+  if (x == o.x)
+    return y < o.y;
+  else
+    return x < o.x;
+  }
+
+  float x, y;
+};
+
+inline point2D operator+(const point2D& xx, const point2D& yy) {
+  return point2D(xx.x + yy.x, xx.y + yy.y);
+}
+
+inline point2D operator-(const point2D& xx, const point2D& yy) {
+  return point2D(xx.x - yy.x, xx.y - yy.y);
+}
+
+inline point2D& operator+=(point2D& xx, const point2D& yy) {
+  xx.x += yy.x;
+  xx.y += yy.y;
+  return xx;
+}
+
+inline point2D& operator-=(point2D& xx, const point2D& yy) {
+  xx.x -= yy.x;
+  xx.y -= yy.y;
+  return xx;
+}
+
+inline point2D operator*(const point2D& xx, const point2D& yy) {
+  return point2D(xx.x * yy.x, xx.y * yy.y);
+}
+
+inline point2D operator*(const point2D& xx, const float ss) {
+  return point2D(xx.x * ss, xx.y * ss);
+}
+
+inline point2D operator/(const point2D& xx, const float ss) {
+  return point2D(xx.x / ss, xx.y / ss);
+}
+
+inline point2D operator*(const float ss, const point2D& yy) {
+  return point2D(ss * yy.x, ss * yy.y);
+}
+
+inline point2D operator/(const point2D& xx, const point2D& yy) {
+  return point2D(xx.x / yy.x, xx.y / yy.y);
+}
+
+typedef std::vector<point2D> pointList;
 
 /******************************************************************************/
 
@@ -128,7 +190,7 @@ public:
   PDFObject() : m_offset(0) {}
   virtual ~PDFObject() {}
 
-  virtual void WriteContent(  std::ostream &out ) = 0;
+  virtual void WriteContent( std::ostream &out ) = 0;
 
 public:
   size_t m_offset;
@@ -145,7 +207,7 @@ public:
   PDFRoot( size_t pageObj, size_t outlineObj ) :
         PDFObject(), m_pageObj(pageObj), m_outlineObj(outlineObj) {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   size_t m_pageObj;
@@ -160,7 +222,7 @@ class PDFPageParent : public PDFObject
 public:
   PDFPageParent() : PDFObject() {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
   
   void AddPage( size_t pageIndex, const std::string &pageName )
     {
@@ -186,7 +248,7 @@ public:
     m_xobjectName(xobjectName)
      {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
   void AddAnnotation( size_t index ) {
     m_annotations.push_back(index);
@@ -217,7 +279,7 @@ class PDFOutlineParent : public PDFObject
 public:
   PDFOutlineParent() : PDFObject() {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
   
   void AddOutlineObject( size_t index )
     {
@@ -240,7 +302,7 @@ public:
       m_prevIndex(prev), m_nextIndex(next), m_name(title)
      {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   size_t m_outlineParentIndex;
@@ -258,7 +320,7 @@ class PDFProcSet : public PDFObject
 public:
   PDFProcSet( const std::string &proc ) : PDFObject(), m_buf(proc) {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   std::string m_buf;
@@ -271,7 +333,7 @@ class PDFGraphic : public PDFObject
 public:
   PDFGraphic( const std::string &content ) : PDFObject(), m_buf(content) {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   std::string m_buf;
@@ -286,7 +348,7 @@ public:
     m_area(area), m_pageIndex(index)
     {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   Rect2D m_area;
@@ -300,7 +362,7 @@ class PDFFont : public PDFObject
 public:
   PDFFont( const std::string &font ) : PDFObject(), m_fontname(font) {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   std::string m_fontname;
@@ -313,7 +375,7 @@ class PDFGroup : public PDFObject
 public:
   PDFGroup() : PDFObject() {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
     // nothing yet
@@ -330,7 +392,7 @@ public:
     m_font(font), m_group(group)
         {}
 
-  virtual void WriteContent(  std::ostream &out ) final;
+  virtual void WriteContent( std::ostream &out ) final;
 
 public:
   std::string m_buf;
