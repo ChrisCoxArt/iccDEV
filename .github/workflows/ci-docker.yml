@@ -30,7 +30,9 @@ on:
       - "Dockerfile.nixos"
       - "Dockerfile.ci-regression"
       - "Dockerfile.mcp"
+      - ".dockerignore"
       - "iccdev-mcp/**"
+      - "docker/**"
       - "python/**"
       - ".github/scripts/preflight-safety-checks.sh"
       - ".github/workflows/ci-docker.yml"
@@ -333,6 +335,20 @@ jobs:
             echo "::error::Image ref mismatch: $image_ref_label != $EXPECTED_REF_NAME"
             exit 1
           fi
+
+      - name: Reclaim workspace before image scan
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+
+          docker buildx prune --all --force
+          docker image prune --force
+          docker system df
+          df -h "${RUNNER_TEMP:-/tmp}"
 
       - name: Scan test image
         env:
@@ -727,11 +743,18 @@ jobs:
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-qa-flags' || github.ref == 'refs/heads/ci-qa-pr-docker-testing'
     environment: ghcr-publish
     permissions:
+      contents: read  # Required for the trusted workflow helper checkout.
       packages: write  # Required to delete old GHCR package versions.
     strategy:
       matrix:
         package: [iccdev, iccdev-nixos, iccdev-ci-regression, iccdev-mcp]
     steps:
+      - name: Checkout trusted workflow helpers
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       # preflight: allow-token-exposure reason=ghcr-package-prune
       - name: Delete old package versions
         env:
@@ -741,6 +764,7 @@ jobs:
         run: |
           set -euo pipefail
           git config --global credential.helper ""
+          source .github/scripts/sanitize-sed.sh
 
           ORG="InternationalColorConsortium"
           CUTOFF=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
@@ -749,9 +773,25 @@ jobs:
 
           echo "Pruning ${MATRIX_PACKAGE} versions older than ${CUTOFF}; keeping ${KEEP_RECENT} newest non-latest versions; deleting up to ${DELETE_LIMIT}"
 
-          gh api --paginate \
-            "/orgs/${ORG}/packages/container/${MATRIX_PACKAGE}/versions" |
-          jq -sr --arg cutoff "${CUTOFF}" --argjson keep_recent "${KEEP_RECENT}" '
+          pages_file="/tmp/prune-version-pages.json"
+          rm -f "$pages_file"
+          for attempt in 1 2 3; do
+            if gh api --paginate --slurp \
+                "/orgs/${ORG}/packages/container/${MATRIX_PACKAGE}/versions" \
+                > "$pages_file" &&
+              jq -e 'type == "array" and all(.[]; type == "array")' \
+                "$pages_file" >/dev/null; then
+              break
+            fi
+            rm -f "$pages_file"
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Unable to list valid package versions after ${attempt} attempts"
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+
+          jq -r --arg cutoff "${CUTOFF}" --argjson keep_recent "${KEEP_RECENT}" '
             add
             | sort_by(.created_at)
             | reverse
@@ -764,13 +804,14 @@ jobs:
             | .[]
             | select(.created_at < $cutoff)
             | .id
-          ' > /tmp/prune-all-ids.txt
+          ' "$pages_file" > /tmp/prune-all-ids.txt
           sed -n "1,${DELETE_LIMIT}p" /tmp/prune-all-ids.txt > /tmp/prune-ids.txt
 
           TOTAL=$(wc -l < /tmp/prune-ids.txt | tr -d ' ')
           CANDIDATES=$(wc -l < /tmp/prune-all-ids.txt | tr -d ' ')
           if [ "${TOTAL}" -eq 0 ]; then
             echo "No versions to prune"
+            rm -f "$pages_file" /tmp/prune-ids.txt /tmp/prune-all-ids.txt
             exit 0
           fi
 
@@ -780,7 +821,8 @@ jobs:
           FAILED=0
           while IFS= read -r vid; do
             response="/tmp/prune-response-${vid}.json"
-            status=$(curl -sS -o "${response}" -w "%{http_code}" \
+            status=$(curl -sS --retry 3 --retry-delay 2 --retry-all-errors \
+              -o "${response}" -w "%{http_code}" \
               -X DELETE \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -805,7 +847,7 @@ jobs:
           done < /tmp/prune-ids.txt
 
           echo "Pruned ${DELETED}/${TOTAL} old versions (${SKIPPED} skipped, ${FAILED} failed)"
-          rm -f /tmp/prune-ids.txt /tmp/prune-all-ids.txt
+          rm -f "$pages_file" /tmp/prune-ids.txt /tmp/prune-all-ids.txt
           if [ "${FAILED}" -ne 0 ]; then
             echo "::error::${FAILED} package version delete request(s) failed"
             exit 1

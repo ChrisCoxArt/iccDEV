@@ -113,7 +113,7 @@ RUN python3 -m venv /opt/iccdev-spectral-preview \
       --no-cache-dir \
       'numpy==2.4.2' \
       'tifffile==2026.2.24' \
-      'pillow==12.2.0' \
+      'pillow==12.3.0' \
       'imagecodecs==2026.6.6' \
       --quiet \
  && /opt/iccdev-spectral-preview/bin/python -c 'import imagecodecs,numpy,PIL,tifffile; print(f"imagecodecs {imagecodecs.__version__}"); print(f"numpy {numpy.__version__}"); print(f"pillow {PIL.__version__}"); print(f"tifffile {tifffile.__version__}")'
@@ -160,13 +160,21 @@ RUN python3 -m venv /opt/iccdev-mcp \
 USER iccdev-ci
 WORKDIR /workspace/iccDEV
 
-RUN if [ -f .git ]; then rm -f .git && git init --quiet; elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then rm -rf .git && git init --quiet; fi \
+RUN rm -rf .git \
+ && git init --quiet \
  && git config --global --add safe.directory /workspace/iccDEV \
  && (git remote set-url origin https://github.com/InternationalColorConsortium/iccDEV.git 2>/dev/null \
       || git remote add origin https://github.com/InternationalColorConsortium/iccDEV.git) \
- && if git rev-parse --verify HEAD >/dev/null 2>&1 && [ "$GIT_COMMIT" != "unknown" ]; then \
-      test "$(git rev-parse HEAD)" = "$GIT_COMMIT"; \
+ && if [ "$GIT_COMMIT" != "unknown" ]; then \
+      git fetch --depth=1 origin "$GIT_COMMIT" \
+      && git checkout --quiet --force --detach "$GIT_COMMIT"; \
+    else \
+      git config user.name "iccDEV CI" \
+      && git config user.email "iccdev-ci@invalid" \
+      && git add --all \
+      && git commit --quiet -m "Initialize regression container source"; \
     fi \
+ && test -z "$(git status --porcelain --untracked-files=all)" \
  && mkdir -p /workspace/build \
  && SAN_FLAGS="-fsanitize=address,undefined,float-divide-by-zero,float-cast-overflow" \
  && GIT_COMMIT="$GIT_COMMIT" CC=clang CXX=clang++ cmake -S Build/Cmake -B /workspace/build \
@@ -191,6 +199,8 @@ RUN cmake --build /workspace/build --target build-test-binaries --parallel "$(np
 
 WORKDIR /workspace/iccDEV/Testing
 RUN iccdev-generate-profiles /workspace/build/Tools
+RUN git checkout -- silence.txt \
+ && test -z "$(git status --porcelain --untracked-files=all)"
 
 USER root
 RUN chmod 0755 /usr/local/bin/iccdev-banner \
@@ -212,6 +222,9 @@ RUN chmod 0755 /usr/local/bin/iccdev-banner \
 
 HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \
   CMD clang --version >/dev/null && cmake --version >/dev/null && command -v iccDumpProfile >/dev/null && command -v iccdev-mcp-rest >/dev/null || exit 1
+
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+ENV ICCDEV_SOURCE_REVISION="${GIT_COMMIT}"
 
 USER iccdev-ci
 WORKDIR /workspace/iccDEV
