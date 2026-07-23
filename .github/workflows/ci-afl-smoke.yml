@@ -1,0 +1,273 @@
+###############################################################
+#
+# Copyright (c) 2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+# Intent: Manual AFL++ smoke fuzzing for iccDEV command-line tools.
+#
+###############################################################
+
+name: "ci-afl-smoke"
+
+# Some commands and image references intentionally exceed the default
+# yamllint line length. Keep the disable local to this workflow.
+# yamllint disable rule:line-length
+
+permissions:
+  contents: read
+  packages: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: 'Optional exact commit SHA to check out'
+        required: false
+        default: ''
+        type: string
+      afl_targets:
+        description: 'Comma-separated AFL targets: dump,toxml,fromcube'
+        required: true
+        default: dump
+        type: string
+      duration_seconds:
+        description: 'AFL runtime per target in seconds, 1-3600'
+        required: true
+        default: '300'
+        type: string
+      exec_timeout_ms:
+        description: 'AFL per-exec timeout in milliseconds, 20-30000'
+        required: true
+        default: '30000'
+        type: string
+      cmake_build_type:
+        description: 'CMake build type for AFL instrumentation'
+        required: true
+        default: Debug
+        type: choice
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+          - MinSizeRel
+      regression_image_tag:
+        description: 'Trusted regression container tag'
+        required: false
+        default: master
+        type: string
+  workflow_call:
+    inputs:
+      target_sha:
+        description: 'Optional exact commit SHA to check out'
+        required: false
+        default: ''
+        type: string
+      afl_targets:
+        description: 'Comma-separated AFL targets: dump,toxml,fromcube'
+        required: false
+        default: dump
+        type: string
+      duration_seconds:
+        description: 'AFL runtime per target in seconds, 1-3600'
+        required: false
+        default: '300'
+        type: string
+      exec_timeout_ms:
+        description: 'AFL per-exec timeout in milliseconds, 20-30000'
+        required: false
+        default: '30000'
+        type: string
+      cmake_build_type:
+        description: 'CMake build type for AFL instrumentation'
+        required: false
+        default: Debug
+        type: string
+      regression_image_tag:
+        description: 'Trusted regression container tag'
+        required: false
+        default: master
+        type: string
+
+concurrency:
+  group: "afl-smoke-${{ github.workflow }}-${{ github.ref }}-${{ inputs.afl_targets || 'dump' }}"
+  cancel-in-progress: false
+
+jobs:
+  afl-smoke:
+    name: "AFL++ smoke (${{ inputs.afl_targets || 'dump' }}, ${{ inputs.duration_seconds || '300' }}s)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    container:
+      image: ghcr.io/internationalcolorconsortium/iccdev-ci-regression:${{ inputs.regression_image_tag || 'master' }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 0
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    env:
+      BASH_ENV: /dev/null
+      AFL_TARGETS_INPUT: ${{ inputs.afl_targets || 'dump' }}
+      AFL_SECONDS_INPUT: ${{ inputs.duration_seconds || '300' }}
+      AFL_EXEC_TIMEOUT_MS_INPUT: ${{ inputs.exec_timeout_ms || '30000' }}
+      AFL_BUILD_TYPE_INPUT: ${{ inputs.cmake_build_type || 'Debug' }}
+      TARGET_SHA_INPUT: ${{ inputs.target_sha || '' }}
+      TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+      AFLPLUSPLUS_REPO: https://github.com/AFLplusplus/AFLplusplus.git
+      AFLPLUSPLUS_REF: dev
+
+    steps:
+      - name: Checkout trusted sanitizer helpers
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.workflow_sha }}
+          path: trusted
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout iccDEV
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
+        with:
+          ref: ${{ github.ref }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact target SHA
+        if: ${{ inputs.target_sha != '' }}
+        working-directory: target
+        env:
+          BASH_ENV: /dev/null
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          case "$TARGET_SHA" in
+            *[!0-9a-fA-F]*)
+              echo "ERROR: invalid target SHA: $(sanitize_line "$TARGET_SHA")" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#TARGET_SHA}" -ne 40 ]; then
+            echo "ERROR: invalid target SHA length: $(sanitize_line "$TARGET_SHA")" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$TARGET_SHA"
+          git checkout --detach "$TARGET_SHA"
+
+      - name: Harden Bash environment
+        working-directory: target
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          echo "AFL targets: $(sanitize_line "$AFL_TARGETS_INPUT")"
+          echo "AFL seconds: $(sanitize_line "$AFL_SECONDS_INPUT")"
+          echo "AFL exec timeout ms: $(sanitize_line "$AFL_EXEC_TIMEOUT_MS_INPUT")"
+          echo "AFL CMake build type: $(sanitize_line "$AFL_BUILD_TYPE_INPUT")"
+
+      # preflight: allow-package-install reason=aflplusplus-dev-toolchain-bootstrap
+      - name: Build AFL++ dev toolchain
+        working-directory: target
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+
+          disabled_dir="${RUNNER_TEMP:-/tmp}/iccdev-disabled-apt-sources"
+          mkdir -p "$disabled_dir"
+          for source_file in /etc/apt/sources.list.d/*; do
+            [ -e "$source_file" ] || continue
+            if grep -qs 'packages\.microsoft\.com' "$source_file"; then
+              safe_name="$(basename "$source_file")"
+              mv "$source_file" "$disabled_dir/$safe_name.disabled"
+            fi
+          done
+          apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 update -qq
+          apt-get install -y -qq --no-install-recommends \
+            automake \
+            bison \
+            flex \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            python3-dev \
+            python3-setuptools
+
+          aflplusplus_src="$RUNNER_TEMP/AFLplusplus"
+          git clone --depth 1 --branch "$AFLPLUSPLUS_REF" "$AFLPLUSPLUS_REPO" "$aflplusplus_src"
+          make -C "$aflplusplus_src" -j"$(nproc)" source-only
+          for afl_tool in afl-fuzz afl-clang-fast afl-clang-fast++; do
+            if [ ! -x "$aflplusplus_src/$afl_tool" ]; then
+              echo "ERROR: AFL++ dev build did not produce $afl_tool" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "PATH=$aflplusplus_src:$PATH"
+            echo "AFLPLUSPLUS_SRC=$aflplusplus_src"
+          } >> "$GITHUB_ENV"
+          "$aflplusplus_src/afl-fuzz" -V 1 >/dev/null 2>&1 || true
+          echo "AFL++ source: $(sanitize_line "$AFLPLUSPLUS_REPO")"
+          echo "AFL++ ref: $(sanitize_line "$AFLPLUSPLUS_REF")"
+
+      - name: Run AFL smoke
+        working-directory: target
+        env:
+          BASH_ENV: /dev/null
+          AFL_TARGETS: ${{ inputs.afl_targets || 'dump' }}
+          AFL_SECONDS: ${{ inputs.duration_seconds || '300' }}
+          AFL_EXEC_TIMEOUT_MS: ${{ inputs.exec_timeout_ms || '30000' }}
+          AFL_BUILD_TYPE: ${{ inputs.cmake_build_type || 'Debug' }}
+          AFL_BUILD_DIR: ${{ runner.temp }}/iccdev-build-afl-smoke
+          AFL_WORK_DIR: ${{ runner.temp }}/iccdev-afl-smoke
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          .github/scripts/iccdev-afl-smoke.sh \
+            --seconds "$AFL_SECONDS" \
+            --targets "$AFL_TARGETS" \
+            --build-type "$AFL_BUILD_TYPE" \
+            --exec-timeout-ms "$AFL_EXEC_TIMEOUT_MS" \
+            --build-dir "$AFL_BUILD_DIR" \
+            --work-dir "$AFL_WORK_DIR"
+
+      - name: Summarize AFL smoke
+        if: always()
+        working-directory: target
+        env:
+          BASH_ENV: /dev/null
+          AFL_WORK_DIR: ${{ runner.temp }}/iccdev-afl-smoke
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          summary="$AFL_WORK_DIR/summary.tsv"
+          {
+            echo "## AFL++ Smoke Summary"
+            echo ""
+            echo "| Target | Status | Seconds | Execs | Crashes | Hangs |"
+            echo "|--------|--------|---------|-------|---------|-------|"
+            if [ -r "$summary" ]; then
+              tail -n +2 "$summary" | while IFS="$(printf '\t')" read -r target status runtime execs crashes hangs out_dir; do
+                echo "| $(sanitize_line "$target") | $(sanitize_line "$status") | $(sanitize_line "$runtime") | $(sanitize_line "$execs") | $(sanitize_line "$crashes") | $(sanitize_line "$hangs") |"
+                printf 'Output directory: %s\n' "$(sanitize_line "$out_dir")" >/dev/null
+              done
+            else
+              echo "| unavailable | fail | 0 | 0 | 0 | 0 |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
