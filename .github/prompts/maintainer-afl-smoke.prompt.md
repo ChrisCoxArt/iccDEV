@@ -10,6 +10,9 @@ command-line tools.
 - AFL++ source: `https://github.com/AFLplusplus/AFLplusplus/tree/dev`
 - Container: `ghcr.io/internationalcolorconsortium/iccdev-ci-regression`
 - Seeds: `.github/ci/test-data/` and `.github/ci/afl-seeds/`
+- Local patch stacks: `.github/ci/fuzz-patches/afl` and
+  `.github/ci/fuzz-patches/cfl`
+- CFL smoke: `cfl/build.sh` and `.github/workflows/ci-cfl-smoke.yml`
 - Governance: `.github/instructions/workflow-governance.instructions.md`
 - Docs: `docs/afl-fuzzing.md`
 
@@ -18,6 +21,13 @@ command-line tools.
 Update the AFL smoke target, seed set, or workflow inputs while keeping the job
 manual, bounded, and governance-compliant.
 
+Treat AFL/CFL work in this branch as experimental maintainer scaffolding. The
+goal is to register manual/reusable workflows, docs, helper scripts, and local
+validation patch stacks for future runs off `master` or integration branches.
+Do not present the fuzz patch stack as production source hardening, and do not
+turn these workflows into mandatory merge gates unless a maintainer explicitly
+asks for that policy change.
+
 Keep AFL++ bootstrap aligned with the regression container's LLVM major
 version. For Clang/LLVM 22, build AFL++ `dev` with `CC=clang-22`,
 `CXX=clang++-22`, and `LLVM_CONFIG=llvm-config-22`, then probe both
@@ -25,6 +35,16 @@ version. For Clang/LLVM 22, build AFL++ `dev` with `CC=clang-22`,
 `AFL_CXX=clang++-22`. The current narrow CI target set is `afl-fuzz`,
 `afl-showmap`, `afl-cc`, `afl-compiler-rt.o`,
 `SanitizerCoveragePCGUARD.so`, and `cmplog-routines-pass.so`.
+
+The current core onboarding target set is
+`dump,toxml,fromxml,tojson,fromjson,roundtrip`. Stabilize those targets before
+adding more command-line tools.
+
+Manual dispatches should expose the same operator controls on AFL and CFL:
+`target_ref` for a branch, tag, or ref, optional `target_sha` for an exact
+commit pin, and `patch_mode` with `all` or `none`. Use `all` when validating
+maintainer-local patch stacks before promoting them to source PRs, and `none`
+when comparing raw branch behavior.
 
 Do not use the packaged AFL++ wrapper from the regression image unless the
 image has rebuilt and probed that wrapper against the same LLVM major version.
@@ -41,6 +61,9 @@ hang artifacts before promoting them to regression evidence. Any saved crash or
 hang testcase files should be uploaded as the `afl-smoke-findings-<run-id>`
 artifact and listed in the workflow summary. Uploaded filenames should be
 artifact-safe, with `manifest.tsv` mapping back to the original AFL paths.
+When findings exist, replay them with `.github/scripts/iccdev-fuzz-triage.sh`
+and include the generated triage summary and one-line reproducers in the
+handoff.
 
 ## Required Validation
 
@@ -50,6 +73,7 @@ shellcheck .github/scripts/iccdev-afl-smoke.sh
 actionlint .github/workflows/ci-afl-smoke.yml
 yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' .github/workflows/ci-afl-smoke.yml
 .github/scripts/iccdev-afl-smoke.sh --seconds 10 --targets dump --exec-timeout-ms 30000
+cfl/build.sh --targets dump,toxml,fromxml,tojson,fromjson,roundtrip --runs 1
 ```
 
 Run `.github/scripts/preflight-safety-checks.sh --require-tools` before pushing
@@ -61,6 +85,7 @@ bootstrap probe documented in `docs/afl-fuzzing.md`.
 ## Handoff
 
 Report the exact workflow ref, target list, duration, build type, exec timeout,
-run URL, conclusion, whether AFL reported crashes or warn-level hangs, and
-whether a findings artifact was uploaded. Also report whether the AFL++ wrapper
-probe used the regression container or a local toolchain.
+selected `target_ref`, exact checkout SHA, patch mode, run URL, conclusion,
+whether AFL reported crashes or warn-level hangs, and whether findings or log
+artifacts were uploaded. Also report whether the AFL++ wrapper probe used the
+regression container or a local toolchain.
