@@ -21,7 +21,7 @@ printf 'Build dir: %s\n' "$build_dir"
 printf '\n'
 
 printf '%s\n' 'Toolchain:'
-for tool in clang clang++ llvm-symbolizer afl-fuzz afl-showmap; do
+for tool in clang clang++ clang-21 clang++-21 llvm-symbolizer afl-fuzz afl-showmap afl-clang-fast afl-clang-fast++; do
   if command -v "$tool" >/dev/null 2>&1; then
     printf '  %-16s %s\n' "$tool" "$(command -v "$tool")"
   else
@@ -44,9 +44,9 @@ printf '\n'
 
 printf '%s\n' 'Examples:'
 printf '%s\n' '  .github/scripts/iccdev-afl-smoke.sh --patches --seconds 10 --targets dump'
-printf '%s\n' '  cfl/build.sh --patches --targets dump,toxml,fromxml,tojson,fromjson,roundtrip --runs 1'
+printf '%s\n' '  cfl/build.sh --patches --targets dump,toxml,fromxml,tojson,fromjson,roundtrip --seconds 30'
 printf '\n'
 
 printf '%s\n' 'Note: ci-afl-smoke rebuilds AFL++ dev wrappers against LLVM 22 before'
-printf '%s\n' 'running AFL instrumentation. The packaged AFL++ tools in this image are'
-printf '%s\n' 'for maintainer inspection and lightweight local smoke checks.'
+printf '%s\n' 'running AFL instrumentation. The packaged AFL++ tools in this image have'
+printf '%s\n' 'their matching LLVM 21 compiler runtime for lightweight local smoke checks.'
