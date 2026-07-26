@@ -1,0 +1,239 @@
+###############################################################
+#
+# Copyright (c) 2025-2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+## Intent: CodeQL security analysis with custom iccDEV queries
+##         Uploads SARIF and stores a local report artifact
+#
+## Last Updated: 2026-04-09 by David Hoyt
+#
+###############################################################
+
+name: "ci-codeql-security"
+
+# Existing pinned SHAs and CodeQL command strings exceed line length.
+# Keep this yamllint disable local to this workflow.
+# yamllint disable rule:line-length
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - labeled
+  push:
+    branches:
+      - master
+    paths:
+      - 'IccProfLib/**'
+      - 'IccXML/**'
+      - 'IccJSON/**'
+      - 'IccConnect/**'
+      - 'Tools/**'
+      - 'examples/**'
+      - '.github/codeql-queries/**'
+      - '.github/codeql-config.yml'
+      - '.github/scripts/codeql-report.sh'
+      - '.github/scripts/run-codeql-local.sh'
+      - '.github/workflows/ci-codeql-security.yml'
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+concurrency:
+  group: "codeql-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'codeql-ready'
+      )
+    name: CodeQL Security Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read  # Required to correlate CodeQL upload with workflow metadata.
+      security-events: write  # Required to upload SARIF code scanning results.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout trusted security helpers
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          sparse-checkout: |
+            .github/scripts
+            .github/codeql-queries
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install build dependencies
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            cmake clang \
+            libxml2-dev libtiff-dev libpng-dev libjpeg-dev \
+            nlohmann-json3-dev libwxgtk3.2-dev 2>/dev/null
+
+      - name: Install CodeQL CLI
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          if ! command -v codeql >/dev/null 2>&1; then
+            CODEQL_VER="2.24.1"
+            CODEQL_ARCHIVE="/tmp/codeql-bundle-linux64.tar.gz"
+            CODEQL_SHA256="9767468e00a505ed022eedcf5813dd47760567a400ead7bf2519ce22f953dde1"
+            CODEQL_URL="https://github.com/github/codeql-action/releases/download"
+            curl -fsSL --retry 3 \
+              -o "${CODEQL_ARCHIVE}" \
+              "${CODEQL_URL}/codeql-bundle-v${CODEQL_VER}/codeql-bundle-linux64.tar.gz"
+            printf '%s  %s\n' "${CODEQL_SHA256}" "${CODEQL_ARCHIVE}" | sha256sum -c -
+            tar xzf "${CODEQL_ARCHIVE}" -C /opt
+            echo "/opt/codeql" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install CodeQL pack dependencies
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+          TRUSTED_CODEQL_QUERIES: ${{ github.workspace }}/trusted/.github/codeql-queries
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          codeql pack install "$TRUSTED_CODEQL_QUERIES"
+
+      - name: Configure iccDEV
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          cmake -S Build/Cmake -B /tmp/iccdev-codeql-build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TOOLS=ON \
+            -DICC_JSON_ORDERED=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Create CodeQL database
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          NJOBS="$(nproc)"
+          codeql database create /tmp/codeql-db \
+            --language=cpp \
+            --overwrite \
+            --command="cmake --build /tmp/iccdev-codeql-build -j ${NJOBS}" \
+            --source-root="."
+
+      - name: Run CodeQL analysis
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+          TRUSTED_CODEQL_QUERIES: ${{ github.workspace }}/trusted/.github/codeql-queries
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          mkdir -p codeql-results
+
+          # Standard security + quality suite, minus cpp/path-injection.
+          codeql database analyze /tmp/codeql-db \
+            --format=sarif-latest \
+            --output=codeql-results/cpp-security-and-quality.sarif \
+            --threads=0 \
+            "$TRUSTED_CODEQL_QUERIES/iccdev-cpp-security-and-quality.qls"
+
+          # Custom iccDEV security queries
+          codeql database analyze /tmp/codeql-db \
+            --format=sarif-latest \
+            --output=codeql-results/iccdev-security.sarif \
+            --threads=0 \
+            "$TRUSTED_CODEQL_QUERIES/iccdev-security-suite.qls"
+
+          # IccJSON/IccConnect targeted security queries
+          codeql database analyze /tmp/codeql-db \
+            --format=sarif-latest \
+            --output=codeql-results/iccdev-jsonlib-security.sarif \
+            --threads=0 \
+            "$TRUSTED_CODEQL_QUERIES/iccdev-jsonlib-suite.qls"
+
+      - name: Generate report
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          TRUSTED_SCRIPTS: ${{ github.workspace }}/trusted/.github/scripts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
+          "$TRUSTED_SCRIPTS/codeql-report.sh" \
+            codeql-results/cpp-security-and-quality.sarif \
+            codeql-results/iccdev-security.sarif \
+            codeql-results/iccdev-jsonlib-security.sarif \
+            > codeql-results/report.txt
+
+      - name: Upload standard CodeQL SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        with:
+          sarif_file: codeql-results/cpp-security-and-quality.sarif
+          category: iccdev-standard-cpp-security-and-quality
+
+      - name: Upload iccDEV custom SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        with:
+          sarif_file: codeql-results/iccdev-security.sarif
+          category: iccdev-custom-security
+
+      - name: Upload IccJSON/IccConnect custom SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        with:
+          sarif_file: codeql-results/iccdev-jsonlib-security.sarif
+          category: iccdev-jsonlib-security

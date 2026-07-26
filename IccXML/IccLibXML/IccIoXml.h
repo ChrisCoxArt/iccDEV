@@ -85,6 +85,7 @@ namespace iccDEV {
 class IIccOpenFileIO
 {
 public:
+  virtual ~IIccOpenFileIO() {}
   virtual CIccIO* OpenFile(const icChar *szFilename, const char *szAttr) = 0;
 };
 
@@ -104,8 +105,16 @@ public:
   virtual CIccIO* OpenFile(const icChar *szFilename, const char *szAttr);
 };
 
-void ICCPROFLIB_API IccSetOpenFileIO(IIccOpenFileIO *pOpenIO);
-CIccIO* ICCPROFLIB_API IccOpenFileIO(const icChar *szFilename, const char *szAttr);
+ICCPROFLIB_API void IccSetOpenFileIO(IIccOpenFileIO *pOpenIO);
+ICCPROFLIB_API CIccIO* IccOpenFileIO(const icChar *szFilename, const char *szAttr);
+
+// Safe wrapper: gated on IccXmlGetAllowFileIncludes() (default false).
+// Rejects absolute paths (leading '/' or '\'), Windows drive-prefixed
+// paths (second char ':'), and paths with '..' traversal components.
+// All ParseXml callers that open a user-supplied filename should use
+// this instead of IccOpenFileIO directly.
+ICCPROFLIB_API bool    IccXmlIsPathSafe(const icChar *szFilename);
+ICCPROFLIB_API CIccIO* IccXmlSafeOpenFileIO(const icChar *szFilename, const char *szAttr);
 
 #ifdef USEICCDEVNAMESPACE
 } //namespace iccDEV

@@ -67,48 +67,13 @@
 #include <vector>
 #include <string>
 
-class CIccUTF16String
-{
-public:
-  CIccUTF16String();
-  CIccUTF16String(const icUInt16Number *uzStr);
-  CIccUTF16String(const char *szStr);
-  CIccUTF16String(const CIccUTF16String &str);
-  virtual ~CIccUTF16String();
-
-  void Clear();
-  size_t Size() { return m_len; }
-  bool Resize(size_t len);
-
-  CIccUTF16String& operator=(const CIccUTF16String &wstr);
-  CIccUTF16String& operator=(const char *szStr);
-  CIccUTF16String& operator=(const icUInt16Number *uzStr);
-
-  icUInt16Number operator[](size_t m_nIndex) { return m_str[m_nIndex]; }
-
-  const icUInt16Number *c_str() { return m_str; }
-
-  bool FromUtf8(const char *szStr, size_t sizeSrc=0);
-  const char *ToUtf8(std::string &buf);
-  const wchar_t *ToWString(std::wstring &buf);
-
-  static size_t WStrlen(const icUInt16Number *uzStr);
-
-protected:
-  static size_t AllocSize(size_t n) { return (((n+64)/64)*64); }
-  size_t m_alloc;
-  size_t m_len;
-  icUInt16Number *m_str;
-};
-
+// CIccUTF16String, icUtf16ToUtf8, icUtf8ToUtf16 are now declared in IccUtil.h
+// and available here via the #include "IccUtil.h" above.
 
 const char *icFixXml(char *szDest, const char *szStr);
 const char *icFixXml(std::string &buf, const char *szStr);
 const char *icAnsiToUtf8(std::string &buf, const char *szSrc);
 const char *icUtf8ToAnsi(std::string &buf, const char *szSrc);
-
-const char *icUtf16ToUtf8(std::string &buf, const icUInt16Number *szSrc, int sizeSrc=0);
-const unsigned short *icUtf8ToUtf16(CIccUTF16String &buf, const char *szSrc, int sizeSrc=0);
 
 bool icCLUTDataToXml(std::string &xml, CIccCLUT *pCLUT, icConvertType nType, std::string blanks,
                      bool bSaveGridPoints=false);
@@ -126,6 +91,13 @@ icUInt32Number icXmlGetHexData(void *pBuf, const char *szText, icUInt32Number nB
 icUInt32Number icXmlGetHexDataSize(const char *szText);
 
 size_t icXmlDumpHexData(std::string &xml, std::string blanks, void *pBuf, size_t nBufSize);
+
+bool icXmlValidateFileCount(size_t value, icUInt32Number &count, std::string &parseStr, const char *filename);
+
+// Maximum byte count for text file buffers: caps num+1 from wrapping size_t
+// and prevents downstream ParseTextArrayNum from consuming gigabytes.
+// Used at every new(std::nothrow) char[num+1] text-buffer site.
+static const size_t icXmlMaxTextFileBytes = 256ULL * 1024 * 1024;
 
 #define icXmlStrCmp(x, y) strcmp((const char *)(x), (const char*)(y))
 
@@ -166,8 +138,6 @@ protected:
   T *m_pBuf;
 };
 
-#define icSigFloatArrayType ((icTagTypeSignature)0x66637420)  /* 'flt ' */
-
 typedef CIccXmlArrayType<icUInt8Number, icSigUInt8ArrayType> CIccUInt8Array;
 typedef CIccXmlArrayType<icUInt16Number, icSigUInt16ArrayType> CIccUInt16Array;
 typedef CIccXmlArrayType<icUInt32Number, icSigUInt32ArrayType> CIccUInt32Array;
@@ -180,21 +150,36 @@ const icChar* icGetTagSigTypeName(icTagTypeSignature tagTypeSig);
 icTagTypeSignature icGetTypeNameTagSig(const icChar *szTagType);
 const icChar* icGetTagSigName(icTagSignature tagSig);
 icTagSignature icGetTagNameSig(const icChar *szTagName);
-icRenderingIntent icGetRenderingIntentValue (const icChar *szRenderingIntent);
-icStandardObserver icGetNamedStandardObserverValue(const icChar *str);
+// icGetRenderingIntentValue, icGetDateTimeValue, icGetNamedStandardObserverValue,
+// and icGetIlluminantValue are now in IccUtil.h
 icMeasurementGeometry icGeNamedtMeasurementGeometryValue(const icChar *str);
 icMeasurementFlare icGetNamedMeasurementFlareValue(const icChar *str);
-icIlluminant icGetIlluminantValue(const icChar *str);
 const icChar* icGetStandardObserverName(icStandardObserver str);
-icDateTimeNumber icGetDateTimeValue(const icChar *str);
 icUInt64Number icGetDeviceAttrValue(xmlNode *pNode);
 icColorantEncoding icGetColorantValue(const icChar* str);
-icMeasurementUnitSig icGetMeasurementValue(const icChar* str);
+// icGetMeasurementValue moved to IccProfLib/IccUtil.h
 const std::string icGetDeviceAttrName(icUInt64Number devAttr);
 const std::string icGetHeaderFlagsName(icUInt32Number flags, bool bUsesMCS=false);
 const std::string icGetPadSpace(double value);
 
-
+// Safe unsigned-integer parsers for XML attribute values.
+// Return false (leaving `out` unchanged) when:
+//   - the string is NULL or empty,
+//   - it has a leading '-' (explicitly rejected; strtoul would wrap),
+//   - it contains non-digit characters or trailing whitespace,
+//   - the value exceeds max_value, or
+//   - strtoul/strtoull sets errno == ERANGE.
+// These are stricter than atoi: they do not silently narrow, do not
+// accept trailing garbage, and do not wrap negative inputs.
+//
+//   icUInt16Number nRows = 0;
+//   if (!icXmlParseU16(icXmlAttrValue(node, "Rows"), nRows))
+//     return false;
+//
+bool icXmlParseU16(const char *s, icUInt16Number &out,
+                   icUInt16Number max_value = 0xFFFFu);
+bool icXmlParseU32(const char *s, icUInt32Number &out,
+                   icUInt32Number max_value = 0xFFFFFFFFu);
 
 
 #endif //_ICCUTILXML_H

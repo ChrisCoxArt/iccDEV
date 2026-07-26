@@ -1,0 +1,12 @@
+paths:
+  .github/workflows/ci-pr-risk-security-analysis.yml:
+    ignore:
+      - 'SC2129'
+      - 'SC2001'
+      - 'SC2016'
+      - 'SC2034'
+
+self-hosted-runner:
+  labels:
+    - macos-15-intel
+    - windows-2025-vs2026

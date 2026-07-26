@@ -1,40 +1,181 @@
 ###############################################################
 #
-## Copyright (©) 2025 International Color Consortium. 
-##                 All rights reserved. 
-##                 https://color.org
+# Copyright (c) 2025-2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
 #
-#
-## Intent: Apply file-pattern-based labels to PRs using actions/labeler
-#
-## Last Updated: 28-NOV-2025 2300Z by David Hoyt 
-##               Added user-controllable input (uci) checks to validate PR inputs
-## TODO: Push binary releases, tags etc.. 
-#
-## Comment: Known good and working from PatchIccMax
-#
-#
-#
-#
+# Intent: Trusted issue triage labeler.
 #
 ###############################################################
-          
+
 name: Labeler
 
+# Existing triage regexes and user-facing issue notes intentionally exceed the
+# default yamllint line length. Keep the disable local to this workflow.
+# yamllint disable rule:line-length
+
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "labeler-${{ github.event.issue.number || github.run_id }}"
+  cancel-in-progress: false
+
+env:
+  MAINTAINER_CONTACT: https://github.com/InternationalColorConsortium/iccDEV/blob/master/.github/CODEOWNERS
 
 jobs:
-  apply-labels:
+  triage-issue:
+    name: Triage issue
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      issues: write  # Required to apply issue triage labels and comments.
 
     steps:
-      - name: Apply PR labels
-        uses: actions/labeler@25abb3cad4f14b7ac27968a495c37798860a5a1a
+      - name: Check out label taxonomy
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
         with:
-          repo-token: "${{ secrets.GITHUB_TOKEN }}"
-          configuration-path: .github/labeler.yml
+          sparse-checkout: |
+            .github/labels.yml
+            .github/scripts/sync-labels.sh
+          persist-credentials: false
+
+      # preflight: allow-token-exposure reason=issue-label-maintenance
+      - name: Ensure repository labels exist
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          .github/scripts/sync-labels.sh
+
+      # preflight: allow-token-exposure reason=issue-triage-labels
+      - name: Triage and welcome issue
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          MAINTAINER_CONTACT: ${{ env.MAINTAINER_CONTACT }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          event_path="${GITHUB_EVENT_PATH:-}"
+          if [[ -z "$event_path" || ! -f "$event_path" ]]; then
+            echo "[SKIP] GitHub event payload is unavailable"
+            exit 0
+          fi
+
+          issue_number="$(jq -r '.issue.number // empty' "$event_path")"
+          action="$(jq -r '.action // empty' "$event_path")"
+          title="$(jq -r '.issue.title // ""' "$event_path")"
+          body="$(jq -r '.issue.body // ""' "$event_path")"
+          labels="$(jq -r '[.issue.labels[].name] | join(" ")' "$event_path")"
+
+          if [[ ! "$issue_number" =~ ^[0-9]+$ ]]; then
+            echo "[SKIP] Invalid issue number"
+            exit 0
+          fi
+
+          text="$(printf '%s\n%s\n%s\n' "$title" "$body" "$labels" | tr '[:upper:]' '[:lower:]')"
+          body_compact="$(printf '%s' "$body" | tr -d '[:space:]')"
+          add_labels=("needs-triage")
+          issue_notes=()
+
+          if grep -Eq 'asan|ubsan|sanitizer|security|cve|cwe|crash|segv|heap|stack|overflow|fuzzer|poc' <<< "$text"; then
+            add_labels+=("security")
+          fi
+          if grep -Eq 'bug|crash|regression|error|failure|incorrect|broken' <<< "$text"; then
+            add_labels+=("bug")
+          fi
+          if grep -Eq 'feature|enhancement|request|proposal|support' <<< "$text"; then
+            add_labels+=("feature")
+          fi
+          if grep -Eq 'question|how do|help|usage' <<< "$text"; then
+            add_labels+=("question")
+          fi
+          if grep -Eq 'doc|docs|readme|typo|documentation' <<< "$text"; then
+            add_labels+=("Documentation")
+          fi
+          if grep -Eq 'ci|workflow|github action|actionlint|shellcheck|codeql|sast|dast' <<< "$text"; then
+            add_labels+=("CI")
+          fi
+          if grep -Eq 'build|cmake|compiler|link|msvc|clang|gcc|install|package' <<< "$text"; then
+            add_labels+=("Build")
+          fi
+          if grep -Eq 'ctest|test|regression|coverage' <<< "$text"; then
+            add_labels+=("Testing")
+          fi
+          if grep -Eq 'wasm|emscripten|webassembly' <<< "$text"; then
+            add_labels+=("WASM")
+          fi
+          if grep -Eq 'vcpkg|portfile|triplet' <<< "$text"; then
+            add_labels+=("vcpkg")
+          fi
+          if grep -Eq 'json|cfg|roundtrip|round-trip' <<< "$text"; then
+            add_labels+=("JSON")
+          fi
+          if [[ -z "$body_compact" || ${#body_compact} -lt 40 ]]; then
+            add_labels+=("requires:more-information")
+            issue_notes+=("Please add a concise description of the issue, the exact command or workflow used, the expected result, and the actual result.")
+          fi
+          if grep -Eq 'copy issue body from|%2fissue_body\.md|issue_body\.md' <<< "$text"; then
+            add_labels+=("requires:more-information")
+            issue_notes+=("The issue appears to contain an issue_body.md placeholder. Please paste the generated issue body and the relevant failing log excerpt.")
+          fi
+          if grep -Eq 'error: building.*build_failed|build_failed|cmake error|ninja: build stopped|make: \*\*\*|linker command failed|undefined symbol|unresolved external' <<< "$text"; then
+            add_labels+=("Build" "needs-repro")
+            issue_notes+=("For build failures, please include the platform, compiler, CMake options, complete failing command, and the first actionable compiler or linker error.")
+          fi
+          if grep -Eq 'rc pass 1: command "rc |windows sdk|desktop development with c\+\+|fatal error c1001|internal compiler error|msvc|cl\.exe|lld-link' <<< "$text"; then
+            add_labels+=("Windows" "Build")
+            issue_notes+=("For Windows build failures, please confirm the Visual Studio Desktop development with C++ workload and a Windows 10 or Windows 11 SDK are installed, then include the MSVC or clang-cl version.")
+          fi
+          if grep -Eq 'pkg-config.*not found|vcpkg_find_acquire_program.*pkg-config|autoconf-archive.*missing|configure: error:.*missing' <<< "$text"; then
+            add_labels+=("question" "Build")
+            issue_notes+=("This looks like a missing host dependency. Please install the named package with your platform package manager and rerun the exact command.")
+          fi
+          if grep -Eq 'asan|ubsan|sanitizer|cve|crash|segv|heap|stack|overflow|fuzzer|poc' <<< "$text" &&
+             ! grep -Eq 'attached|attachment|profile|\.icc|\.icm|\.tif|\.tiff|\.png|\.jpg|\.jpeg|\.xml|poc|repro|stack trace|backtrace|asan' <<< "$text"; then
+            add_labels+=("needs-repro")
+            issue_notes+=("For crash or security reports, please attach the smallest reproducible input file or provide a sanitized stack trace and exact tool command. Maintainers will handle sensitive samples carefully.")
+          fi
+
+          label_csv="$(printf '%s\n' "${add_labels[@]}" | awk '!seen[$0]++' | paste -sd, -)"
+          gh issue edit "$issue_number" \
+            --repo "$GH_REPOSITORY" \
+            --add-label "$label_csv" >/dev/null
+
+          if [[ "$action" == "opened" ]]; then
+            body_file="$(mktemp)"
+            {
+              echo "Thanks for opening this issue."
+              echo ""
+              echo "The triage bot added initial labels based on the template and issue text. Maintainers may adjust labels as they review scope, reproduction details, CTest/regression needs, and security impact."
+              if [ "${#issue_notes[@]}" -gt 0 ]; then
+                echo ""
+                echo "Suggested next steps:"
+                for note in "${issue_notes[@]}"; do
+                  printf -- "- %s\n" "$note"
+                done
+              fi
+              echo ""
+              echo "If you have questions, contact a listed [Maintainer](${MAINTAINER_CONTACT})."
+            } > "$body_file"
+
+            gh issue comment "$issue_number" \
+              --repo "$GH_REPOSITORY" \
+              --body-file "$body_file" >/dev/null
+          fi

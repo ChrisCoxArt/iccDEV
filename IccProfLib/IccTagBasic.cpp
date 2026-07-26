@@ -5,7 +5,7 @@
 
     Version:    V1
 
-    Copyright:  © see ICC Software License
+    Copyright:  (c) see ICC Software License
 */
 
 /*
@@ -76,6 +76,10 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
+#include <limits>
+#include <new>
+#include <climits>
 #include "IccTag.h"
 #include "IccUtil.h"
 #include "IccProfile.h"
@@ -90,7 +94,6 @@
 
 
 #ifndef __min
-#include <algorithm>
 using std::min;
 #define __min min
 #endif
@@ -101,6 +104,125 @@ namespace iccDEV {
 
 // For Describe() nVerboseness levels < 25, maximum length of strings
 #define BRIEF_STRING_SIZE (1024)
+
+static const icUInt16Number icIso639Alpha2Codes[] = {
+  0x6161, 0x6162, 0x6165, 0x6166, 0x616B, 0x616D, 0x616E, 0x6172,
+  0x6173, 0x6176, 0x6179, 0x617A, 0x6261, 0x6265, 0x6267, 0x6268,
+  0x6269, 0x626D, 0x626E, 0x626F, 0x6272, 0x6273, 0x6361, 0x6365,
+  0x6368, 0x636F, 0x6372, 0x6373, 0x6375, 0x6376, 0x6379, 0x6461,
+  0x6465, 0x6476, 0x647A, 0x6565, 0x656C, 0x656E, 0x656F, 0x6573,
+  0x6574, 0x6575, 0x6661, 0x6666, 0x6669, 0x666A, 0x666F, 0x6672,
+  0x6679, 0x6761, 0x6764, 0x676C, 0x676E, 0x6775, 0x6776, 0x6861,
+  0x6865, 0x6869, 0x686F, 0x6872, 0x6874, 0x6875, 0x6879, 0x687A,
+  0x6961, 0x6964, 0x6965, 0x6967, 0x6969, 0x696B, 0x696F, 0x6973,
+  0x6974, 0x6975, 0x6A61, 0x6A76, 0x6B61, 0x6B67, 0x6B69, 0x6B6A,
+  0x6B6B, 0x6B6C, 0x6B6D, 0x6B6E, 0x6B6F, 0x6B72, 0x6B73, 0x6B75,
+  0x6B76, 0x6B77, 0x6B79, 0x6C61, 0x6C62, 0x6C67, 0x6C69, 0x6C6E,
+  0x6C6F, 0x6C74, 0x6C75, 0x6C76, 0x6D67, 0x6D68, 0x6D69, 0x6D6B,
+  0x6D6C, 0x6D6E, 0x6D72, 0x6D73, 0x6D74, 0x6D79, 0x6E61, 0x6E62,
+  0x6E64, 0x6E65, 0x6E67, 0x6E6C, 0x6E6E, 0x6E6F, 0x6E72, 0x6E76,
+  0x6E79, 0x6F63, 0x6F6A, 0x6F6D, 0x6F72, 0x6F73, 0x7061, 0x7069,
+  0x706C, 0x7073, 0x7074, 0x7175, 0x726D, 0x726E, 0x726F, 0x7275,
+  0x7277, 0x7361, 0x7363, 0x7364, 0x7365, 0x7367, 0x7369, 0x736B,
+  0x736C, 0x736D, 0x736E, 0x736F, 0x7371, 0x7372, 0x7373, 0x7374,
+  0x7375, 0x7376, 0x7377, 0x7461, 0x7465, 0x7467, 0x7468, 0x7469,
+  0x746B, 0x746C, 0x746E, 0x746F, 0x7472, 0x7473, 0x7474, 0x7477,
+  0x7479, 0x7567, 0x756B, 0x7572, 0x757A, 0x7665, 0x7669, 0x766F,
+  0x7761, 0x776F, 0x7868, 0x7969, 0x796F, 0x7A61, 0x7A68, 0x7A75,
+};
+
+static const icUInt16Number icIso3166Alpha2Codes[] = {
+  0x4144, 0x4145, 0x4146, 0x4147, 0x4149, 0x414C, 0x414D, 0x414F,
+  0x4151, 0x4152, 0x4153, 0x4154, 0x4155, 0x4157, 0x4158, 0x415A,
+  0x4241, 0x4242, 0x4244, 0x4245, 0x4246, 0x4247, 0x4248, 0x4249,
+  0x424A, 0x424C, 0x424D, 0x424E, 0x424F, 0x4251, 0x4252, 0x4253,
+  0x4254, 0x4256, 0x4257, 0x4259, 0x425A, 0x4341, 0x4343, 0x4344,
+  0x4346, 0x4347, 0x4348, 0x4349, 0x434B, 0x434C, 0x434D, 0x434E,
+  0x434F, 0x4352, 0x4355, 0x4356, 0x4357, 0x4358, 0x4359, 0x435A,
+  0x4445, 0x444A, 0x444B, 0x444D, 0x444F, 0x445A, 0x4543, 0x4545,
+  0x4547, 0x4548, 0x4552, 0x4553, 0x4554, 0x4649, 0x464A, 0x464B,
+  0x464D, 0x464F, 0x4652, 0x4741, 0x4742, 0x4744, 0x4745, 0x4746,
+  0x4747, 0x4748, 0x4749, 0x474C, 0x474D, 0x474E, 0x4750, 0x4751,
+  0x4752, 0x4753, 0x4754, 0x4755, 0x4757, 0x4759, 0x484B, 0x484D,
+  0x484E, 0x4852, 0x4854, 0x4855, 0x4944, 0x4945, 0x494C, 0x494D,
+  0x494E, 0x494F, 0x4951, 0x4952, 0x4953, 0x4954, 0x4A45, 0x4A4D,
+  0x4A4F, 0x4A50, 0x4B45, 0x4B47, 0x4B48, 0x4B49, 0x4B4D, 0x4B4E,
+  0x4B50, 0x4B52, 0x4B57, 0x4B59, 0x4B5A, 0x4C41, 0x4C42, 0x4C43,
+  0x4C49, 0x4C4B, 0x4C52, 0x4C53, 0x4C54, 0x4C55, 0x4C56, 0x4C59,
+  0x4D41, 0x4D43, 0x4D44, 0x4D45, 0x4D46, 0x4D47, 0x4D48, 0x4D4B,
+  0x4D4C, 0x4D4D, 0x4D4E, 0x4D4F, 0x4D50, 0x4D51, 0x4D52, 0x4D53,
+  0x4D54, 0x4D55, 0x4D56, 0x4D57, 0x4D58, 0x4D59, 0x4D5A, 0x4E41,
+  0x4E43, 0x4E45, 0x4E46, 0x4E47, 0x4E49, 0x4E4C, 0x4E4F, 0x4E50,
+  0x4E52, 0x4E55, 0x4E5A, 0x4F4D, 0x5041, 0x5045, 0x5046, 0x5047,
+  0x5048, 0x504B, 0x504C, 0x504D, 0x504E, 0x5052, 0x5053, 0x5054,
+  0x5057, 0x5059, 0x5141, 0x5245, 0x524F, 0x5253, 0x5255, 0x5257,
+  0x5341, 0x5342, 0x5343, 0x5344, 0x5345, 0x5347, 0x5348, 0x5349,
+  0x534A, 0x534B, 0x534C, 0x534D, 0x534E, 0x534F, 0x5352, 0x5353,
+  0x5354, 0x5356, 0x5358, 0x5359, 0x535A, 0x5443, 0x5444, 0x5446,
+  0x5447, 0x5448, 0x544A, 0x544B, 0x544C, 0x544D, 0x544E, 0x544F,
+  0x5452, 0x5454, 0x5456, 0x5457, 0x545A, 0x5541, 0x5547, 0x554D,
+  0x5553, 0x5559, 0x555A, 0x5641, 0x5643, 0x5645, 0x5647, 0x5649,
+  0x564E, 0x5655, 0x5746, 0x5753, 0x5945, 0x5954, 0x5A41, 0x5A4D,
+  0x5A57,
+};
+
+static bool icIsIsoLowerAlpha2(icUInt16Number code)
+{
+  icUInt8Number c0 = static_cast<icUInt8Number>(code >> 8);
+  icUInt8Number c1 = static_cast<icUInt8Number>(code & 0xff);
+
+  return c0 >= 'a' && c0 <= 'z' && c1 >= 'a' && c1 <= 'z';
+}
+
+static bool icIsIsoUpperAlpha2(icUInt16Number code)
+{
+  icUInt8Number c0 = static_cast<icUInt8Number>(code >> 8);
+  icUInt8Number c1 = static_cast<icUInt8Number>(code & 0xff);
+
+  return c0 >= 'A' && c0 <= 'Z' && c1 >= 'A' && c1 <= 'Z';
+}
+
+static bool icIsKnownIso639Alpha2(icLanguageCode code)
+{
+  return std::binary_search(icIso639Alpha2Codes,
+                            icIso639Alpha2Codes + sizeof(icIso639Alpha2Codes) / sizeof(icIso639Alpha2Codes[0]),
+                            static_cast<icUInt16Number>(code));
+}
+
+static bool icIsKnownIso3166Alpha2(icCountryCode code)
+{
+  return std::binary_search(icIso3166Alpha2Codes,
+                            icIso3166Alpha2Codes + sizeof(icIso3166Alpha2Codes) / sizeof(icIso3166Alpha2Codes[0]),
+                            static_cast<icUInt16Number>(code));
+}
+
+static void icFormatAlpha2Code(char *buf, size_t bufSize, icUInt16Number code)
+{
+  icUInt8Number c0 = static_cast<icUInt8Number>(code >> 8);
+  icUInt8Number c1 = static_cast<icUInt8Number>(code & 0xff);
+
+  if (c0 >= 0x20 && c0 <= 0x7e && c1 >= 0x20 && c1 <= 0x7e)
+    snprintf(buf, bufSize, "'%c%c' (0x%04X)", c0, c1, static_cast<unsigned int>(code));
+  else
+    snprintf(buf, bufSize, "0x%04X", static_cast<unsigned int>(code));
+}
+
+static void icAppendMlucIsoWarning(std::string &sReport,
+                                   const std::string &sSigPathName,
+                                   const char *message,
+                                   icUInt16Number code)
+{
+  char codeBuf[32];
+  icFormatAlpha2Code(codeBuf, sizeof(codeBuf), code);
+
+  sReport += icMsgValidateWarning;
+  sReport += sSigPathName;
+  sReport += " - ";
+  sReport += message;
+  sReport += " ";
+  sReport += codeBuf;
+  sReport += "\n";
+}
 
 /**
  ****************************************************************************
@@ -126,6 +248,78 @@ CIccTag::CIccTag()
 CIccTag::~CIccTag()
 {
 
+}
+
+/**
+ ****************************************************************************
+ * Name: OptionsFromVerbosity / VerbosityFromOptions
+ *
+ * Purpose: Translate between the legacy integer nVerboseness gates
+ *          (>25 / >50 / >75) and the structured DescribeOptions struct.
+ *          Round-trip through these helpers preserves the verbosity
+ *          tier - i.e. VerbosityFromOptions(OptionsFromVerbosity(v))
+ *          maps each input v back into the same gate bucket.
+ *****************************************************************************
+ */
+DescribeOptions OptionsFromVerbosity(int v)
+{
+  DescribeOptions o;
+  o.emit_header        = true;
+  o.emit_text_meta     = (v > 25);
+  o.emit_text_full     = (v > 50);
+  o.emit_curve_points  = (v > 75);
+  o.emit_clut_channels = (v > 75);
+  o.emit_clut_cells    = (v > 75);
+  o.emit_spd_samples   = (v > 75);
+  // Budgets default to 0 (unbounded) - matches verbosity-only callers.
+  return o;
+}
+
+int VerbosityFromOptions(const DescribeOptions &opts)
+{
+  // Pick the highest tier any enabled section requires. Tiers chosen to
+  // sit just past the legacy gate so `> N` checks remain truthy.
+  if (opts.emit_curve_points || opts.emit_clut_channels ||
+      opts.emit_clut_cells   || opts.emit_spd_samples)
+    return 100;
+  if (opts.emit_text_full)
+    return 76;
+  if (opts.emit_text_meta)
+    return 51;
+  return 26;
+}
+
+/**
+ ****************************************************************************
+ * Name: CIccTag::Describe (sink overload)
+ *
+ * Purpose: Default sink-based Describe(). Delegates to the legacy
+ *          Describe(std::string&, int) virtual via a StringDescribeSink,
+ *          then forwards the bytes to `sink` honouring
+ *          opts.max_total_bytes. Tag classes that produce large output
+ *          (CIccMBB, CIccCLUT, ...) override this virtual to stream
+ *          output directly and honour the structured option flags.
+ *****************************************************************************
+ */
+void CIccTag::Describe(IDescribeSink &sink, const DescribeOptions &opts)
+{
+  std::string buffer;
+  this->Describe(buffer, VerbosityFromOptions(opts));
+
+  std::size_t total = buffer.size();
+  std::size_t toWrite = total;
+  bool truncated = false;
+  if (opts.max_total_bytes && toWrite > opts.max_total_bytes) {
+    toWrite = opts.max_total_bytes;
+    truncated = true;
+  }
+  if (toWrite)
+    sink.Write(buffer.data(), toWrite);
+
+  if (truncated && sink.ShouldContinue()) {
+    static const char kTruncFooter[] = "\n[truncated]\n";
+    sink.Write(kTruncFooter, sizeof(kTruncFooter) - 1);
+  }
 }
 
 /**
@@ -229,8 +423,7 @@ CIccTagUnknown &CIccTagUnknown::operator=(const CIccTagUnknown &UnknownTag)
   m_nSize = UnknownTag.m_nSize;
   m_nType = UnknownTag.m_nType;
 
-  if (m_pData)
-    delete [] m_pData;
+  delete [] m_pData;
   m_pData = new icUInt8Number[m_nSize];
   memcpy(m_pData, UnknownTag.m_pData, sizeof(icUInt8Number)*m_nSize);
 
@@ -246,8 +439,7 @@ CIccTagUnknown &CIccTagUnknown::operator=(const CIccTagUnknown &UnknownTag)
  */
 CIccTagUnknown::~CIccTagUnknown()
 {
-  if (m_pData)
-    delete [] m_pData;
+  delete [] m_pData;
 }
 
 
@@ -267,10 +459,8 @@ CIccTagUnknown::~CIccTagUnknown()
  */
 bool CIccTagUnknown::Read(icUInt32Number size, CIccIO *pIO)
 {
-  if (m_pData) {
-    delete [] m_pData;
-    m_pData = NULL;
-  }
+  delete [] m_pData;
+  m_pData = NULL;
 
   if (size<sizeof(icTagTypeSignature) || !pIO) {
     return false;
@@ -288,7 +478,9 @@ bool CIccTagUnknown::Read(icUInt32Number size, CIccIO *pIO)
 
   if (m_nSize > 0) { // size could be stored as smaller than expected value, therefore the size check
 
-    m_pData = new icUInt8Number[m_nSize];
+    m_pData = new (std::nothrow) icUInt8Number[m_nSize];
+    if (!m_pData)
+      return false;
 
     if (pIO->Read8(m_pData, m_nSize) != m_nSize) {
       return false;
@@ -347,13 +539,13 @@ void CIccTagUnknown::Describe(std::string &sDescription, int nVerboseness)
   icChar buf[bufSize];
 
   sDescription = "Unknown Tag Type of ";
-  snprintf(buf, bufSize, "%u Bytes.", m_nSize-4);
+  snprintf(buf, bufSize, "%u Bytes.", (unsigned int) m_nSize);
   sDescription += buf;
 
   if (nVerboseness > 50) {
     sDescription += "\n\nData Follows:\n";
 
-    icMemDump(sDescription, m_pData+4, m_nSize-4);
+    icMemDump(sDescription, m_pData, m_nSize);
   }
 }
 
@@ -369,8 +561,12 @@ void CIccTagUnknown::Describe(std::string &sDescription, int nVerboseness)
 CIccTagText::CIccTagText()
 {
   m_szText = (icChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+  }
+  else
+   m_nBufSize = 0;
 }
 
 /**
@@ -386,9 +582,13 @@ CIccTagText::CIccTagText()
 CIccTagText::CIccTagText(const CIccTagText &ITT)
 {
   m_szText = (icChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
-  SetText(ITT.m_szText);
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+    SetText(ITT.m_szText);
+  }
+  else
+   m_nBufSize = 0;
 }
 
 /**
@@ -407,9 +607,13 @@ CIccTagText &CIccTagText::operator=(const CIccTagText &TextTag)
     return *this;
 
   m_szText = (icChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
-  SetText(TextTag.m_szText);
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+    SetText(TextTag.m_szText);
+  }
+  else
+   m_nBufSize = 0;
 
   return *this;
 }
@@ -590,10 +794,10 @@ void CIccTagText::SetText(const icChar *szText)
  * Return: A pointer to the string assigned to the tag.
  *****************************************************************************
  */
-const icChar *CIccTagText::operator=(const icChar *szText)
+CIccTagText &CIccTagText::operator=(const icChar *szText)
 {
   SetText(szText);
-  return m_szText;
+  return *this;
 }
 
 /**
@@ -613,7 +817,6 @@ icChar *CIccTagText::GetBuffer(icUInt32Number nSize)
 {
   if (m_nBufSize < nSize) {
     m_szText = (icChar*)icRealloc(m_szText, nSize+1);
-
     if (m_szText) {
       m_szText[nSize] = '\0';
       m_nBufSize = nSize;
@@ -639,7 +842,10 @@ void CIccTagText::Release()
 
   if (nSize < m_nBufSize-1) {
     m_szText=(icChar*)icRealloc(m_szText, nSize+1);
-    m_nBufSize = nSize+1;
+    if (m_szText)
+      m_nBufSize = nSize+1;
+    else
+      m_nBufSize = 0;
   }
 }
 
@@ -667,6 +873,7 @@ icValidateStatus CIccTagText::Validate(std::string sigPath, std::string &sReport
   icSignature sig = icGetFirstSigPathSig(sigPath);
 
   if (m_nBufSize) {
+    const icUInt32Number kMaxTextValidateBytes = 16777215;
     switch(sig) {
     case icSigCopyrightTag:
       break;
@@ -684,8 +891,16 @@ icValidateStatus CIccTagText::Validate(std::string sigPath, std::string &sReport
       sReport += " - Unknown Tag.\n";
       rv = icMaxStatus(rv, icValidateWarning);
     }
-    int i;
-    for (i=0; m_szText[i] && i<(int)m_nBufSize; i++) {
+    if (m_nBufSize > kMaxTextValidateBytes) {
+      sReport += icMsgValidateWarning;
+      sReport += sSigPathName;
+      sReport += " - Text exceeds validation scan limit.\n";
+      rv = icMaxStatus(rv, icValidateWarning);
+      return rv;
+    }
+
+    icUInt32Number i;
+    for (i=0; i<m_nBufSize && m_szText[i]; i++) {
       if (m_szText[i]&0x80) {
         sReport += icMsgValidateWarning;
         sReport += sSigPathName;
@@ -718,8 +933,12 @@ icValidateStatus CIccTagText::Validate(std::string sigPath, std::string &sReport
 CIccTagUtf8Text::CIccTagUtf8Text()
 {
   m_szText = (icUChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+  }
+  else
+    m_nBufSize = 0;
 }
 
 /**
@@ -735,9 +954,13 @@ CIccTagUtf8Text::CIccTagUtf8Text()
 CIccTagUtf8Text::CIccTagUtf8Text(const CIccTagUtf8Text &ITT)
 {
   m_szText = (icUChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
-  SetText(ITT.m_szText);
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+    SetText(ITT.m_szText);
+  }
+  else
+    m_nBufSize = 0;
 }
 
 /**
@@ -756,9 +979,15 @@ CIccTagUtf8Text &CIccTagUtf8Text::operator=(const CIccTagUtf8Text &TextTag)
     return *this;
 
   m_szText = (icUChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
-  SetText(TextTag.m_szText);
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+    SetText(TextTag.m_szText);
+  }
+  else {
+    SetText("");
+    m_nBufSize = 0;
+  }
 
   return *this;
 }
@@ -794,7 +1023,7 @@ bool CIccTagUtf8Text::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
 
-  if (size<sizeof(icTagTypeSignature) || !pIO) {
+  if (size < (sizeof(icTagTypeSignature)+ sizeof(icUInt32Number)) || !pIO) {
     m_szText[0] = '\0';
     return false;
   }
@@ -803,9 +1032,6 @@ bool CIccTagUtf8Text::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   if (!pIO->Read32(&m_nReserved))
-    return false;
-
-  if (size < sizeof(icTagTypeSignature) + sizeof(icUInt32Number))
     return false;
 
   size_t nSize = size - sizeof(icTagTypeSignature) - sizeof(icUInt32Number);
@@ -879,7 +1105,7 @@ void CIccTagUtf8Text::Describe(std::string &sDescription, int nVerboseness)
   if (m_szText && *m_szText) {
     const size_t bufSize = 40;
     char buf[bufSize];
-    snprintf(buf, bufSize, "%d bytes\n", m_nBufSize);
+    snprintf(buf, bufSize, "%u bytes\n", (unsigned int) m_nBufSize);
     sDescription += buf;
   }
   else
@@ -954,6 +1180,14 @@ void CIccTagUtf8Text::SetText(const icUChar16 *szText)
 
   icConvertUTF16toUTF8(szText, &szText[len], text, lenientConversion);
 
+  // #1743: icConvertUTF16toUTF8() only appends the converted bytes - it does not
+  // NUL-terminate - but the icUChar overload of SetText() below reads its argument
+  // with strlen(). Passing &text[0] as-is runs strlen() off the end of the vector
+  // (ASAN: heap-buffer-overflow READ), and for empty input (len==0) the vector is
+  // also empty, so &text[0] is itself undefined. Push an explicit terminator to make
+  // the buffer both non-empty and a valid C string before handing it over.
+  text.push_back(0);
+
   SetText((const icUChar*)&text[0]);
 }
 
@@ -969,10 +1203,10 @@ void CIccTagUtf8Text::SetText(const icUChar16 *szText)
  * Return: A pointer to the string assigned to the tag.
  *****************************************************************************
  */
-const icUChar *CIccTagUtf8Text::operator=(const icUChar *szText)
+CIccTagUtf8Text& CIccTagUtf8Text::operator=(const icUChar *szText)
 {
   SetText(szText);
-  return (icUChar*)m_szText;
+  return *this;
 }
 
 /**
@@ -992,7 +1226,6 @@ icUChar *CIccTagUtf8Text::GetBuffer(icUInt32Number nSize)
 {
   if (m_nBufSize < nSize) {
     m_szText = (icUChar*)icRealloc(m_szText, nSize+1);
-
     if (m_szText) {
       m_szText[nSize] = '\0';
       m_nBufSize = nSize;
@@ -1019,7 +1252,10 @@ void CIccTagUtf8Text::Release()
 
   if (nSize < m_nBufSize-1) {
     m_szText=(icUChar*)icRealloc(m_szText, nSize+1);
-    m_nBufSize = nSize+1;
+    if (m_szText)
+      m_nBufSize = nSize+1;
+    else
+      m_nBufSize = 0;
   }
 }
 
@@ -1127,8 +1363,7 @@ CIccTagZipUtf8Text &CIccTagZipUtf8Text::operator=(const CIccTagZipUtf8Text &ITT)
  */
 CIccTagZipUtf8Text::~CIccTagZipUtf8Text()
 {
-  if (m_pZipBuf)
-    free(m_pZipBuf);
+  free(m_pZipBuf);
 }
 
 /**
@@ -1149,7 +1384,7 @@ bool CIccTagZipUtf8Text::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
 
-  if (size<sizeof(icTagTypeSignature) || !pIO) {
+  if (size < (sizeof(icTagTypeSignature) + sizeof(icUInt32Number)) || !pIO) {
     AllocBuffer(0);
     return false;
   }
@@ -1235,10 +1470,14 @@ void CIccTagZipUtf8Text::Describe(std::string &sDescription, int /* nVerboseness
 #else
   const size_t sizeSize = 30;
   char size[sizeSize];
-  snprintf(size, sizeSize, "%d", m_nBufSize);
-  sDescription += "BEGIN_COMPESSED_DATA[\"";
+  snprintf(size, sizeSize, "%u", (unsigned int) m_nBufSize);
+  // Marker spelled "COMPRESSED" (was the typo "COMPESSED") to match the
+  // END_COMPRESSED_DATA line below, and the ["..."] delimiter is balanced so the
+  // byte count is quoted symmetrically. This no-zlib branch dumps the raw
+  // compressed bytes as hex because the CMM cannot inflate them here.
+  sDescription += "BEGIN_COMPRESSED_DATA[\"";
   sDescription += size;
-  sDescription += "]\n";
+  sDescription += "\"]\n";
   if (m_nBufSize) {
     icMemDump(str, m_pZipBuf, m_nBufSize);
     sDescription += str;
@@ -1267,7 +1506,7 @@ bool CIccTagZipUtf8Text::GetText(std::string &str) const
   int zstat;
   z_stream zstr;
   memset(&zstr, 0, sizeof(zstr));
-  unsigned char buf[32767] = { 0 };
+  icUtf8Vector buf(32767, 0);
 
   zstat = inflateInit(&zstr);
 
@@ -1278,6 +1517,11 @@ bool CIccTagZipUtf8Text::GetText(std::string &str) const
   zstat = inflateReset(&zstr);
 
   if (zstat != Z_OK) {
+    // Mirror of the deflateReset() path in SetText(): inflateInit() has already
+    // allocated the stream's internal state, so returning without inflateEnd()
+    // leaks it. The decode loop below does call inflateEnd() before its own error
+    // returns; only this early exit was missing it.
+    inflateEnd(&zstr);
     return false;
   }
 
@@ -1292,10 +1536,10 @@ bool CIccTagZipUtf8Text::GetText(std::string &str) const
   }
 
   do {
-    unsigned int i, n;
+    unsigned int n;
 
-    zstr.next_out = buf;
-    zstr.avail_out = sizeof(buf);
+    zstr.next_out = buf.data();
+    zstr.avail_out = (uInt)buf.size();
 
     zstat = inflate(&zstr, Z_SYNC_FLUSH);
 
@@ -1304,11 +1548,15 @@ bool CIccTagZipUtf8Text::GetText(std::string &str) const
       return false;
     }
 
-    n = sizeof(buf) - zstr.avail_out;
+    n = (unsigned int)buf.size() - zstr.avail_out;
 
-    for (i = 0; i < n; i++) {
-      str += buf[i];
-    }
+    // Append the inflated bytes wholesale. The previous per-byte `str += buf[i]`
+    // implicitly converted each icUtf8Vector element (unsigned char) to
+    // std::string's signed char, which UBSan's implicit-integer-sign-change check
+    // flags for any byte >= 128 (e.g. 0xC0 -> -64) even though the byte value is
+    // preserved (#1789). Appending through a char* keeps
+    // the exact bytes with no per-element conversion, and is faster.
+    str.append(reinterpret_cast<const char *>(buf.data()), n);
   } while (zstat != Z_STREAM_END);
 
   inflateEnd(&zstr);
@@ -1343,7 +1591,7 @@ bool CIccTagZipUtf8Text::SetText(const icUChar *szText)
 
   int zstat;
   z_stream zstr;
-  unsigned char buf[32767];
+  icUtf8Vector buf(32767);
   memset(&zstr, 0, sizeof(zstr));
 
   zstat = deflateInit(&zstr, Z_DEFAULT_COMPRESSION);
@@ -1357,14 +1605,19 @@ bool CIccTagZipUtf8Text::SetText(const icUChar *szText)
   zstr.avail_in = nSize;
 
   if (zstat != Z_OK) {
+    // deflateInit() succeeded above, so it has already allocated the stream's
+    // internal state; bailing out here without deflateEnd() leaks it. Every other
+    // post-init failure path in this function calls deflateEnd() first - this one
+    // did not.
+    deflateEnd(&zstr);
     return false;
   }
 
 
   do {
     int n;
-    zstr.next_out = buf;
-    zstr.avail_out = sizeof(buf);
+    zstr.next_out = buf.data();
+    zstr.avail_out = (uInt)buf.size();
 
     zstat = deflate(&zstr, Z_FINISH);
 
@@ -1373,7 +1626,7 @@ bool CIccTagZipUtf8Text::SetText(const icUChar *szText)
       return false;
     }
 
-    n = sizeof(buf) - zstr.avail_out;
+    n = (int)buf.size() - (int)zstr.avail_out;
 
     for (i = 0; i < n; i++) {
       compress.push_back(buf[i]);
@@ -1382,12 +1635,25 @@ bool CIccTagZipUtf8Text::SetText(const icUChar *szText)
 
   deflateEnd(&zstr);
 
-  icUChar *pBuf = AllocBuffer((icUInt32Number)compress.size());
+  if (compress.size() > (size_t)(std::numeric_limits<icUInt32Number>::max)()) {
+    return false;
+  }
 
-  if (pBuf) {
-    for (i = 0; i < (int)m_nBufSize; i++) {
-      pBuf[i] = compress[i];
-}
+  icUInt32Number nCompressedSize = (icUInt32Number)compress.size();
+  icUChar *pBuf = AllocBuffer(nCompressedSize);
+
+  // #1743: AllocBuffer() returns NULL when its allocation fails, leaving the tag
+  // empty (m_pZipBuf NULL, m_nBufSize 0). The copy below is guarded on pBuf, but the
+  // function used to return true regardless - reporting success while storing
+  // nothing, the same silent data loss as #1521. Every other failure path in this
+  // function returns false, so propagate the allocation result too. (The >4 GB
+  // reject above and the bulk memcpy that replaced the old (int)m_nBufSize-bounded
+  // copy loop both came from #1745; this adds only the missing failure return.)
+  if (!pBuf)
+    return false;
+
+  if (nCompressedSize) {
+    memcpy(pBuf, &compress[0], nCompressedSize);
   }
 
   return true;
@@ -1416,6 +1682,12 @@ bool CIccTagZipUtf8Text::SetText(const icUChar16 *szText)
 
   icConvertUTF16toUTF8(szText, &szText[len], text, lenientConversion);
 
+  // #1743: see the matching note in CIccTagUtf8Text::SetText above. The converter
+  // leaves the bytes un-terminated and the icUChar overload strlen()s them, so an
+  // explicit terminator is required to avoid a heap over-read (and to keep &text[0]
+  // defined when len==0 leaves the vector empty).
+  text.push_back(0);
+
   return SetText((const icUChar*)&text[0]);
 }
 
@@ -1438,12 +1710,9 @@ icUChar *CIccTagZipUtf8Text::AllocBuffer(icUInt32Number nSize)
 {
   if (m_nBufSize != nSize) {
     if (!nSize) {
-      if (m_pZipBuf) {
-        free(m_pZipBuf);
-        m_pZipBuf = NULL;
-      }
-
-      m_nBufSize = nSize;
+      free(m_pZipBuf);
+      m_pZipBuf = NULL;
+      m_nBufSize = 0;
       return NULL;
     }
 
@@ -1452,8 +1721,10 @@ icUChar *CIccTagZipUtf8Text::AllocBuffer(icUInt32Number nSize)
     else
       m_pZipBuf = (icUChar*)icRealloc(m_pZipBuf, nSize);
 
-    m_nBufSize = nSize;
-
+    if (m_pZipBuf)
+      m_nBufSize = nSize;
+    else
+      m_nBufSize = 0;
   }
 
   return m_pZipBuf;
@@ -1528,8 +1799,12 @@ icValidateStatus CIccTagZipUtf8Text::Validate(std::string sigPath, std::string &
 CIccTagUtf16Text::CIccTagUtf16Text()
 {
   m_szText = (icUChar16*)malloc(1*sizeof(icUChar16));
-  m_szText[0] = 0;
-  m_nBufSize = 1;
+  if (m_szText) {
+    m_szText[0] = 0;
+    m_nBufSize = 1;
+  }
+  else
+    m_nBufSize = 0;
 }
 
 /**
@@ -1545,9 +1820,13 @@ CIccTagUtf16Text::CIccTagUtf16Text()
 CIccTagUtf16Text::CIccTagUtf16Text(const CIccTagUtf16Text &ITT)
 {
   m_szText = (icUChar16*)malloc(1*sizeof(icUChar16));
-  m_szText[0] = 0;
-  m_nBufSize = 1;
-  SetText(ITT.m_szText);
+  if (m_szText) {
+    m_szText[0] = 0;
+    m_nBufSize = 1;
+    SetText(ITT.m_szText);
+  }
+  else
+    m_nBufSize = 0;
 }
 
 /**
@@ -1566,9 +1845,13 @@ CIccTagUtf16Text &CIccTagUtf16Text::operator=(const CIccTagUtf16Text &TextTag)
     return *this;
 
   m_szText = (icUChar16*)malloc(1*sizeof(icUChar16));
-  m_szText[0] = '\0';
-  m_nBufSize = 1;
-  SetText(TextTag.m_szText);
+  if (m_szText) {
+    m_szText[0] = '\0';
+    m_nBufSize = 1;
+    SetText(TextTag.m_szText);
+  }
+  else
+    m_nBufSize = 0;
 
   return *this;
 }
@@ -1597,10 +1880,15 @@ CIccTagUtf16Text::~CIccTagUtf16Text()
 icUInt32Number CIccTagUtf16Text::GetLength() const
 {
   icUInt32Number n;
+  const icUInt32Number kMaxUtf16LengthUnits = 16777215;
   if (!m_szText || !m_nBufSize)
     return 0;
 
-  for (n=0; n<m_nBufSize && m_szText[n]; n++);
+  icUInt32Number nLimit = m_nBufSize;
+  if (m_nBufSize > kMaxUtf16LengthUnits)
+    nLimit = kMaxUtf16LengthUnits;
+
+  for (n=0; n<nLimit && m_szText[n]; n++);
 
   return n;
 }
@@ -1714,7 +2002,7 @@ void CIccTagUtf16Text::Describe(std::string &sDescription, int nVerboseness)
     if (m_szText && *m_szText) {
         const size_t bufSize = 40;
         char buf[bufSize];
-        snprintf(buf, bufSize, "%d bytes\n", m_nBufSize);
+        snprintf(buf, bufSize, "%u bytes\n", (unsigned int) m_nBufSize);
         sDescription += buf;
     }
     else
@@ -1765,8 +2053,9 @@ const icChar *CIccTagUtf16Text::GetText(std::string &buf) const
   if (str.size()>2 && (str[0]==0xff && str[1]==0xfe)) {
     c++; c++;
   }
-  for (; c!=str.end(); c++)
-    buf.push_back(*c);
+  if (c != str.end()) {
+    buf.append(reinterpret_cast<const char*>(&*c), static_cast<std::string::size_type>(str.end() - c));
+  }
 
   return buf.c_str();
 }
@@ -1794,7 +2083,7 @@ void CIccTagUtf16Text::SetText(const icUChar16 *szText)
   for (n=0; szText[n]; n++);
 
   icUInt32Number len=n + 1;
-  icUChar16 *szBuf = GetBuffer(len);
+  icUChar16 *szBuf = GetBuffer(len);  // this internally allocates m_szText
 
   memcpy(szBuf, szText, len*sizeof(icUChar16));
   Release();
@@ -1819,7 +2108,14 @@ void CIccTagUtf16Text::SetText(const icUChar *szText)
   }
 
   icUtf16Vector str;
-  icConvertUTF8toUTF16(szText, szText+strlen((icChar*)szText)+1, str, lenientConversion);
+  size_t inputLen = strlen((icChar*)szText);
+  icConvertUTF8toUTF16(szText, szText+inputLen+1, str, lenientConversion);
+
+  if (str.empty()) {
+    icUChar16 c=0;
+    SetText(&c);
+    return;
+  }
 
   int pos = 0;
   if (str[0]==0xfeff) {
@@ -1827,10 +2123,10 @@ void CIccTagUtf16Text::SetText(const icUChar *szText)
   }
 
   icUInt32Number nSize = (icUInt32Number)(str.size()-pos);
-  //icUChar16 *szBuf = GetBuffer(nSize);      // ERROR - value unused! is the memcpy correct?
+  icUChar16 *szBuf = GetBuffer(nSize);  // this internally allocates m_szText
 
   if (nSize)
-    memcpy(m_szText, &str[pos], nSize*sizeof(icUChar));
+    memcpy(szBuf, &str[pos], nSize*sizeof(icUChar16));
   Release();
 }
 
@@ -1846,10 +2142,10 @@ void CIccTagUtf16Text::SetText(const icUChar *szText)
  * Return: A pointer to the string assigned to the tag.
  *****************************************************************************
  */
-const icUChar16 *CIccTagUtf16Text::operator=(const icUChar16 *szText)
+CIccTagUtf16Text& CIccTagUtf16Text::operator=(const icUChar16 *szText)
 {
   SetText(szText);
-  return (icUChar16*)m_szText;
+  return *this;
 }
 
 /**
@@ -1869,10 +2165,13 @@ icUChar16 *CIccTagUtf16Text::GetBuffer(icUInt32Number nSize)
 {
   if (m_nBufSize < nSize) {
     m_szText = (icUChar16*)icRealloc(m_szText, (nSize+1)*sizeof(icUChar16));
-
-    m_szText[nSize] = 0;
-
-    m_nBufSize = nSize;
+    if (m_szText) {
+      m_szText[nSize] = 0;
+      m_nBufSize = nSize;
+    }
+    else {
+      m_nBufSize = 0;
+    }
   }
 
   return m_szText;
@@ -1892,7 +2191,10 @@ void CIccTagUtf16Text::Release()
 
   if (nSize < m_nBufSize-1) {
     m_szText=(icUChar16*)icRealloc(m_szText, (nSize+1)*sizeof(icUChar16));
-    m_nBufSize = nSize+1;
+    if (m_szText)
+      m_nBufSize = nSize+1;
+    else
+      m_nBufSize = 0;
   }
 }
 
@@ -1941,12 +2243,20 @@ icValidateStatus CIccTagUtf16Text::Validate(std::string sigPath, std::string &sR
 CIccTagTextDescription::CIccTagTextDescription()
 {
   m_szText = (icChar*)malloc(1);
-  m_szText[0] = '\0';
-  m_nASCIISize = 1;
+  if (m_szText) {
+    m_szText[0] = 0;
+    m_nASCIISize = 1;
+  }
+  else
+    m_nASCIISize = 0;
 
   m_uzUnicodeText = (icUInt16Number*)malloc(sizeof(icUInt16Number));
-  m_uzUnicodeText[0] = 0;
-  m_nUnicodeSize = 1;
+  if (m_uzUnicodeText) {
+    m_uzUnicodeText[0] = 0;
+    m_nUnicodeSize = 1;
+  } else
+    m_nUnicodeSize = 0;
+
   m_nUnicodeLanguageCode = 0;
 
   m_nScriptSize = 0;
@@ -1976,22 +2286,34 @@ CIccTagTextDescription::CIccTagTextDescription(const CIccTagTextDescription &ITT
 
   if (m_nASCIISize) {
     m_szText = (icChar*)malloc(m_nASCIISize * sizeof(icChar));
-    memcpy(m_szText, ITTD.m_szText, m_nASCIISize*sizeof(icChar));
+    if (m_szText)
+      memcpy(m_szText, ITTD.m_szText, m_nASCIISize*sizeof(icChar));
+    else
+      m_nASCIISize = 0;
   }
   else {
     m_nASCIISize = 1;
     m_szText = (icChar*)calloc(m_nASCIISize, sizeof(icChar));
-    m_szText[0] = '\0';
+    if (m_szText)
+      m_szText[0] = '\0';
+    else
+      m_nASCIISize = 0;
   }
 
   if (m_nUnicodeSize) {
     m_uzUnicodeText = (icUInt16Number*)malloc((m_nUnicodeSize) * sizeof(icUInt16Number));
-    memcpy(m_uzUnicodeText, ITTD.m_uzUnicodeText, m_nUnicodeSize*sizeof(icUInt16Number));
+    if (m_uzUnicodeText)
+      memcpy(m_uzUnicodeText, ITTD.m_uzUnicodeText, m_nUnicodeSize*sizeof(icUInt16Number));
+    else
+      m_nUnicodeSize = 0;
   }
   else {
     m_nUnicodeSize = 1;
     m_uzUnicodeText = (icUInt16Number*)calloc(m_nUnicodeSize, sizeof(icUInt16Number));
-    m_uzUnicodeText[0] = 0;
+    if (m_uzUnicodeText)
+      m_uzUnicodeText[0] = 0;
+    else
+      m_nUnicodeSize = 0;
   }
 
   memcpy(m_szScriptText, ITTD.m_szScriptText, sizeof(m_szScriptText));
@@ -2021,28 +2343,38 @@ CIccTagTextDescription &CIccTagTextDescription::operator=(const CIccTagTextDescr
   m_nScriptSize = TextDescTag.m_nScriptSize;
   m_nScriptCode = TextDescTag.m_nScriptCode;
 
-  if (m_szText)
-    free(m_szText);
+  free(m_szText);
   if (m_nASCIISize) {
     m_szText = (icChar*)calloc(m_nASCIISize, sizeof(icChar));
-    memcpy(m_szText, TextDescTag.m_szText, m_nASCIISize*sizeof(icChar));
-  } 
+    if (m_szText)
+      memcpy(m_szText, TextDescTag.m_szText, m_nASCIISize*sizeof(icChar));
+    else
+      m_nASCIISize = 0;
+  }
   else {
     m_nASCIISize = 1;
     m_szText = (icChar*)calloc(m_nASCIISize, sizeof(icChar));
-    m_szText[0] = '\0';
+    if (m_szText)
+      m_szText[0] = '\0';
+    else
+      m_nASCIISize = 0;
   }
 
-  if (m_uzUnicodeText)
-    free(m_uzUnicodeText);
+  free(m_uzUnicodeText);
   if (m_nUnicodeSize) {
     m_uzUnicodeText = (icUInt16Number*)calloc(m_nUnicodeSize, sizeof(icUInt16Number));
-    memcpy(m_uzUnicodeText, TextDescTag.m_uzUnicodeText, m_nUnicodeSize*sizeof(icUInt16Number));
+    if (m_uzUnicodeText)
+      memcpy(m_uzUnicodeText, TextDescTag.m_uzUnicodeText, m_nUnicodeSize*sizeof(icUInt16Number));
+    else
+      m_nUnicodeSize = 0;
   }
   else {
     m_nUnicodeSize = 1;
     m_uzUnicodeText = (icUInt16Number*)calloc(m_nUnicodeSize, sizeof(icUInt16Number));
-    m_uzUnicodeText[0] = 0;
+    if (m_uzUnicodeText)
+      m_uzUnicodeText[0] = 0;
+    else
+      m_nUnicodeSize = 0;
   }
 
   memcpy(m_szScriptText, TextDescTag.m_szScriptText, sizeof(m_szScriptText));
@@ -2082,13 +2414,13 @@ CIccTagTextDescription::~CIccTagTextDescription()
  */
 bool CIccTagTextDescription::Read(icUInt32Number size, CIccIO *pIO)
 {
+  if (!pIO || size < 3 * sizeof(icUInt32Number))
+    return false;
+
   icTagTypeSignature sig;
 
   m_szText[0] = '\0';
   int64_t nEnd = pIO->Tell() + size;
-
-  if (size<3*sizeof(icUInt32Number) || !pIO)
-    return false;
 
   icUInt32Number nSize;
 
@@ -2288,8 +2620,8 @@ void CIccTagTextDescription::SetText(const icChar *szText)
 
   icUInt32Number len=(icUInt32Number)strlen(szText) + 1;
   icChar *szBuf = GetBuffer(len);
-
-  strcpy(szBuf, szText);
+  if (szBuf)
+    strcpy(szBuf, szText);
   Release();
 }
 
@@ -2305,10 +2637,10 @@ void CIccTagTextDescription::SetText(const icChar *szText)
  * Return: A pointer to the string assigned to the tag.
  *****************************************************************************
  */
-const icChar *CIccTagTextDescription::operator=(const icChar *szText)
+CIccTagTextDescription& CIccTagTextDescription::operator=(const icChar *szText)
 {
   SetText(szText);
-  return m_szText;
+  return *this;
 }
 
 /**
@@ -2326,12 +2658,14 @@ const icChar *CIccTagTextDescription::operator=(const icChar *szText)
  */
 icChar *CIccTagTextDescription::GetBuffer(icUInt32Number nSize)
 {
-  if (m_nASCIISize < nSize) {
-    m_szText = (icChar*)icRealloc(m_szText, nSize+1);
-
-    m_szText[nSize] = '\0';
-
-    m_nASCIISize = nSize;
+  if (m_nASCIISize < (nSize+1)) {
+    m_szText = (icChar*)icRealloc(m_szText, (nSize+1));
+    if (m_szText) {
+      m_szText[nSize] = '\0';
+      m_nASCIISize = (nSize+1); // include NULL termination!
+    }
+    else
+      m_nASCIISize = 0;
   }
 
   return m_szText;
@@ -2347,12 +2681,18 @@ icChar *CIccTagTextDescription::GetBuffer(icUInt32Number nSize)
  */
 void CIccTagTextDescription::Release()
 {
-  icUInt32Number nSize = (icUInt32Number)strlen(m_szText);
-
-  if (nSize < m_nASCIISize-1) {
-    m_szText=(icChar*)icRealloc(m_szText, nSize+1);
-    m_nASCIISize = nSize+1;
+  if (m_szText) {
+    icUInt32Number nSize = (icUInt32Number)strlen(m_szText);
+    if (nSize < m_nASCIISize-1) {
+      m_szText=(icChar*)icRealloc(m_szText, nSize+1);
+      if (m_szText)
+        m_nASCIISize = nSize+1;
+      else
+        m_nASCIISize = 0;
+    }
   }
+  else
+    m_nASCIISize = 0;
 }
 
 /**
@@ -2372,11 +2712,13 @@ icUInt16Number *CIccTagTextDescription::GetUnicodeBuffer(icUInt32Number nSize)
 {
   if (m_nUnicodeSize < (nSize+2)) { // test for existing size must include the NULL termination!
     m_uzUnicodeText = (icUInt16Number*)icRealloc(m_uzUnicodeText, (nSize+2)*sizeof(icUInt16Number));
-
-    m_uzUnicodeText[nSize] = 0;
-    m_uzUnicodeText[nSize+1] = 0;
-
-    m_nUnicodeSize = nSize+2;
+    if (m_uzUnicodeText) {
+      m_uzUnicodeText[nSize] = 0;
+      m_uzUnicodeText[nSize+1] = 0;
+      m_nUnicodeSize = nSize+2;
+    }
+    else
+      m_nUnicodeSize = 0;
   }
 
   return m_uzUnicodeText;
@@ -2392,9 +2734,14 @@ icUInt16Number *CIccTagTextDescription::GetUnicodeBuffer(icUInt32Number nSize)
  */
 void CIccTagTextDescription::ReleaseUnicode()
 {
-  int i;
+  icUInt32Number i;
+  const icUInt32Number kMaxUnicodeReleaseUnits = 16777215;
+  icUInt32Number nLimit = m_nUnicodeSize;
+  if (m_nUnicodeSize > kMaxUnicodeReleaseUnits)
+    nLimit = kMaxUnicodeReleaseUnits;
+
   // even if the string is not NULL terminated, don't read over the end!
-  for (i=0; i < (int)m_nUnicodeSize && m_uzUnicodeText[i]; i++);
+  for (i=0; i < nLimit && m_uzUnicodeText[i]; i++);
 
   icUInt32Number nSize = i+1;
 
@@ -2402,9 +2749,13 @@ void CIccTagTextDescription::ReleaseUnicode()
   // but don't reallocate because of the NULLs
   if (nSize < (m_nUnicodeSize-2)) {
     m_uzUnicodeText=(icUInt16Number*)icRealloc(m_uzUnicodeText, (nSize+2)*sizeof(icUInt16Number));
-    m_uzUnicodeText[nSize] = 0;
-    m_uzUnicodeText[nSize+1] = 0;
-    m_nUnicodeSize = nSize+2;
+    if (m_uzUnicodeText) {
+      m_uzUnicodeText[nSize] = 0;
+      m_uzUnicodeText[nSize+1] = 0;
+      m_nUnicodeSize = nSize+2;
+    }
+    else
+      m_nUnicodeSize = 0;
   }
 }
 
@@ -2738,6 +3089,8 @@ CIccTagNamedColor2::CIccTagNamedColor2(int nSize/*=1*/, int nDeviceCoords/*=0*/)
   m_nColorEntrySize = 32/*rootName*/ + (3/*PCS*/ + 1/*iAny*/ + nDeviceCoords)*sizeof(icFloatNumber);
 
   m_NamedColor = (SIccNamedColorEntry*)calloc(nSize, m_nColorEntrySize);
+  if (!m_NamedColor)
+    m_nSize = 0;
 
   m_NamedLab = NULL;
 }
@@ -2767,7 +3120,10 @@ CIccTagNamedColor2::CIccTagNamedColor2(const CIccTagNamedColor2 &ITNC)
   memcpy(m_szSufix, ITNC.m_szSufix, sizeof(m_szSufix));
 
   m_NamedColor = (SIccNamedColorEntry*)calloc(m_nSize, m_nColorEntrySize);
-  memcpy(m_NamedColor, ITNC.m_NamedColor, m_nColorEntrySize*m_nSize);
+  if (m_NamedColor)
+    memcpy(m_NamedColor, ITNC.m_NamedColor, (size_t)m_nColorEntrySize*m_nSize);
+  else
+    m_nSize = 0;
 
   m_NamedLab = NULL;
 }
@@ -2799,10 +3155,12 @@ CIccTagNamedColor2 &CIccTagNamedColor2::operator=(const CIccTagNamedColor2 &Name
   memcpy(m_szPrefix, NamedColor2Tag.m_szPrefix, sizeof(m_szPrefix));
   memcpy(m_szSufix, NamedColor2Tag.m_szSufix, sizeof(m_szSufix));
 
-  if (m_NamedColor)
-    free(m_NamedColor);
+  free(m_NamedColor);
   m_NamedColor = (SIccNamedColorEntry*)calloc(m_nSize, m_nColorEntrySize);
-  memcpy(m_NamedColor, NamedColor2Tag.m_NamedColor, m_nColorEntrySize*m_nSize);
+  if (m_NamedColor)
+    memcpy(m_NamedColor, NamedColor2Tag.m_NamedColor, (size_t)m_nColorEntrySize*m_nSize);
+  else
+    m_nSize = 0;
 
   m_NamedLab = NULL;
 
@@ -2820,11 +3178,8 @@ CIccTagNamedColor2 &CIccTagNamedColor2::operator=(const CIccTagNamedColor2 &Name
  */
 CIccTagNamedColor2::~CIccTagNamedColor2()
 {
-  if (m_NamedColor)
-    free(m_NamedColor);
-
-  if (m_NamedLab)
-    delete [] m_NamedLab;
+  free(m_NamedColor);
+  delete [] m_NamedLab;
 }
 
 /**
@@ -2898,7 +3253,12 @@ bool CIccTagNamedColor2::SetSize(icUInt32Number nSize, icInt32Number nDeviceCoor
 */
 void CIccTagNamedColor2::SetPrefix(const icChar *szPrefix)
 {
-  strncpy(m_szPrefix, szPrefix, sizeof(m_szPrefix));
+  // Copy at most sizeof-1 bytes so the explicit terminator below always has
+  // room. Passing the full destination size as the bound makes GCC's
+  // -Wstringop-truncation flag the call (it cannot see the following NUL
+  // store); capping at sizeof-1 is value-preserving because that last byte was
+  // already being overwritten with '\0'.
+  strncpy(m_szPrefix, szPrefix, sizeof(m_szPrefix)-1);
   m_szPrefix[sizeof(m_szPrefix)-1]='\0';
 }
 
@@ -2915,7 +3275,9 @@ void CIccTagNamedColor2::SetPrefix(const icChar *szPrefix)
 */
 void CIccTagNamedColor2::SetSufix(const icChar *szSufix)
 {
-  strncpy(m_szSufix, szSufix, sizeof(m_szSufix));
+  // See SetPrefix: cap the strncpy bound at sizeof-1 so the explicit NUL store
+  // has room and -Wstringop-truncation is satisfied; value-preserving.
+  strncpy(m_szSufix, szSufix, sizeof(m_szSufix)-1);
   m_szSufix[sizeof(m_szSufix)-1]='\0';
 }
 
@@ -2962,6 +3324,19 @@ bool CIccTagNamedColor2::Read(icUInt32Number size, CIccIO *pIO)
       pIO->Read8(m_szSufix, sizeof(m_szSufix))!=sizeof(m_szSufix)) {
     return false;
   }
+  
+  // make sure the suffix and prefix are NULL terminated!
+  m_szPrefix[sizeof(m_szPrefix)-1] = 0;
+  m_szSufix[sizeof(m_szSufix)-1] = 0;
+
+  // Hard upper bounds on profile-controlled counts to defend
+  // Describe()/Find()/Apply() loops against malformed tags
+  // (CWE-400/CWE-834). Real profiles have a few thousand named
+  // colors at most and well under 16 device channels.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  const icUInt32Number kMaxNamedColorDeviceCoords = 256;
+  if (nNum > kMaxNamedColorEntries || nCoords > kMaxNamedColorDeviceCoords)
+    return false;
 
   size -= nTagHdrSize;
 
@@ -3072,7 +3447,7 @@ void CIccTagNamedColor2::Describe(std::string &sDescription, int /* nVerboseness
 
   sDescription.reserve(sDescription.size() + m_nSize*79);
 
-  snprintf(buf, bufSize, "BEGIN_NAMED_COLORS flags=%08x %u %u\n", m_nVendorFlags, m_nSize, m_nDeviceCoords);
+  snprintf(buf, bufSize, "BEGIN_NAMED_COLORS flags=%08x %u %u\n", (unsigned int)m_nVendorFlags, (unsigned int)m_nSize, (unsigned int)m_nDeviceCoords);
   sDescription += buf;
 
   snprintf(buf, bufSize, "Prefix=\"%s\"\n", m_szPrefix);
@@ -3081,8 +3456,23 @@ void CIccTagNamedColor2::Describe(std::string &sDescription, int /* nVerboseness
   snprintf(buf, bufSize, "Sufix= \"%s\"\n", m_szSufix);
   sDescription += buf;
 
+  // CWE-400/CWE-834: Read() caps m_nSize at kMaxNamedColorEntries and allocates
+  // the entry array to match; assert that bound locally so the describe walk has
+  // an explicit upper limit.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  if (m_nSize > kMaxNamedColorEntries)
+    return;
+
+  // CWE-400/CWE-834: each entry's device-coordinate count is the second profile-
+  // controlled dimension. Read() caps it at kMaxNamedColorDeviceCoords and sizes
+  // every entry to match; assert that bound here so the inner per-entry coordinate
+  // walk below can't run unbounded on a corrupted m_nDeviceCoords.
+  const icUInt32Number kMaxNamedColorDeviceCoords = 256;
+  if (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+    return;
+
   for (i=0; i<m_nSize; i++) {
-    snprintf(buf, bufSize, "Color[%u]: %s :", i, pNamedColor->rootName);
+    snprintf(buf, bufSize, "Color[%u]: %s :", (unsigned int)i, pNamedColor->rootName);
     sDescription += buf;
     
     icFloatNumber pcsCoord[3] ={0};
@@ -3148,8 +3538,15 @@ void CIccTagNamedColor2::SetColorSpaces(icColorSpaceSignature csPCS, icColorSpac
  */
 icInt32Number CIccTagNamedColor2::FindRootColor(const icChar *szRootColor) const
 {
+  // CWE-400/CWE-834: Read() caps m_nSize at kMaxNamedColorEntries and allocates
+  // the entry array to match; assert that bound locally so the search has an
+  // explicit upper limit.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  if (m_nSize > kMaxNamedColorEntries)
+    return -1;
+
   for (icUInt32Number i=0; i<m_nSize; i++) {
-    if (stricmp(m_NamedColor[i].rootName,szRootColor) == 0)
+    if (stricmp(GetEntry(i)->rootName,szRootColor) == 0)
       return i;
   }
 
@@ -3167,10 +3564,8 @@ icInt32Number CIccTagNamedColor2::FindRootColor(const icChar *szRootColor) const
  */
 void CIccTagNamedColor2::ResetPCSCache()
 {
-  if (m_NamedLab) {
-    delete [] m_NamedLab;
-    m_NamedLab = NULL;
-  }
+  delete [] m_NamedLab;
+  m_NamedLab = NULL;
 }
 
 /**
@@ -3187,15 +3582,22 @@ bool CIccTagNamedColor2::InitFindCachedPCSColor()
 {
   icFloatNumber *pXYZ, *pLab;
 
+  // CWE-400/CWE-834: Read() caps m_nSize at kMaxNamedColorEntries and allocates
+  // the entry array to match; assert that bound locally so the cache allocation
+  // and the conversion walks below have an explicit upper limit.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  if (m_nSize > kMaxNamedColorEntries)
+    return false;
+
   if (!m_NamedLab) {
-    m_NamedLab = new SIccNamedLabEntry[m_nSize];
+    m_NamedLab = new (std::nothrow) SIccNamedLabEntry[m_nSize];
     if (!m_NamedLab)
       return false;
 
     if (m_csPCS != icSigLabData) {
       for (icUInt32Number i=0; i<m_nSize; i++) {
         pLab = m_NamedLab[i].lab;
-        pXYZ = m_NamedColor[i].pcsCoords;
+        pXYZ = GetEntry(i)->pcsCoords;
         icXyzFromPcs(pXYZ);
         icXYZtoLab(pLab, pXYZ);
       }
@@ -3203,7 +3605,7 @@ bool CIccTagNamedColor2::InitFindCachedPCSColor()
     else {
       for (icUInt32Number i=0; i<m_nSize; i++) {
         pLab = m_NamedLab[i].lab;
-        Lab2ToLab4(pLab, m_NamedColor[i].pcsCoords);
+        Lab2ToLab4(pLab, GetEntry(i)->pcsCoords);
         icLabFromPcs(pLab);
       }
     }
@@ -3320,9 +3722,16 @@ icInt32Number CIccTagNamedColor2::FindColor(const icChar *szColor) const
   }
 
 
+  // CWE-400/CWE-834: Read() caps m_nSize at kMaxNamedColorEntries and allocates
+  // the entry array to match; assert that bound locally so the search has an
+  // explicit upper limit.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  if (m_nSize > kMaxNamedColorEntries)
+    return -1;
+
   for ( i=0; i<(icInt32Number)m_nSize; i++) {
     sColorName = m_szPrefix;
-    sColorName += m_NamedColor[i].rootName;
+    sColorName += GetEntry(i)->rootName;
     sColorName += m_szSufix;
 
     if (strcmp(sColorName.c_str(),szColor) == 0)
@@ -3355,8 +3764,23 @@ icInt32Number CIccTagNamedColor2::FindDeviceColor(icFloatNumber *pDevColor) cons
   icInt32Number leastDiffindex = -1;
 
 
+  // CWE-400/CWE-834: Read() caps m_nSize at kMaxNamedColorEntries and allocates
+  // the entry array to match; assert that bound locally so the search has an
+  // explicit upper limit.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  if (m_nSize > kMaxNamedColorEntries)
+    return -1;
+
+  // CWE-400/CWE-834: m_nDeviceCoords is the per-entry device channel count, which
+  // Read() caps at kMaxNamedColorDeviceCoords while sizing each entry's deviceCoords
+  // array; assert that bound on the field so the inner device-coord walk below has
+  // an explicit upper limit. Value-preserving: a valid count is far below the cap.
+  const icUInt32Number kMaxNamedColorDeviceCoords = 256;
+  if (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+    return -1;
+
   for (icUInt32Number i=0; i<m_nSize; i++) {
-    pDevOut = m_NamedColor[i].deviceCoords;
+    pDevOut = GetEntry(i)->deviceCoords;
 
     for (icUInt32Number j=0; j<m_nDeviceCoords; j++) {
       dCalcDiff += (pDevColor[j]-pDevOut[j])*(pDevColor[j]-pDevOut[j]);
@@ -3577,7 +4001,10 @@ CIccTagXYZ::CIccTagXYZ(const CIccTagXYZ &ITXYZ)
   m_nSize = ITXYZ.m_nSize;
 
   m_XYZ = (icXYZNumber*)calloc(m_nSize, sizeof(icXYZNumber));
-  memcpy(m_XYZ, ITXYZ.m_XYZ, sizeof(icXYZNumber)*m_nSize);
+  if (m_XYZ)
+    memcpy(m_XYZ, ITXYZ.m_XYZ, sizeof(icXYZNumber)*m_nSize);
+  else
+    m_nSize = 0;
 }
 
 
@@ -3599,10 +4026,12 @@ CIccTagXYZ &CIccTagXYZ::operator=(const CIccTagXYZ &XYZTag)
 
   m_nSize = XYZTag.m_nSize;
 
-  if (m_XYZ)
-    free(m_XYZ);
+  free(m_XYZ);
   m_XYZ = (icXYZNumber*)calloc(m_nSize, sizeof(icXYZNumber));
-  memcpy(m_XYZ, XYZTag.m_XYZ, sizeof(icXYZNumber)*m_nSize);
+  if (m_XYZ)
+    memcpy(m_XYZ, XYZTag.m_XYZ, sizeof(icXYZNumber)*m_nSize);
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -3618,8 +4047,7 @@ CIccTagXYZ &CIccTagXYZ::operator=(const CIccTagXYZ &XYZTag)
  */
 CIccTagXYZ::~CIccTagXYZ()
 {
-  if (m_XYZ)
-    free(m_XYZ);
+  free(m_XYZ);
 }
 
 
@@ -3726,10 +4154,16 @@ void CIccTagXYZ::Describe(std::string &sDescription, int /* nVerboseness */)
   }
   else {
     icUInt32Number i;
+    // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and the
+    // m_XYZ array is allocated to match; assert an explicit upper limit so a
+    // corrupted count can't drive an unbounded describe walk.
+    const icUInt32Number nMaxXYZValues = 65536;
+    if (m_nSize > nMaxXYZValues)
+      return;
     sDescription.reserve(sDescription.size() + m_nSize*79);
 
     for (i=0; i<m_nSize; i++) {
-      snprintf(buf, bufSize, "value[%u]: X=%.4lf, Y=%.4lf, Z=%.4lf\n", i, icFtoD(m_XYZ[i].X), icFtoD(m_XYZ[i].Y), icFtoD(m_XYZ[i].Z));
+      snprintf(buf, bufSize, "value[%u]: X=%.4lf, Y=%.4lf, Z=%.4lf\n", (unsigned int) i, icFtoD(m_XYZ[i].X), icFtoD(m_XYZ[i].Y), icFtoD(m_XYZ[i].Z));
       sDescription += buf;
     }
   }
@@ -3751,8 +4185,14 @@ bool CIccTagXYZ::SetSize(icUInt32Number nSize, bool bZeroNew/*=true*/)
   if (nSize==m_nSize)
     return true;
 
-  m_XYZ = (icXYZNumber*)icRealloc(m_XYZ, nSize*sizeof(icXYZNumber));
+  if (nSize > 65536) {
+    free(m_XYZ);
+    m_XYZ = NULL;   // prevent double free in destructor
+    m_nSize = 0;
+    return false;
+  }
 
+  m_XYZ = (icXYZNumber*)icRealloc(m_XYZ, nSize*sizeof(icXYZNumber));
   if (!m_XYZ) {
     m_nSize = 0;
     return false;
@@ -3797,6 +4237,14 @@ icValidateStatus CIccTagXYZ::Validate(std::string sigPath, std::string &sReport,
     return rv;
   }
 
+  // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and the
+  // m_XYZ array is allocated to match; assert the same explicit ceiling Describe()
+  // uses (see CIccTagXYZ::Describe) so a corrupted count can't drive an unbounded
+  // validation walk over m_XYZ.
+  const icUInt32Number nMaxXYZValues = 65536;
+  if (m_nSize > nMaxXYZValues)
+    return icMaxStatus(rv, icValidateCriticalError);
+
   for (int i=0; i<(int)m_nSize; i++) {
     rv = icMaxStatus(rv, Info.CheckData(sReport, m_XYZ[i], sSigPathName + ":XYZ"));
   }
@@ -3840,7 +4288,8 @@ CIccTagChromaticity::CIccTagChromaticity(const CIccTagChromaticity &ITCh)
   m_nChannels = ITCh.m_nChannels;
 
   m_xy = (icChromaticityNumber*)calloc(m_nChannels, sizeof(icChromaticityNumber));
-  memcpy(m_xy, ITCh.m_xy, sizeof(icChromaticityNumber)*m_nChannels);
+  if (m_xy)
+    memcpy(m_xy, ITCh.m_xy, sizeof(icChromaticityNumber)*m_nChannels);
 }
 
 
@@ -3861,10 +4310,10 @@ CIccTagChromaticity &CIccTagChromaticity::operator=(const CIccTagChromaticity &C
 
   m_nChannels = ChromTag.m_nChannels;
 
-  if (m_xy)
-    free(m_xy);
+  free(m_xy);
   m_xy = (icChromaticityNumber*)calloc(m_nChannels, sizeof(icChromaticityNumber));
-  memcpy(m_xy, ChromTag.m_xy, sizeof(icChromaticityNumber)*m_nChannels);
+  if (m_xy)
+    memcpy(m_xy, ChromTag.m_xy, sizeof(icChromaticityNumber)*m_nChannels);
 
   return *this;  
 }
@@ -3880,8 +4329,7 @@ CIccTagChromaticity &CIccTagChromaticity::operator=(const CIccTagChromaticity &C
  */
 CIccTagChromaticity::~CIccTagChromaticity()
 {
-  if (m_xy)
-    free(m_xy);
+  free(m_xy);
 }
 
 
@@ -4010,7 +4458,7 @@ void CIccTagChromaticity::Describe(std::string &sDescription, int /* nVerbosenes
   sDescription += buf;
 
   for (i=0; i<m_nChannels; i++) {
-    snprintf(buf, bufSize, "value[%u]: x=%.3lf, y=%.3lf\n", i, icUFtoD(m_xy[i].x), icUFtoD(m_xy[i].y));
+    snprintf(buf, bufSize, "value[%u]: x=%.3lf, y=%.3lf\n", (unsigned int) i, icUFtoD(m_xy[i].x), icUFtoD(m_xy[i].y));
     sDescription += buf;
   }
 
@@ -4033,7 +4481,6 @@ bool CIccTagChromaticity::SetSize(icUInt16Number nSize, bool bZeroNew/*=true*/)
     return true;
 
   m_xy = (icChromaticityNumber*)icRealloc(m_xy, nSize*sizeof(icChromaticityNumber));
-
   if (!m_xy) {
     m_nChannels = 0;
     return false;
@@ -4303,16 +4750,16 @@ static struct {
 } icExampleCicpCodes[] = {
   { "1-1-0-0",    "RGB narrow range representation specified in Recommendation ITU-R BT.709-6, Item 3.4"},
   { "1-13-0-1",   "RGB full range representation specified in IEC 61966-2-1 sRGB"},
-  { "9-14-0-0",   "R’G’B’ narrow range representation specified in Recommendation ITU-R BT.2020-2, Table 5"},
-  { "9-16-0-0",   "PQ R’G’B’ narrow range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
-  { "9-16-0-1",   "PQ R’G’B’ full range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
-  { "9-18-0-0 ",  "HLG R’G’B’ narrow range representation specified in Recommendation ITU-R BT.2100-2 "},
-  { "9-18-0-1",   "HLG R’G’B’ full range representation specified in Recommendation ITU-R BT.2100-2"},
+  { "9-14-0-0",   "R'G'B' narrow range representation specified in Recommendation ITU-R BT.2020-2, Table 5"},
+  { "9-16-0-0",   "PQ R'G'B' narrow range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
+  { "9-16-0-1",   "PQ R'G'B' full range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
+  { "9-18-0-0 ",  "HLG R'G'B' narrow range representation specified in Recommendation ITU-R BT.2100-2 "},
+  { "9-18-0-1",   "HLG R'G'B' full range representation specified in Recommendation ITU-R BT.2100-2"},
   { "1-1-1-0 ",   "YCbCr representation specified in Recommendation ITU-R BT.709-6, Item 3.4"},
-  { "9-14-9-0",   "Y’Cb’Cr’ narrow range representation specified in Recommendation ITU-R BT.2020-2, Table 5"},
-  { "9-16-9-0",   "PQ Y’Cb’Cr’ narrow range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
+  { "9-14-9-0",   "Y'Cb'Cr' narrow range representation specified in Recommendation ITU-R BT.2020-2, Table 5"},
+  { "9-16-9-0",   "PQ Y'Cb'Cr' narrow range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
   { "9-16-14-0",  "PQ ICtCp narrow range representation specified in Recommendation ITU-R BT.2100-2, Table 9"},
-  { "9-18-9-0",   "HLG Y’Cb’Cr’ narrow range representation specified in Recommendation ITU-R BT.2100-2"},
+  { "9-18-9-0",   "HLG Y'Cb'Cr' narrow range representation specified in Recommendation ITU-R BT.2100-2"},
   { "9-18-14-0 ", "HLG ICtCp narrow range representation specified in Recommendation ITU-R BT.2100-2"},
   { NULL, NULL},
 };
@@ -4476,6 +4923,8 @@ CIccTagSparseMatrixArray::CIccTagSparseMatrixArray(int nNumMatrices/* =1 */, int
     m_nChannelsPerMatrix = 4;
 
   m_RawData = (icUInt8Number*)calloc(m_nSize, GetBytesPerMatrix());
+  if (!m_RawData)
+    m_nSize = 0;
 
   m_bNonZeroPadding = false;
 }
@@ -4498,7 +4947,14 @@ CIccTagSparseMatrixArray::CIccTagSparseMatrixArray(const CIccTagSparseMatrixArra
   m_nMatrixType = ITSMA.m_nMatrixType;
 
   m_RawData = (icUInt8Number*)calloc(m_nSize, GetBytesPerMatrix());
-  memcpy(m_RawData, ITSMA.m_RawData, m_nSize*GetBytesPerMatrix());
+  if (!m_RawData) {
+    // calloc failed - leave the object in a safe, empty state rather
+    // than dereference NULL in the memcpy below.
+    m_nSize = 0;
+    m_bNonZeroPadding = false;
+    return;
+  }
+  memcpy(m_RawData, ITSMA.m_RawData, (size_t)m_nSize*GetBytesPerMatrix());
 
   m_bNonZeroPadding = ITSMA.m_bNonZeroPadding;
 }
@@ -4522,10 +4978,12 @@ CIccTagSparseMatrixArray &CIccTagSparseMatrixArray::operator=(const CIccTagSpars
   m_nSize = ITSMA.m_nSize;
   m_nChannelsPerMatrix = ITSMA.m_nChannelsPerMatrix;
 
-  if (m_RawData)
-    free(m_RawData);
+  free(m_RawData);
   m_RawData = (icUInt8Number*)calloc(m_nSize, GetBytesPerMatrix());
-  memcpy(m_RawData, ITSMA.m_RawData, m_nSize*GetBytesPerMatrix());
+  if (m_RawData)
+    memcpy(m_RawData, ITSMA.m_RawData, (size_t)m_nSize*GetBytesPerMatrix());
+  else
+    m_nSize = 0;
 
   m_bNonZeroPadding = ITSMA.m_bNonZeroPadding;
 
@@ -4544,8 +5002,7 @@ CIccTagSparseMatrixArray &CIccTagSparseMatrixArray::operator=(const CIccTagSpars
  */
 CIccTagSparseMatrixArray::~CIccTagSparseMatrixArray()
 {
-  if (m_RawData)
-    free(m_RawData);
+  free(m_RawData);
 }
 
 
@@ -4593,6 +5050,12 @@ bool CIccTagSparseMatrixArray::Read(icUInt32Number size, CIccIO *pIO)
   if (nNumMatrices < 1 || nChannels < 1)
     return false;
 
+  // Hard upper bound on profile-controlled matrix count to defend
+  // Validate()/Apply() loops against malformed tags (CWE-400/CWE-834).
+  const icUInt32Number kMaxSparseMatrixArrayCount = 65536;
+  if (nNumMatrices > kMaxSparseMatrixArrayCount)
+    return false;
+
   m_nMatrixType = (icSparseMatrixType)nMatrixType;
 
   icUInt32Number nSizeLeft = size - nHdrSize;
@@ -4601,13 +5064,22 @@ bool CIccTagSparseMatrixArray::Read(icUInt32Number size, CIccIO *pIO)
   // But this math must match GetBytesPerMatrix()
   icUInt64Number nBytesPerMatrix = nChannels * sizeof(icFloatNumber);
 
-  icUInt64Number nNeededSize = nBytesPerMatrix * nNumMatrices;
-  if (nNeededSize > (icUInt64Number)nSizeLeft)
+  // NOTE: nBytesPerMatrix * nNumMatrices is the BUFFER allocation size, NOT the file data size.
+  // Sparse matrices store only non-zero entries, so file data is much smaller than the buffer.
+  // Per-read bounds checks in the loop below validate actual file data consumption.
+
+  // this sets the sizes, and allocates a huge chunk of memory for matrix storage in m_RawData.
+  // Reset now refuses oversized allocations + returns false on OOM, so propagate the failure.
+  if (!Reset(nNumMatrices, nChannels))
     return false;
 
-  // this sets the sizes, and allocates a huge chunk of memory for matrix storage in m_RawData
-  Reset(nNumMatrices, nChannels);
-  
+  // CWE-400/CWE-834: Reset() set m_nSize from the already-capped nNumMatrices, so
+  // this is normally an invariant assertion; state it in terms of the field so the
+  // read loop below - and the Write()/Describe() walks that also iterate m_nSize -
+  // carry an explicit upper bound against a corrupted count.
+  if (m_nSize > kMaxSparseMatrixArrayCount)
+    return false;
+
   icUInt8Number *matrix_end = m_RawData + (size_t)m_nSize * nBytesPerMatrix;  // overflow detection
 
   if (m_nSize) {
@@ -4654,11 +5126,12 @@ bool CIccTagSparseMatrixArray::Read(icUInt32Number size, CIccIO *pIO)
       if (!mtx.Reset(pMatrix, nBytesPerMatrix, icSparseMatrixFloatNum, true))
         return false;
 
-      size_t num_entries = mtx.GetNumEntries();
+      icUInt16Number num_entries = mtx.GetNumEntries();
       if (num_entries == 0)
         return false;
 
-      if (mtx.GetNumEntries()>mtx.MaxEntries(nChannels*sizeof(icFloatNumber), mtx.Rows(), sizeof(icFloatNumber)))
+      icUInt32Number maxEntries = mtx.MaxEntries(nChannels*sizeof(icFloatNumber), mtx.Rows(), sizeof(icFloatNumber));
+      if (num_entries > maxEntries)
         return false;
     
       n = (icUInt32Number) (num_entries*sizeof(icUInt16Number));
@@ -4740,6 +5213,13 @@ bool CIccTagSparseMatrixArray::Read(icUInt32Number size, CIccIO *pIO)
       nSizeLeft -= n;
       pos += n;
 
+      // validate column counts that will be used later (and could cause a crash)
+      for (j=0; j<(int)mtx.Rows(); j++) {
+        n = mtx.GetNumRowColumns(j);
+        if (n > mtx.Cols())
+          return false;
+      }
+
       nAligned = ((pos+3)/4)*4;
       if (nAligned != pos) {
         n = nAligned - pos;
@@ -4811,6 +5291,13 @@ bool CIccTagSparseMatrixArray::Write(CIccIO *pIO)
   if (nNeededSize >= (0x100000000ULL - pIO->Tell()))
     return false;
 
+  // CWE-400/CWE-834: Read() caps the matrix count at kMaxSparseMatrixArrayCount;
+  // assert the same ceiling on m_nSize here so an object whose count was corrupted
+  // through another path can't drive an unbounded write walk over m_RawData.
+  const icUInt32Number kMaxSparseMatrixArrayCount = 65536;
+  if (m_nSize > kMaxSparseMatrixArrayCount)
+    return false;
+
   for (i=0; i<(int)m_nSize; i++) {
     icUInt8Number *pMatrix = m_RawData + (size_t)i * nBytesPerMatrix;
     if (!mtx.Reset(pMatrix, nBytesPerMatrix, icSparseMatrixFloatNum, true))
@@ -4880,11 +5367,17 @@ void CIccTagSparseMatrixArray::Describe(std::string &sDescription, int /* nVerbo
   sDescription += "Begin_SparseMatrix_Array\n";
   snprintf(buf, bufSize, "OutputChannels = %d\n", m_nChannelsPerMatrix);
   sDescription += buf;
-  snprintf(buf, bufSize, "MatrixType = %d\n", m_nMatrixType);
+  snprintf(buf, bufSize, "MatrixType = %u\n", m_nMatrixType);
   sDescription += buf;
 
   int i, r, c;
   icUInt32Number nBytesPerMatrix = m_nChannelsPerMatrix * sizeof(icFloatNumber);
+  // CWE-400/CWE-834: Read() caps the matrix count at kMaxSparseMatrixArrayCount;
+  // assert the same ceiling so a corrupted m_nSize can't drive an unbounded
+  // describe walk over the matrix array.
+  const icUInt32Number kMaxSparseMatrixArrayCount = 65536;
+  if (m_nSize > kMaxSparseMatrixArrayCount)
+    return;
   for (i=0; i<(int)m_nSize; i++) {
     CIccSparseMatrix mtx(&m_RawData[i*nBytesPerMatrix], nBytesPerMatrix, icSparseMatrixFloatNum, true);
 
@@ -4986,7 +5479,7 @@ icValidateStatus CIccTagSparseMatrixArray::Validate(std::string sigPath, std::st
   if (!m_RawData) {
     sReport += icMsgValidateCriticalError;
     sReport += sSigPathName;
-    sReport += " - Data dont defined for matrices\n";
+    sReport += " - Data not defined for matrices\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
     return rv;
   }
@@ -4995,9 +5488,17 @@ icValidateStatus CIccTagSparseMatrixArray::Validate(std::string sigPath, std::st
   CIccSparseMatrix mtx;
   int i;
 
-  icUInt16Number nBytesPerMatrix = m_nChannelsPerMatrix * sizeof(icFloatNumber);
+  size_t nBytesPerMatrix = m_nChannelsPerMatrix * sizeof(icFloatNumber);
   const size_t bufSize = 128;
   char buf[bufSize];
+  
+  if ( nBytesPerMatrix > 0xFFFFFFFFULL ) {  // make sure it is less than 32 bit max
+    sReport += icMsgValidateCriticalError;
+    sReport += sSigPathName;
+    sReport += " - Matrix data size too large\n";
+    rv = icMaxStatus(rv, icValidateCriticalError);
+    return rv;
+  }
   
   if (!mtx.Reset(m_RawData, nBytesPerMatrix, icSparseMatrixFloatNum, true)) {
     sReport += icMsgValidateCriticalError;
@@ -5010,7 +5511,7 @@ icValidateStatus CIccTagSparseMatrixArray::Validate(std::string sigPath, std::st
 
   nRows = mtx.Rows();
   nCols = mtx.Cols();
-  icUInt32Number nMaxElements = CIccSparseMatrix::MaxEntries(nBytesPerMatrix, nRows, sizeof(icFloatNumber));
+  icUInt32Number nMaxElements = CIccSparseMatrix::MaxEntries( (icUInt32Number)nBytesPerMatrix, nRows, sizeof(icFloatNumber));
   icUInt8Number *temp = new icUInt8Number[nBytesPerMatrix];
 
   for (i=0; i<(int)m_nSize; i++) {
@@ -5083,18 +5584,59 @@ bool CIccTagSparseMatrixArray::Reset(icUInt32Number nNumMatrices, icUInt16Number
   if (nNumMatrices==m_nSize && nChannelsPerMatrix==m_nChannelsPerMatrix)
     return true;
 
-  m_nSize = nNumMatrices;
-  m_nChannelsPerMatrix = nChannelsPerMatrix;
+  // Do the allocation math in explicit 64-bit. On 32-bit targets
+  // (wasm32 in particular, where size_t is u32) the product
+  // nNumMatrices * GetBytesPerMatrix() can wrap silently - returning
+  // a tiny allocation while leaving m_nSize huge, and the Read loop
+  // then writes records past the buffer end. Also cap the total at a
+  // library-wide 64 MB ceiling so a legitimately-sized tag can't
+  // coerce gigabytes of RAM.
+  const icUInt64Number perMatrix64 =
+      static_cast<icUInt64Number>(nChannelsPerMatrix) * sizeof(icFloatNumber);
+  const icUInt64Number total64 =
+      static_cast<icUInt64Number>(nNumMatrices) * perMatrix64;
 
-  size_t nSize = (size_t)m_nSize * GetBytesPerMatrix();
-  
-  m_RawData = (icUInt8Number *)icRealloc(m_RawData, nSize);
-
-  if (!m_RawData) {
-    m_nSize = 0;
+  static const icUInt64Number kMaxSparseMatrixArrayBytes =
+      64ULL * 1024 * 1024;
+  if (total64 > kMaxSparseMatrixArrayBytes ||
+      total64 > static_cast<icUInt64Number>(SIZE_MAX)) {
+    // Leave m_nSize untouched on failure so the object stays valid.
     return false;
   }
 
+  size_t nSize = static_cast<size_t>(total64);
+
+  // icRealloc (see IccUtil.cpp) diverges from std::realloc in two
+  // important ways:
+  //   1. icRealloc(ptr, 0) frees ptr and returns NULL (std::realloc's
+  //      behaviour here is implementation-defined).
+  //   2. On allocation failure (nptr == NULL && ptr != NULL) it frees
+  //      the old ptr - so the caller must NOT keep using m_RawData
+  //      after the call, regardless of the return value.
+  //
+  // Therefore we always write the result back to m_RawData and keep
+  // the object coherent (m_nSize / m_nChannelsPerMatrix match
+  // whatever m_RawData now is).
+  m_RawData = (icUInt8Number *)icRealloc(m_RawData, nSize);
+
+  if (nSize == 0) {
+    // Caller explicitly asked to clear. icRealloc returned NULL after
+    // freeing the old buffer - success, empty object.
+    m_nSize = 0;
+    m_nChannelsPerMatrix = 0;
+    return true;
+  }
+
+  if (!m_RawData) {
+    // Allocation failure. icRealloc already freed the old buffer.
+    // Keep the object in a safe empty state.
+    m_nSize = 0;
+    m_nChannelsPerMatrix = 0;
+    return false;
+  }
+
+  m_nSize = nNumMatrices;
+  m_nChannelsPerMatrix = nChannelsPerMatrix;
   memset(m_RawData, 0, nSize);
   return true;
 }
@@ -5131,7 +5673,9 @@ bool CIccTagSparseMatrixArray::GetValues(icFloatNumber *DstVector, icUInt32Numbe
   if (nStart % nBytesPerMatrix != 0)
     return false;
 
-  if (nStart / nBytesPerMatrix > m_nSize)
+  // CWE-125: ">" let the matrix index equal m_nSize -- one past the last valid index
+  // (0..m_nSize-1) -- so the memcpy below read a whole matrix beyond m_RawData. ">=".
+  if (nStart / nBytesPerMatrix >= m_nSize)
     return false;
 
   memcpy(DstVector, m_RawData+nStart, nVectorSize);
@@ -5245,6 +5789,8 @@ CIccTagFixedNum<T, Tsig>::CIccTagFixedNum(int nSize/*=1*/)
   if (m_nSize <1)
     m_nSize = 1;
   m_Num = (T*)calloc(nSize, sizeof(T));
+  if (!m_Num)
+    m_nSize = 0;
 }
 
 
@@ -5263,7 +5809,10 @@ CIccTagFixedNum<T, Tsig>::CIccTagFixedNum(const CIccTagFixedNum<T, Tsig> &ITFN)
 {
   m_nSize = ITFN.m_nSize;
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITFN.m_Num, m_nSize*sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITFN.m_Num, m_nSize*sizeof(T));
+  else
+    m_nSize = 0;
 }
 
 
@@ -5285,10 +5834,12 @@ CIccTagFixedNum<T, Tsig> &CIccTagFixedNum<T, Tsig>::operator=(const CIccTagFixed
 
   m_nSize = ITFN.m_nSize;
 
-  if (m_Num)
-    free(m_Num);
+  free(m_Num);
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITFN.m_Num, m_nSize*sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITFN.m_Num, m_nSize*sizeof(T));
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -5306,8 +5857,7 @@ CIccTagFixedNum<T, Tsig> &CIccTagFixedNum<T, Tsig>::operator=(const CIccTagFixed
 template <class T, icTagTypeSignature Tsig>
 CIccTagFixedNum<T, Tsig>::~CIccTagFixedNum()
 {
-  if (m_Num)
-    free(m_Num);
+  free(m_Num);
 }
 
 /**
@@ -5439,13 +5989,19 @@ void CIccTagFixedNum<T, Tsig>::Describe(std::string &sDescription, int /* nVerbo
 
       sDescription += "\nArrayForm:\n";
     }
+    // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and the
+    // m_Num array is allocated to match; assert an explicit ceiling so a corrupted
+    // count can't drive an unbounded describe walk over the value array.
+    const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+    if (m_nSize > nMaxNumArrayEntries)
+      return;
     sDescription.reserve(sDescription.size() + m_nSize*79);
 
     for (i=0; i<m_nSize; i++) {
-      if (Tsig==icSigS15Fixed16ArrayType) 
-        snprintf(buf, bufSize, "Value[%u] = %8.4lf\n", i, icFtoD(m_Num[i]));
+      if (Tsig==icSigS15Fixed16ArrayType)
+        snprintf(buf, bufSize, "Value[%u] = %8.4lf\n", (unsigned int)i, icFtoD(m_Num[i]));
       else
-        snprintf(buf, bufSize, "Value[%u] = %8.4lf\n", i, icUFtoD(m_Num[i]));
+        snprintf(buf, bufSize, "Value[%u] = %8.4lf\n", (unsigned int)i, icUFtoD(m_Num[i]));
       sDescription += buf;
     }
   }
@@ -5469,7 +6025,6 @@ bool CIccTagFixedNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=tru
     return true;
 
   m_Num = (T*)icRealloc(m_Num, nSize*sizeof(T));
-
   if (!m_Num) {
     m_nSize = 0;
     return false;
@@ -5497,19 +6052,21 @@ bool CIccTagFixedNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=tru
 template <class T, icTagTypeSignature Tsig>
 bool CIccTagFixedNum<T, Tsig>::GetValues(icFloatNumber *DstVector, icUInt32Number nStart, icUInt32Number nVectorSize) const
 {
-  if (nVectorSize+nStart >m_nSize)
+  // CWE-125: overflow-safe form of "nVectorSize+nStart > m_nSize" -- that sum of two
+  // icUInt32Number can wrap for a huge nStart and slip past the guard; this cannot.
+  if (nVectorSize > m_nSize || nStart > m_nSize - nVectorSize)
     return false;
 
   icUInt32Number i;
 
   switch (Tsig) {
     case icSigS15Fixed16ArrayType:
-      for (i=0; i<m_nSize; i++) {
+      for (i=0; i<nVectorSize; i++) {
         DstVector[i] = (icFloatNumber)icFtoD(m_Num[i+nStart]);
       }
       break;
     case icSigU16Fixed16ArrayType:
-      for (i=0; i<m_nSize; i++) {
+      for (i=0; i<nVectorSize; i++) {
         DstVector[i] = (icFloatNumber)icUFtoD(m_Num[i+nStart]);
       }
       break;
@@ -5535,8 +6092,10 @@ template <class T, icTagTypeSignature Tsig>
 bool CIccTagFixedNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumber pos,
                                            icUInt32Number nVectorSize, icFloatNumber *zeroVals) const
 {
-  icUInt32Number nVector = m_nSize / nVectorSize;
+  if (nVectorSize == 0 || m_nSize == 0)
+    return false;
 
+  icUInt32Number nVector = m_nSize / nVectorSize;
   if (!nVector)
     return false;
 
@@ -5582,18 +6141,18 @@ bool CIccTagFixedNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumb
     case icSigS15Fixed16ArrayType:
       if (!lo) {
         if (zeroVals) {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = (icFloatNumber)(zeroVals[i] * (1.0f - x) + icFtoD(hi[i]) * x);
           }
         }
         else {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = (icFloatNumber)(icFtoD(hi[i]) * x);
           }
         }
       }
       else {
-        for (i=0; i<m_nSize; i++) {
+        for (i=0; i<nVectorSize; i++) {
           DstVector[i] = (icFloatNumber)(icFtoD(lo[i])*(1.0-x) + icFtoD(hi[i])*x);
         }
       }
@@ -5601,18 +6160,18 @@ bool CIccTagFixedNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumb
     case icSigU16Fixed16ArrayType:
       if (!lo) {
         if (zeroVals) {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = (icFloatNumber)(zeroVals[i] * (1.0 - x) + icUFtoD(hi[i]) * x);
           }
         }
         else {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = (icFloatNumber)(icUFtoD(hi[i]) * x);
           }
         }
       }
       else {
-        for (i=0; i<m_nSize; i++) {
+        for (i=0; i<nVectorSize; i++) {
           DstVector[i] = (icFloatNumber)(icUFtoD(lo[i])*(1.0-x) + icUFtoD(hi[i])*x);
         }
       }
@@ -5660,6 +6219,13 @@ bool CIccTagFixedNum<T, Tsig>::ValuePos(icFloatNumber &DstPos, icFloatNumber val
     return true;
   }
 
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_Num is
+  // allocated to match; assert an explicit ceiling so a corrupted count can't drive
+  // an unbounded search of the value array below.
+  const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+  if (m_nSize > nMaxNumArrayEntries)
+    return false;
+
   icUInt32Number i;
   for (i=1; i<m_nSize; i++, lv=nv) {
     switch (Tsig) {
@@ -5704,6 +6270,8 @@ CIccTagNum<T, Tsig>::CIccTagNum(int nSize/*=1*/)
   if (m_nSize <1)
     m_nSize = 1;
   m_Num = (T*)calloc(nSize, sizeof(T));
+  if (!m_Num)
+    m_nSize = 0;
 }
 
 
@@ -5723,7 +6291,10 @@ CIccTagNum<T, Tsig>::CIccTagNum(const CIccTagNum<T, Tsig> &ITNum)
   m_nSize = ITNum.m_nSize;
 
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  else
+    m_nSize = 0;
 }
 
 
@@ -5746,7 +6317,10 @@ CIccTagNum<T, Tsig> &CIccTagNum<T, Tsig>::operator=(const CIccTagNum<T, Tsig> &I
   m_nSize = ITNum.m_nSize;
 
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -5764,8 +6338,7 @@ CIccTagNum<T, Tsig> &CIccTagNum<T, Tsig>::operator=(const CIccTagNum<T, Tsig> &I
 template <class T, icTagTypeSignature Tsig>
 CIccTagNum<T, Tsig>::~CIccTagNum()
 {
-  if (m_Num)
-    free(m_Num);
+  free(m_Num);
 }
 
 /**
@@ -5923,43 +6496,49 @@ void CIccTagNum<T, Tsig>::Describe(std::string &sDescription, int /* nVerbosenes
   if (m_nSize == 1 ) {
     switch (sizeof(T)) {
       case 1:
-        snprintf(buf, bufSize, "Value = %u (0x02%x)\n", m_Num[0], m_Num[0]);
+        snprintf(buf, bufSize, "Value = %llu (0x%02llx)\n", (unsigned long long)m_Num[0], (unsigned long long)m_Num[0]);
         break;
       case 2:
-        snprintf(buf, bufSize, "Value = %u (0x04%x)\n", m_Num[0], m_Num[0]);
+        snprintf(buf, bufSize, "Value = %llu (0x%04llx)\n", (unsigned long long)m_Num[0], (unsigned long long)m_Num[0]);
         break;
       case 4:
-        snprintf(buf, bufSize, "Value = %u (0x08%x)\n", m_Num[0], m_Num[0]);
+        snprintf(buf, bufSize, "Value = %llu (0x%08llx)\n", (unsigned long long)m_Num[0], (unsigned long long)m_Num[0]);
         break;
       case 8:
-        snprintf(buf, bufSize, "Value = %u (0x016%x)\n", m_Num[0], m_Num[0]);
+        snprintf(buf, bufSize, "Value = %llu (0x%016llx)\n", (unsigned long long)m_Num[0], (unsigned long long)m_Num[0]);
         break;
       default:
-        snprintf(buf, bufSize, "Value = %u (0x%x)\n", m_Num[0], m_Num[0]);
+        snprintf(buf, bufSize, "Value = %llu (0x%llx)\n", (unsigned long long)m_Num[0], (unsigned long long)m_Num[0]);
         break;
     }
     sDescription += buf;
   }
   else {
     icUInt32Number i;
+    // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and the
+    // m_Num array is allocated to match; assert an explicit ceiling so a corrupted
+    // count can't drive an unbounded describe walk over the value array.
+    const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+    if (m_nSize > nMaxNumArrayEntries)
+      return;
     sDescription.reserve(sDescription.size() + m_nSize*79);
 
     for (i=0; i<m_nSize; i++) {
       switch (sizeof(T)) {
       case 1:
-        snprintf(buf, bufSize, "Value = %u (0x02%x)\n", m_Num[i], m_Num[i]);
+        snprintf(buf, bufSize, "Value = %llu (0x%02llx)\n", (unsigned long long)m_Num[i], (unsigned long long)m_Num[i]);
         break;
       case 2:
-        snprintf(buf, bufSize, "Value = %u (0x04%x)\n", m_Num[i], m_Num[i]);
+        snprintf(buf, bufSize, "Value = %llu (0x%04llx)\n", (unsigned long long)m_Num[i], (unsigned long long)m_Num[i]);
         break;
       case 4:
-        snprintf(buf, bufSize, "Value = %u (0x08%x)\n", m_Num[i], m_Num[i]);
+        snprintf(buf, bufSize, "Value = %llu (0x%08llx)\n", (unsigned long long)m_Num[i], (unsigned long long)m_Num[i]);
         break;
       case 8:
-        snprintf(buf, bufSize, "Value = %u (0x016%x)\n", m_Num[i], m_Num[i]);
+        snprintf(buf, bufSize, "Value = %llu (0x%016llx)\n", (unsigned long long)m_Num[i], (unsigned long long)m_Num[i]);
         break;
       default:
-        snprintf(buf, bufSize, "Value = %u (0x%x)\n", m_Num[i], m_Num[i]);
+        snprintf(buf, bufSize, "Value = %llu (0x%llx)\n", (unsigned long long)m_Num[i], (unsigned long long)m_Num[i]);
         break;
       }
       sDescription += buf;
@@ -5972,15 +6551,15 @@ icValidateStatus CIccTagNum<T, Tsig>::Validate(std::string sigPath, std::string 
 {
   icValidateStatus rv = icValidateOK;
   //Check # of channels 
-  if (icGetFirstSigPathSig(sigPath) == icSigMaterialDefaultValuesTag && 
+  if (icGetFirstSigPathSig(sigPath) == icSigMultiplexDefaultValuesTag && 
       pProfile &&
-      m_nSize != icGetMaterialColorSpaceSamples(pProfile->m_Header.mcs)) {
+      m_nSize != icGetMultiplexColorSpaceSamples(pProfile->m_Header.mcs)) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(sigPath);
 
     sReport += icMsgValidateCriticalError;
     sReport += sSigPathName;
-    sReport += " - Number of material default values does not match MCS in header.\n";
+    sReport += " - Number of multiplex default values does not match MCS in header.\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
@@ -5997,15 +6576,21 @@ void CIccTagNum<icUInt64Number, icSigUInt64ArrayType>::Describe(std::string &sDe
   icChar buf[bufSize];
 
   if (m_nSize == 1 ) {
-    snprintf(buf, bufSize, "Value = %llu (0x016%llx)\n", m_Num[0], m_Num[0]);
+    snprintf(buf, bufSize, "Value = %llu (0x%016llx)\n", m_Num[0], m_Num[0]);
     sDescription += buf;
   }
   else {
     icUInt32Number i;
+    // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and the
+    // m_Num array is allocated to match; assert an explicit ceiling so a corrupted
+    // count can't drive an unbounded describe walk (icUInt64Array specialization).
+    const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+    if (m_nSize > nMaxNumArrayEntries)
+      return;
     sDescription.reserve(sDescription.size() + m_nSize*79);
 
     for (i=0; i<m_nSize; i++) {
-      snprintf(buf, bufSize, "Value = %llu (0x016%llx)\n", m_Num[i], m_Num[i]);
+      snprintf(buf, bufSize, "Value = %llu (0x%016llx)\n", m_Num[i], m_Num[i]);
       sDescription += buf;
     }
   }
@@ -6032,7 +6617,6 @@ bool CIccTagNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=true*/)
     return true;
 
   m_Num = (T*)icRealloc(m_Num, nSize*sizeof(T));
-
   if (!m_Num) {
     m_nSize = 0;
     return false;
@@ -6060,19 +6644,22 @@ bool CIccTagNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=true*/)
 template <class T, icTagTypeSignature Tsig>
 bool CIccTagNum<T, Tsig>::GetValues(icFloatNumber *DstVector, icUInt32Number nStart, icUInt32Number nVectorSize) const
 {
-  if (nVectorSize+nStart >m_nSize)
+  // CWE-125: overflow-safe bound on both the start offset and the length. The original
+  // "nVectorSize+nStart > m_nSize" can wrap for a huge nStart; this form cannot, and it
+  // subsumes the separate nVectorSize > m_nSize check that followed.
+  if (nVectorSize > m_nSize || nStart > m_nSize - nVectorSize)
     return false;
 
   icUInt32Number i;
   
   switch (Tsig) {
     case icSigUInt8ArrayType:
-      for (i=0; i<m_nSize; i++) {
+      for (i=0; i<nVectorSize; i++) {
         DstVector[i] = icU8toF((icUInt8Number)(m_Num[i+nStart]));
       }
       break;
     case icSigUInt16ArrayType:
-      for (i=0; i<m_nSize; i++) {
+      for (i=0; i<nVectorSize; i++) {
         DstVector[i] = icU16toF((icUInt16Number)(m_Num[i+nStart]));
       }
       break;
@@ -6111,8 +6698,10 @@ template <class T, icTagTypeSignature Tsig>
 bool CIccTagNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumber pos,
                                       icUInt32Number nVectorSize, icFloatNumber *zeroVals) const
 {
-  icUInt32Number nVector = m_nSize / nVectorSize;
+  if (nVectorSize == 0 || m_nSize == 0)
+    return false;
 
+  icUInt32Number nVector = m_nSize / nVectorSize;
   if (!nVector)
     return false;
 
@@ -6158,18 +6747,18 @@ bool CIccTagNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumber po
     case icSigUInt8ArrayType:
       if (!lo) {
         if (zeroVals) {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = zeroVals[i] * (1.0f - x) + icU8toF((icUInt8Number)hi[i]) * x;
           }
         }
         else {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = icU8toF((icUInt8Number)hi[i]) * x;
           }
         }
       }
       else {
-        for (i=0; i<m_nSize; i++) {
+        for (i=0; i<nVectorSize; i++) {
           DstVector[i] = icU8toF((icUInt8Number)lo[i])*(1.0f-x) + icU8toF((icUInt8Number)hi[i])*x;
         }
       }
@@ -6177,18 +6766,18 @@ bool CIccTagNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumber po
     case icSigUInt16ArrayType:
       if (!lo) {
         if (zeroVals) {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = zeroVals[i] * (1.0f - x) + icU16toF((icUInt16Number)hi[i]) * x;
           }
         }
         else {
-          for (i = 0; i < m_nSize; i++) {
+          for (i = 0; i < nVectorSize; i++) {
             DstVector[i] = icU16toF((icUInt16Number)hi[i]) * x;
           }
         }
       }
       else {
-        for (i=0; i<m_nSize; i++) {
+        for (i=0; i<nVectorSize; i++) {
           DstVector[i] = icU16toF((icUInt16Number)lo[i])*(1.0f-x) + icU16toF((icUInt16Number)hi[i])*x;
         }
       }
@@ -6240,6 +6829,13 @@ bool CIccTagNum<T, Tsig>::ValuePos(icFloatNumber &DstPos, icFloatNumber val, boo
     DstPos = val/lv - 1.0f;
     return true;
   }
+
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_Num is
+  // allocated to match; assert an explicit ceiling so a corrupted count can't drive
+  // an unbounded search of the value array below.
+  const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+  if (m_nSize > nMaxNumArrayEntries)
+    return false;
 
   icUInt32Number i;
   for (i=1; i<m_nSize; i++, lv=nv) {
@@ -6313,6 +6909,8 @@ CIccTagFloatNum<T, Tsig>::CIccTagFloatNum(int nSize/*=1*/)
   if (m_nSize <1)
     m_nSize = 1;
   m_Num = (T*)calloc(nSize, sizeof(T));
+  if (!m_Num)
+    m_nSize = 0;
 }
 
 
@@ -6332,7 +6930,10 @@ CIccTagFloatNum<T, Tsig>::CIccTagFloatNum(const CIccTagFloatNum<T, Tsig> &ITNum)
   m_nSize = ITNum.m_nSize;
 
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  else
+    m_nSize = 0;
 }
 
 
@@ -6355,7 +6956,10 @@ CIccTagFloatNum<T, Tsig> &CIccTagFloatNum<T, Tsig>::operator=(const CIccTagFloat
   m_nSize = ITNum.m_nSize;
 
   m_Num = (T*)calloc(m_nSize, sizeof(T));
-  memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  if (m_Num)
+    memcpy(m_Num, ITNum.m_Num, m_nSize * sizeof(T));
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -6373,8 +6977,7 @@ CIccTagFloatNum<T, Tsig> &CIccTagFloatNum<T, Tsig>::operator=(const CIccTagFloat
 template <class T, icTagTypeSignature Tsig>
 CIccTagFloatNum<T, Tsig>::~CIccTagFloatNum()
 {
-  if (m_Num)
-    free(m_Num);
+  free(m_Num);
 }
 
 /**
@@ -6389,7 +6992,7 @@ template <class T, icTagTypeSignature Tsig>
 const icChar *CIccTagFloatNum<T, Tsig>::GetClassName() const
 {
   if (Tsig==icSigFloat16ArrayType)
-    return "CIccFlaot16";
+    return "CIccFloat16";
   if (Tsig==icSigFloat32ArrayType)
     return "CIccFloat32";
   else if (Tsig==icSigFloat64ArrayType)
@@ -6555,14 +7158,21 @@ void CIccTagFloatNum<T, Tsig>::Describe(std::string &sDescription, int /* nVerbo
     icUInt32Number i, n;
     sDescription.reserve(sDescription.size() + m_nSize*79);
 
-    snprintf(buf, bufSize, "Begin_Value_Array[%d]\n", m_nSize);
+    snprintf(buf, bufSize, "Begin_Value_Array[%u]\n", (unsigned int) m_nSize);
     sDescription += buf;
 
     if (sizeof(T)!=8)
       n=8;
     else
       n=4;
-    
+
+    // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and the
+    // m_Num array is allocated to match; assert an explicit ceiling so a corrupted
+    // count can't drive an unbounded describe walk over the value array.
+    const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+    if (m_nSize > nMaxNumArrayEntries)
+      return;
+
     for (i=0; i<m_nSize; i++) {
       if (i&& !(i%n))
         sDescription += "\n";
@@ -6604,7 +7214,6 @@ bool  CIccTagFloatNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=tr
     return true;
 
   m_Num = (T*)icRealloc(m_Num, nSize*sizeof(T));
-
   if (!m_Num) {
     m_nSize = 0;
     return false;
@@ -6632,7 +7241,15 @@ bool  CIccTagFloatNum<T, Tsig>::SetSize(icUInt32Number nSize, bool bZeroNew/*=tr
 template <class T, icTagTypeSignature Tsig>
 bool CIccTagFloatNum<T, Tsig>::GetValues(icFloatNumber *DstVector, icUInt32Number nStart, icUInt32Number nVectorSize) const
 {
-  if (nVectorSize > m_nSize)
+  // CWE-125: bound the SOURCE read as well as the destination length. The original
+  // check guarded only nVectorSize (the output write below), so a non-zero nStart let
+  // m_Num[i+nStart] read past the end of the array when nStart+nVectorSize > m_nSize
+  // (e.g. CIccArrayNamedColor::FindPcsColor passes a fixed nVectorSize=3 while nStart
+  // steps by the device-sample count, over-reading on <3-channel device data).
+  // Written nStart > m_nSize - nVectorSize rather than nStart+nVectorSize > m_nSize so
+  // the sum cannot wrap (both operands are icUInt32Number); nVectorSize > m_nSize is
+  // tested first so the subtraction never underflows.
+  if (nVectorSize > m_nSize || nStart > m_nSize - nVectorSize)
     return false;
 
   icUInt32Number i;
@@ -6660,15 +7277,15 @@ icValidateStatus CIccTagFloatNum<T, Tsig>::Validate(std::string sigPath, std::st
 {
   icValidateStatus rv = icValidateOK;
   //Check # of channels 
-  if (icGetFirstSigPathSig(sigPath) == icSigMaterialDefaultValuesTag && 
+  if (icGetFirstSigPathSig(sigPath) == icSigMultiplexDefaultValuesTag && 
     pProfile &&
-    m_nSize != icGetMaterialColorSpaceSamples(pProfile->m_Header.mcs)) {
+    m_nSize != icGetMultiplexColorSpaceSamples(pProfile->m_Header.mcs)) {
       CIccInfo Info;
       std::string sSigPathName = Info.GetSigPathName(sigPath);
 
       sReport += icMsgValidateCriticalError;
       sReport += sSigPathName;
-      sReport += " - Number of material default values does not match MCS in header.\n";
+      sReport += " - Number of multiplex default values does not match MCS in header.\n";
       rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
@@ -6694,8 +7311,10 @@ template <class T, icTagTypeSignature Tsig>
 bool CIccTagFloatNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumber pos,
                                       icUInt32Number nVectorSize, icFloatNumber *zeroVals) const
 {
-  icUInt32Number nVector = m_nSize / nVectorSize;
+  if (nVectorSize == 0 || m_nSize == 0)
+    return false;
 
+  icUInt32Number nVector = m_nSize / nVectorSize;
   if (!nVector)
     return false;
 
@@ -6744,7 +7363,7 @@ bool CIccTagFloatNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumb
   if (!lo) {
     if (zeroVals) {
       for (i = 0; i < nVectorSize; i++) {
-        DstVector[i] = (icFloatNumber)(zeroVals[i] * invx + hi[i] * x);
+        DstVector[i] = (icFloatNumber)((double)zeroVals[i] * (double)invx + (double)hi[i] * (double)x);
       }
     }
     else {
@@ -6755,7 +7374,7 @@ bool CIccTagFloatNum<T, Tsig>::Interpolate(icFloatNumber *DstVector, icFloatNumb
   }
   else {
     for (i=0; i<nVectorSize; i++) {
-      DstVector[i] = (icFloatNumber)(lo[i]*invx + hi[i]*x);
+      DstVector[i] = (icFloatNumber)((double)lo[i] * (double)invx + (double)hi[i] * (double)x);
     }
   }
   return true;
@@ -6791,6 +7410,13 @@ bool CIccTagFloatNum<T, Tsig>::ValuePos(icFloatNumber &DstPos, icFloatNumber val
     DstPos = val/lv - 1.0f;
     return true;
   }
+
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_Num is
+  // allocated to match; assert an explicit ceiling so a corrupted count can't drive
+  // an unbounded search of the value array below.
+  const icUInt32Number nMaxNumArrayEntries = 0xffffff;
+  if (m_nSize > nMaxNumArrayEntries)
+    return false;
 
   icUInt32Number i;
   for (i=1; i<m_nSize; i++, lv=nv) {
@@ -7062,7 +7688,9 @@ icValidateStatus CIccTagMeasurement::Validate(std::string sigPath, std::string &
 CIccLocalizedUnicode::CIccLocalizedUnicode()
 {
   m_pBuf = (icUInt16Number*)malloc(1*sizeof(icUInt16Number));
-  *m_pBuf = 0;
+  if (m_pBuf)
+    *m_pBuf = 0;
+
   m_nLength = 0;
   m_nLanguageCode = icLanguageCodeEnglish;
   m_nCountryCode = icCountryCodeUSA;
@@ -7083,10 +7711,15 @@ CIccLocalizedUnicode::CIccLocalizedUnicode(const CIccLocalizedUnicode& ILU)
 {
   m_nLength = ILU.GetLength();
   m_pBuf = (icUInt16Number*)malloc((m_nLength+2) * sizeof(icUInt16Number));
-  if (m_nLength)
-    memcpy(m_pBuf, ILU.GetBuf(), m_nLength*sizeof(icUInt16Number));
-  m_pBuf[m_nLength] = 0;    // safety against malformed unicode
-  m_pBuf[m_nLength+1] = 0;  // safety against malformed unicode
+  if (m_pBuf) {
+    if (m_nLength)
+      memcpy(m_pBuf, ILU.GetBuf(), m_nLength*sizeof(icUInt16Number));
+    m_pBuf[m_nLength] = 0;    // safety against malformed unicode
+    m_pBuf[m_nLength+1] = 0;  // safety against malformed unicode
+  }
+  else
+    m_nLength = 0;
+
   m_nLanguageCode = ILU.m_nLanguageCode;
   m_nCountryCode = ILU.m_nCountryCode;
 }
@@ -7127,8 +7760,36 @@ CIccLocalizedUnicode &CIccLocalizedUnicode::operator=(const CIccLocalizedUnicode
  */
 CIccLocalizedUnicode::~CIccLocalizedUnicode()
 {
-  if (m_pBuf)
-    free(m_pBuf);
+  free(m_pBuf);
+}
+
+static bool icIsValidUtf16(const icUInt16Number *pBuf, icUInt32Number nLength)
+{
+  if (!pBuf && nLength)
+    return false;
+
+  for (icUInt32Number i=0; i<nLength; i++) {
+    icUInt16Number ch = pBuf[i];
+
+    if (ch >= 0xD800 && ch <= 0xDBFF) {
+      if (i + 1 >= nLength)
+        return false;
+      icUInt16Number low = pBuf[i + 1];
+      if (low < 0xDC00 || low > 0xDFFF)
+        return false;
+      i++;
+    }
+    else if (ch >= 0xDC00 && ch <= 0xDFFF) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static void icAppendUtf8Byte(std::string &sText, icUInt32Number nByte)
+{
+  sText.push_back(static_cast<char>(nByte & 0xffu));
 }
 
 /**
@@ -7171,7 +7832,7 @@ const icChar *CIccLocalizedUnicode::GetUtf8(icChar *szBuf, icUInt32Number nBufSi
 
   if (nBufSize - 1 < str.size()) {
     memcpy(szBuf, str.c_str(), nBufSize - 1);
-    szBuf[nBufSize] = 0;
+    szBuf[nBufSize - 1] = 0;
   }
   else {
     strcpy(szBuf, str.c_str());
@@ -7195,9 +7856,12 @@ bool CIccLocalizedUnicode::GetText(std::string &sText)
 {
   sText.clear();
 
+  if (!m_pBuf)
+    return m_nLength == 0;
+
   icUInt16Number* str = m_pBuf;
   icUInt16Number *str_end = m_pBuf + m_nLength;
-  while ( (str < str_end) && *str ) {
+  while (str < str_end) {
     icUInt32Number code32 = 0x0;
 
     //UTF-16 to UTF-32
@@ -7207,35 +7871,39 @@ bool CIccLocalizedUnicode::GetText(std::string &sText)
       str++;
     }
     else if (*str <= 0xDBFF) {
-      icUInt16Number high = (*str - 0xD800) * 0x400;
-      icUInt16Number low = *(str + 1) - 0xDC00;
+      if (str + 1 >= str_end || str[1] < 0xDC00 || str[1] > 0xDFFF) {
+        sText.clear();
+        return false;
+      }
+      icUInt32Number high = (*str - 0xD800) * 0x400u;
+      icUInt32Number low = str[1] - 0xDC00u;
       code32 = (low | high) + 0x10000;
       str += 2;
     }
     else {  //range dc00-dfff should only occur after a d800-dbfff
-      str++;
-      continue;
+      sText.clear();
+      return false;
     }
 
     //UTF-32 to UTF-8 -------
 
     if (code32 <= 0x007F) {
-      sText += (unsigned char)code32;
+      icAppendUtf8Byte(sText, code32);
     }
     else if (code32 <= 0x07FF) {
-      sText += (unsigned char)(((code32 >> 6) & 0x1F) | 0xC0);
-      sText += (unsigned char)((code32 & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, ((code32 >> 6) & 0x1F) | 0xC0);
+      icAppendUtf8Byte(sText, (code32 & 0x3F) | 0x80);
     }
     else if (code32 <= 0xFFFF) {
-      sText += (unsigned char)(((code32 >> 12) & 0x0F) | 0xE0);
-      sText += (unsigned char)(((code32 >> 6) & 0x3F) | 0x80);
-      sText += (unsigned char)(((code32) & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, ((code32 >> 12) & 0x0F) | 0xE0);
+      icAppendUtf8Byte(sText, ((code32 >> 6) & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, (code32 & 0x3F) | 0x80);
     }
     else if (code32 <= 0x10FFFF) {
-      sText += (unsigned char)(((code32 >> 18) & 0x07) | 0xF0);
-      sText += (unsigned char)(((code32 >> 12) & 0x3F) | 0x80);
-      sText += (unsigned char)(((code32 >> 6) & 0x3F) | 0x80);
-      sText += (unsigned char)(((code32) & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, ((code32 >> 18) & 0x07) | 0xF0);
+      icAppendUtf8Byte(sText, ((code32 >> 12) & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, ((code32 >> 6) & 0x3F) | 0x80);
+      icAppendUtf8Byte(sText, (code32 & 0x3F) | 0x80);
     }
   }
 
@@ -7259,8 +7927,20 @@ bool CIccLocalizedUnicode::SetSize(icUInt32Number nSize)
   if (nSize == m_nLength)
     return true;
 
-  m_pBuf = (icUInt16Number*)icRealloc(m_pBuf, (nSize+2)*sizeof(icUInt16Number));
+  // Refuse pathologically large sizes. An ICC profile can never
+  // legitimately require more than 16M UTF-16 code units in a single
+  // localised record. Capping here also prevents the (nSize+2)*2
+  // multiplication from wrapping u32 (which on the old code path
+  // fed icRealloc a tiny allocation, then m_pBuf[nSize]=0 wrote far
+  // past the end of the returned buffer).
+  static const icUInt32Number kMaxUnicodeChars = 16u * 1024u * 1024u;
+  if (nSize > kMaxUnicodeChars) {
+    return false;
+  }
 
+  // Do the size math in 64-bit defensively, even with the cap above.
+  size_t nBytes = (static_cast<size_t>(nSize) + 2u) * sizeof(icUInt16Number);
+  m_pBuf = (icUInt16Number*)icRealloc(m_pBuf, nBytes);
   if (!m_pBuf) {
     m_nLength = 0;
     return false;
@@ -7300,7 +7980,7 @@ bool CIccLocalizedUnicode::SetText(const icChar *szText,
   {
     unsigned long uni;
     size_t todo;
-    unsigned char ch = szText[i++];
+    unsigned char ch = static_cast<unsigned char>(szText[i++]);
     if (ch <= 0x7F)
     {
       uni = ch;
@@ -7340,13 +8020,14 @@ bool CIccLocalizedUnicode::SetText(const icChar *szText,
         break;
       }
       else {
-        unsigned char ch2 = szText[i];
+        unsigned char ch2 = static_cast<unsigned char>(szText[i]);
         if (ch2 < 0x80 || ch2 > 0xBF) {
           //not a UTF-8 string so use question mark
           uni = '?';
           break;
         }
         else {
+          i++;
           uni <<= 6;
           uni += ch2 & 0x3F;
         }
@@ -7383,7 +8064,10 @@ bool CIccLocalizedUnicode::SetText(const icChar *szText,
   icUInt16Number *pBuf;
 
   size_t len = utf16.size();
-  if (!SetSize((icUInt32Number)len+1))
+  if (len > (size_t)((icUInt32Number)-1))
+    return false;
+
+  if (!SetSize((icUInt32Number)len))
     return false;
   
   pBuf = m_pBuf;
@@ -7415,18 +8099,32 @@ bool CIccLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Text,
                                    icCountryCode nRegionCode/* = icCountryCodeUSA*/)
 {
   icUInt16Number empty[1] = { 0 };
-
   if (!sszUnicode16Text)
     sszUnicode16Text = &empty[0];
 
   const icUInt16Number *pBuf=sszUnicode16Text;
-  int len;
+  icUInt32Number len;
 
   for (len=0; *pBuf; len++, pBuf++);
 
-  if (!SetSize(len+1))
+  return SetText(sszUnicode16Text, len, nLanguageCode, nRegionCode);
+}
+
+bool CIccLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Text,
+                                   icUInt32Number nLength,
+                                   icLanguageCode nLanguageCode/* = icLanguageCodeEnglish*/,
+                                   icCountryCode nRegionCode/* = icCountryCodeUSA*/)
+{
+  if (!sszUnicode16Text && nLength)
     return false;
-  memcpy(m_pBuf, sszUnicode16Text, (len+1)*sizeof(icUInt16Number));
+
+  if (sszUnicode16Text && !icIsValidUtf16(sszUnicode16Text, nLength))
+    return false;
+
+  if (!SetSize(nLength))
+    return false;
+  if (nLength)
+    memcpy(m_pBuf, sszUnicode16Text, nLength*sizeof(icUInt16Number));
 
   m_nLanguageCode = nLanguageCode;
   m_nCountryCode = nRegionCode;
@@ -7600,8 +8298,24 @@ bool CIccTagMultiLocalizedUnicode::Read(icUInt32Number size, CIccIO *pIO)
   CIccLocalizedUnicode Unicode;
   icUInt32Number nLastPos = 0;
 
+  // Hard-cap nNumRec so we neither loop forever nor overflow the bounds
+  // arithmetic below. 65536 localized records is already well beyond any
+  // plausible legitimate profile.
+  if (nNumRec > 65536u)
+    return false;
+
+  icUInt64Number nStringDataStart =
+      static_cast<icUInt64Number>(4u * sizeof(icUInt32Number)) +
+      static_cast<icUInt64Number>(nNumRec) * nRecSize;
+  if (nStringDataStart > size)
+    return false;
+
   for (i=0; i<nNumRec; i++) {
-    if (4*sizeof(icUInt32Number) + (i+1)*12 > size)
+    // 64-bit widened bounds check: 4*4 header + (i+1)*12 records.
+    icUInt64Number headerAndRecords =
+        static_cast<icUInt64Number>(4u * sizeof(icUInt32Number)) +
+        (static_cast<icUInt64Number>(i) + 1u) * 12u;
+    if (headerAndRecords > size)
       return false;
 
     pIO->Seek(nTagPos+4*sizeof(icUInt32Number) + i*12, icSeekSet);
@@ -7611,8 +8325,16 @@ bool CIccTagMultiLocalizedUnicode::Read(icUInt32Number size, CIccIO *pIO)
         !pIO->Read32(&nLength) ||
         !pIO->Read32(&nOffset))
       return false;
-    
-    if (nOffset+nLength > size)
+
+    if (nLength % sizeof(icUInt16Number))
+      return false;
+
+    if (nLength && static_cast<icUInt64Number>(nOffset) < nStringDataStart)
+      return false;
+
+    // 64-bit widened bounds check for the per-record string blob.
+    if (static_cast<icUInt64Number>(nOffset) +
+        static_cast<icUInt64Number>(nLength) > size)
       return false;
 
     //Find out position of the end of last named record
@@ -7630,6 +8352,9 @@ bool CIccTagMultiLocalizedUnicode::Read(icUInt32Number size, CIccIO *pIO)
     pIO->Seek(nTagPos+nOffset, icSeekSet);
 
     if (pIO->Read16(Unicode.GetBuf(), nNumChar) != nNumChar)
+      return false;
+
+    if (!icIsValidUtf16(Unicode.GetBuf(), Unicode.GetLength()))
       return false;
 
     m_Strings->push_back(Unicode);
@@ -7787,8 +8512,40 @@ icValidateStatus CIccTagMultiLocalizedUnicode::Validate(std::string sigPath, std
 
   CIccMultiLocalizedUnicode::iterator i;
   for (i=m_Strings->begin(); i!=m_Strings->end(); i++) {
-    // TODO: Validate ISO-639 Language Codes and and ISO-3166 Country codes.
-    // Needs to be done against a full set of codes or many false warnings.
+    if (!icIsIsoLowerAlpha2(i->m_nLanguageCode)) {
+      icAppendMlucIsoWarning(sReport, sSigPathName,
+                             "Malformed ISO-639 language code",
+                             i->m_nLanguageCode);
+      rv = icMaxStatus(rv, icValidateWarning);
+    }
+    else if (!icIsKnownIso639Alpha2(i->m_nLanguageCode)) {
+      icAppendMlucIsoWarning(sReport, sSigPathName,
+                             "Unknown ISO-639 language code",
+                             i->m_nLanguageCode);
+      rv = icMaxStatus(rv, icValidateWarning);
+    }
+
+    if (i->m_nCountryCode) {
+      if (!icIsIsoUpperAlpha2(i->m_nCountryCode)) {
+        icAppendMlucIsoWarning(sReport, sSigPathName,
+                               "Malformed ISO-3166 country code",
+                               i->m_nCountryCode);
+        rv = icMaxStatus(rv, icValidateWarning);
+      }
+      else if (!icIsKnownIso3166Alpha2(i->m_nCountryCode)) {
+        icAppendMlucIsoWarning(sReport, sSigPathName,
+                               "Unknown ISO-3166 country code",
+                               i->m_nCountryCode);
+        rv = icMaxStatus(rv, icValidateWarning);
+      }
+    }
+
+    if (!icIsValidUtf16(i->GetBuf(), i->GetLength())) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Invalid UTF-16 string data.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
   }
 
   return rv;
@@ -7865,7 +8622,20 @@ void CIccTagMultiLocalizedUnicode::SetText(const icChar *szText,
 *  RegionCode
 *****************************************************************************
 */
-void CIccTagMultiLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Text, 
+bool CIccTagMultiLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Text,
+                                           icLanguageCode nLanguageCode /* = icLanguageCodeEnglish */,
+                                           icCountryCode nRegionCode /* = icCountryCodeUSA */)
+{
+  const icUInt16Number *pBuf = sszUnicode16Text;
+  icUInt32Number len = 0;
+  if (pBuf) {
+    for (; *pBuf; len++, pBuf++);
+  }
+  return SetText(sszUnicode16Text, len, nLanguageCode, nRegionCode);
+}
+
+bool CIccTagMultiLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Text,
+                                           icUInt32Number nLength,
                                            icLanguageCode nLanguageCode /* = icLanguageCodeEnglish */,
                                            icCountryCode nRegionCode /* = icCountryCodeUSA */)
 {
@@ -7873,12 +8643,15 @@ void CIccTagMultiLocalizedUnicode::SetText(const icUInt16Number *sszUnicode16Tex
 
   if (!pText) {
     CIccLocalizedUnicode newText;
-    newText.SetText(sszUnicode16Text, nLanguageCode, nRegionCode);
+    if (!newText.SetText(sszUnicode16Text, nLength, nLanguageCode, nRegionCode))
+      return false;
     m_Strings->push_back(newText);
   }
   else {
-    pText->SetText(sszUnicode16Text, nLanguageCode, nRegionCode);
+    if (!pText->SetText(sszUnicode16Text, nLength, nLanguageCode, nRegionCode))
+      return false;
   }
+  return true;
 }
 
 /**
@@ -7931,6 +8704,8 @@ CIccTagData::CIccTagData(int nSize/*=1*/)
   if (m_nSize <1)
     m_nSize = 1;
   m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  if (!m_pData)
+    m_nSize = 0;
   m_nDataFlag = icAsciiData;
 }
 
@@ -7951,7 +8726,10 @@ CIccTagData::CIccTagData(const CIccTagData &ITD)
   m_nSize = ITD.m_nSize;
 
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, ITD.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, ITD.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 }
 
 
@@ -7973,10 +8751,12 @@ CIccTagData &CIccTagData::operator=(const CIccTagData &DataTag)
   m_nDataFlag = DataTag.m_nDataFlag;
   m_nSize = DataTag.m_nSize;
 
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, DataTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, DataTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -7992,8 +8772,7 @@ CIccTagData &CIccTagData::operator=(const CIccTagData &DataTag)
  */
 CIccTagData::~CIccTagData()
 {
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
 }
 
 
@@ -8043,7 +8822,62 @@ bool CIccTagData::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   if (IsTypeCompressed()) {
-    //Uncompress data here
+#ifdef ICC_USE_ZLIB
+    // The on-disk payload of a compressed dataType tag (icCompressedData flag set)
+    // is a zlib stream. Inflate it here so the in-memory m_pData holds the plaintext
+    // the accessors (GetData/operator[]/Describe) expect; Write() re-deflates it
+    // symmetrically. On a build without zlib the block is compiled out, so the raw
+    // compressed bytes are left in m_pData and Write() re-emits them unchanged
+    // (lossless pass-through rather than corrupting or dropping the tag).
+    if (nNum) {
+      z_stream zstr;
+      memset(&zstr, 0, sizeof(zstr));
+
+      if (inflateInit(&zstr) != Z_OK)
+        return false;
+
+      zstr.next_in = (Bytef*)m_pData;
+      zstr.avail_in = nNum;
+
+      // CWE-400: cap the inflated size so a small zlib "bomb" payload cannot drive an
+      // unbounded allocation; mirrors the Describe() ceiling on tag data bytes.
+      const icUInt32Number nMaxInflatedBytes = 0x10000000;
+      icUtf8Vector out;
+      icUtf8Vector buf(32768);
+      int zstat;
+
+      do {
+        zstr.next_out = buf.data();
+        zstr.avail_out = (uInt)buf.size();
+
+        zstat = inflate(&zstr, Z_SYNC_FLUSH);
+
+        if (zstat != Z_OK && zstat != Z_STREAM_END) {
+          inflateEnd(&zstr);
+          return false;
+        }
+
+        size_t n = buf.size() - zstr.avail_out;
+        if (out.size() + n > nMaxInflatedBytes) {
+          inflateEnd(&zstr);
+          return false;
+        }
+        out.insert(out.end(), buf.begin(), buf.begin() + n);
+      } while (zstat != Z_STREAM_END);
+
+      inflateEnd(&zstr);
+
+      // Replace the compressed bytes with the decompressed payload. Allocate at least
+      // one byte so SetSize never hits a realloc-to-zero; m_nSize tracks the logical
+      // length, which may legitimately be 0 for an empty tag.
+      icUInt32Number nOut = (icUInt32Number)out.size();
+      if (!SetSize(nOut ? nOut : 1, false))
+        return false;
+      if (nOut)
+        memcpy(m_pData, &out[0], nOut);
+      m_nSize = nOut;
+    }
+#endif
   }
 
   return true;
@@ -8079,19 +8913,55 @@ bool CIccTagData::Write(CIccIO *pIO)
   if (!pIO->Write32(&m_nDataFlag))
     return false;
 
+#ifdef ICC_USE_ZLIB
   if (IsTypeCompressed()) {
-    icUInt32Number *pData = NULL;
-    size_t nSize = 0;
+    // Symmetric with Read(): m_pData holds the plaintext, so deflate it back into the
+    // zlib stream that belongs on disk for a compressed dataType tag. The enclosing
+    // tag-directory writer sizes the tag from the bytes actually written here, so the
+    // compressed length (!= m_nSize) is recorded correctly (same model as
+    // CIccTagZipUtf8Text::Write).
+    z_stream zstr;
+    memset(&zstr, 0, sizeof(zstr));
 
-// TODO, UNFINISHED - Compress data here
+    if (deflateInit(&zstr, Z_DEFAULT_COMPRESSION) != Z_OK)
+      return false;
 
-    if (pIO->Write8(pData, nSize) != nSize)
+    zstr.next_in = (Bytef*)m_pData;
+    zstr.avail_in = m_nSize;
+
+    icUtf8Vector compress;
+    icUtf8Vector buf(32768);
+    int zstat;
+
+    do {
+      zstr.next_out = buf.data();
+      zstr.avail_out = (uInt)buf.size();
+
+      zstat = deflate(&zstr, Z_FINISH);
+
+      if (zstat != Z_OK && zstat != Z_STREAM_END) {
+        deflateEnd(&zstr);
+        return false;
+      }
+
+      size_t n = buf.size() - zstr.avail_out;
+      compress.insert(compress.end(), buf.begin(), buf.begin() + n);
+    } while (zstat != Z_STREAM_END);
+
+    deflateEnd(&zstr);
+
+    size_t nCompSize = compress.size();
+    if (nCompSize && pIO->Write8(&compress[0], nCompSize) != nCompSize)
       return false;
+
+    return true;
   }
-  else {
-    if (pIO->Write8(m_pData, m_nSize) != m_nSize)
-      return false;
-  }
+#endif
+
+  // Uncompressed data, or a compressed tag on a non-zlib build where m_pData still
+  // holds the original on-disk compressed bytes (lossless pass-through).
+  if (pIO->Write8(m_pData, m_nSize) != m_nSize)
+    return false;
 
   return true;
 }
@@ -8112,27 +8982,39 @@ void CIccTagData::Describe(std::string &sDescription, int /* nVerboseness */)
   const size_t bufSize = 128;
   icChar buf[bufSize];
 
+  // CWE-400/CWE-834: m_nSize is the data byte count derived from the tag byte size
+  // in Read() and m_pData is allocated to match; assert an explicit ceiling so a
+  // corrupted size can't drive either of the per-byte describe walks below
+  // (Ascii and UTF-8 branches) past a sane limit.
+  const icUInt32Number nMaxTagDataBytes = 0x10000000;
+  if (m_nSize > nMaxTagDataBytes)
+    return;
+
   sDescription = "\n";
   if (IsTypeCompressed())
     sDescription += "Compressed ";  // If data is compressed, prepend appropriate text
 
+  // Each branch below must append (+=) rather than assign (=): assigning would
+  // overwrite the leading newline and, more importantly, the "Compressed " marker
+  // set just above, so a compressed data tag would never be labelled as such in
+  // any dump. Keep the "\n"/"Compressed " prefix and add the data-kind label to it.
   if (IsTypeAscii()) {
-    sDescription = "Ascii Data:\n";
+    sDescription += "Ascii Data:\n";
 
     for (int i=0; i<(int)m_nSize; i++)
       sDescription += (icChar)m_pData[i];
   }
   else if (IsTypeUtf()) {
-    if (m_nSize>2 && 
+    if (m_nSize>2 &&
         ((m_pData[0]==0xff && m_pData[1]==0xfe) ||  //UTF-16LE
          (m_pData[0]==0xfe && m_pData[1]==0xff))) { //UTF-16BE
       snprintf(buf, bufSize, "UTF-16%s Data:", m_pData[0]==0xff ? "LE" : "BE" );
-      sDescription = buf;
+      sDescription += buf;
 
       icMemDump(sDescription, m_pData, m_nSize);
     }
     else { //UTF-8
-      sDescription = "UTF-8 Data:\n";
+      sDescription += "UTF-8 Data:\n";
 
       for (int i=0; i<(int)m_nSize; i++)
         sDescription += (icChar)m_pData[i];
@@ -8140,10 +9022,10 @@ void CIccTagData::Describe(std::string &sDescription, int /* nVerboseness */)
   }
   else {
     if (IsTypeBinary()) {
-      sDescription = "Binary Data:\n";
+      sDescription += "Binary Data:\n";
     }
     else {
-      sDescription = "Other Data:\n";
+      sDescription += "Other Data:\n";
     }
 
     icMemDump(sDescription, m_pData, m_nSize);
@@ -8168,7 +9050,6 @@ bool CIccTagData::SetSize(icUInt32Number nSize, bool bZeroNew/*=true*/)
     return true;
 
   m_pData = (icUInt8Number*)icRealloc(m_pData, nSize*sizeof(icUInt8Number));
-
   if (!m_pData) {
     m_nSize = 0;
     return false;
@@ -8203,6 +9084,17 @@ icValidateStatus CIccTagData::Validate(std::string sigPath, std::string &sReport
 
   CIccInfo Info;
   std::string sSigPathName = Info.GetSigPathName(sigPath);
+
+  // CWE-400/CWE-834: m_nSize is the data byte count derived from the tag byte size
+  // in Read() and m_pData is allocated to match; assert an explicit ceiling so a
+  // corrupted size can't drive the per-byte Ascii scan below past a sane limit.
+  const icUInt32Number nMaxTagDataBytes = 0x10000000;
+  if (m_nSize > nMaxTagDataBytes) {
+    sReport += icMsgValidateCriticalError;
+    sReport += sSigPathName;
+    sReport += " - Data size exceeds sane maximum.\n";
+    return icMaxStatus(rv, icValidateCriticalError);
+  }
 
   // Mask bits to match processing in Describe() so warnings are appropriate
   switch(m_nDataFlag&(icCompressedData|icDataTypeMask)) {
@@ -8455,6 +9347,8 @@ CIccTagColorantOrder::CIccTagColorantOrder(int nsize/*=1*/)
   if (m_nCount <1)
     m_nCount = 1;
   m_pData = (icUInt8Number*)calloc(nsize, sizeof(icUInt8Number));
+  if (!m_pData)
+    m_nCount = 0;
 }
 
 
@@ -8474,7 +9368,10 @@ CIccTagColorantOrder::CIccTagColorantOrder(const CIccTagColorantOrder &ITCO)
   m_nCount = ITCO.m_nCount;
 
   m_pData = (icUInt8Number*)calloc(m_nCount, sizeof(icUInt8Number));
-  memcpy(m_pData, ITCO.m_pData, sizeof(icUInt8Number)*m_nCount);
+  if (m_pData)
+    memcpy(m_pData, ITCO.m_pData, sizeof(icUInt8Number)*m_nCount);
+  else
+    m_nCount = 0;
 }
 
 
@@ -8495,10 +9392,12 @@ CIccTagColorantOrder &CIccTagColorantOrder::operator=(const CIccTagColorantOrder
 
   m_nCount = ColorantOrderTag.m_nCount;
 
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
   m_pData = (icUInt8Number*)calloc(m_nCount, sizeof(icUInt8Number));
-  memcpy(m_pData, ColorantOrderTag.m_pData, sizeof(icUInt8Number)*m_nCount);
+  if (m_pData)
+    memcpy(m_pData, ColorantOrderTag.m_pData, sizeof(icUInt8Number)*m_nCount);
+  else
+    m_nCount = 0;
 
   return *this;
 }
@@ -8514,8 +9413,7 @@ CIccTagColorantOrder &CIccTagColorantOrder::operator=(const CIccTagColorantOrder
  */
 CIccTagColorantOrder::~CIccTagColorantOrder()
 {
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
 }
 
 
@@ -8625,12 +9523,19 @@ void CIccTagColorantOrder::Describe(std::string &sDescription, int /* nVerbosene
   const size_t bufSize = 128;
   icChar buf[bufSize];
 
-  snprintf(buf, bufSize, "Colorant Count : %u\n", m_nCount);
+  snprintf(buf, bufSize, "Colorant Count : %u\n", (unsigned int) m_nCount);
   sDescription += buf;
   sDescription += "Order of Colorants:\n";
-  
-  for (int i=0; i<(int)m_nCount; i++) {
-    snprintf(buf, bufSize, "%u\n", m_pData[i]);
+
+  // CWE-400/CWE-834: Read() rejects nCount > the tag size and SetSize() caps the
+  // colorant count at 0xffff, allocating m_pData to match; assert that bound
+  // locally so the describe walk has an explicit upper limit.
+  const icUInt32Number nMaxColorants = 0xffff;
+  if (m_nCount > nMaxColorants)
+    return;
+
+  for (icUInt32Number i=0; i<m_nCount; i++) {
+    snprintf(buf, bufSize, "%u\n", (unsigned int) m_pData[i]);
     sDescription += buf;
   }
 }
@@ -8653,7 +9558,6 @@ bool CIccTagColorantOrder::SetSize(icUInt16Number nSize, bool bZeroNew/*=true*/)
     return true;
 
   m_pData = (icUInt8Number*)icRealloc(m_pData, nSize*sizeof(icUInt8Number));
-
   if (!m_pData) {
     m_nCount = 0;
     return false;
@@ -8698,27 +9602,11 @@ icValidateStatus CIccTagColorantOrder::Validate(std::string sigPath, std::string
     return rv;
   }
 
-  if (sigPath==icGetSigPath(icSigColorantTableTag)) {
-    if (m_nCount != icGetSpaceSamples(pProfile->m_Header.colorSpace)) {
-      sReport += icMsgValidateNonCompliant;
-      sReport += sSigPathName;
-      sReport += " - Incorrect number of colorants.\n";
-      rv = icMaxStatus(rv, icValidateNonCompliant);
-    }
-  }
-  else if (sigPath==icGetSigPath(icSigColorantTableOutTag)) {
-    if (m_nCount != icGetSpaceSamples(pProfile->m_Header.pcs)) {
-      sReport += icMsgValidateNonCompliant;
-      sReport += sSigPathName;
-      sReport += " - Incorrect number of colorants.\n";
-      rv = icMaxStatus(rv, icValidateNonCompliant);
-    }
-  }
-  else {
-    sReport += icMsgValidateWarning;
+  if (m_nCount != icGetSpaceSamples(pProfile->m_Header.colorSpace)) {
+    sReport += icMsgValidateNonCompliant;
     sReport += sSigPathName;
-    sReport += " - Unknown number of required colorants.\n";
-    rv = icMaxStatus(rv, icValidateWarning);
+    sReport += " - Incorrect number of colorants.\n";
+    rv = icMaxStatus(rv, icValidateNonCompliant);
   }
 
   return rv;
@@ -8744,6 +9632,8 @@ CIccTagColorantTable::CIccTagColorantTable(int nSize/*=1*/)
     m_nCount = 1;
 
   m_pData = (icColorantTableEntry*)calloc(nSize, sizeof(icColorantTableEntry));
+  if (!m_pData)
+    m_nCount = 0;
 }
 
 
@@ -8763,7 +9653,10 @@ CIccTagColorantTable::CIccTagColorantTable(const CIccTagColorantTable &ITCT)
   m_nCount = ITCT.m_nCount;
 
   m_pData = (icColorantTableEntry*)calloc(m_nCount, sizeof(icColorantTableEntry));
-  memcpy(m_pData, ITCT.m_pData, m_nCount*sizeof(icColorantTableEntry));
+  if (m_pData)
+    memcpy(m_pData, ITCT.m_pData, m_nCount*sizeof(icColorantTableEntry));
+  else
+    m_nCount = 0;
 }
 
 
@@ -8785,10 +9678,12 @@ CIccTagColorantTable &CIccTagColorantTable::operator=(const CIccTagColorantTable
   m_PCS = ColorantTableTag.m_PCS;
   m_nCount = ColorantTableTag.m_nCount;
 
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
   m_pData = (icColorantTableEntry*)calloc(m_nCount, sizeof(icColorantTableEntry));
-  memcpy(m_pData, ColorantTableTag.m_pData, m_nCount*sizeof(icColorantTableEntry));
+  if (m_pData)
+    memcpy(m_pData, ColorantTableTag.m_pData, m_nCount*sizeof(icColorantTableEntry));
+  else
+    m_nCount = 0;
 
   return *this;
 }
@@ -8804,8 +9699,7 @@ CIccTagColorantTable &CIccTagColorantTable::operator=(const CIccTagColorantTable
  */
 CIccTagColorantTable::~CIccTagColorantTable()
 {
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
 }
 
 
@@ -8860,6 +9754,7 @@ bool CIccTagColorantTable::Read(icUInt32Number size, CIccIO *pIO)
   for (icUInt32Number i=0; i<nCount; i++) {
     if (pIO->Read8(&m_pData[i].name[0], nNum8) != nNum8)
       return false;
+    m_pData[i].name[nNum8-1] = '\0';  // CFL-001: Ensure null-termination (CWE-170)
 
     if (pIO->Read16(&m_pData[i].data[0], nNum16) != nNum16)
       return false;
@@ -8901,6 +9796,12 @@ bool CIccTagColorantTable::Write(CIccIO *pIO)
   size_t nNum8 = sizeof(m_pData->name);
   size_t nNum16 = sizeof(m_pData->data)/sizeof(icUInt16Number);
 
+  // CWE-400/CWE-834: Read() rejects nCount > 0xffff and sizes m_pData to match;
+  // assert the same ceiling on m_nCount here so an object whose count was corrupted
+  // through another path can't drive an unbounded write walk over m_pData.
+  if (m_nCount > 0xffff)
+    return false;
+
   for (icUInt32Number i=0; i<m_nCount; i++) {
     if (pIO->Write8(&m_pData[i].name[0],nNum8) != nNum8)
       return false;
@@ -8931,10 +9832,21 @@ void CIccTagColorantTable::Describe(std::string &sDescription, int /* nVerbosene
   icUInt32Number i, nLen, nMaxLen=0;
   icFloatNumber Lab[3] = {0};
 
-  snprintf(buf, bufSize, "BEGIN_COLORANTS %u\n", m_nCount);
+  // CWE-400/CWE-834: m_nCount is validated against the tag size and capped at
+  // 0xffff in Read(), and m_pData is allocated to match. Guard here so a
+  // corrupted/directly-constructed table can't drive an unbounded describe loop
+  // or dereference a null array.
+  const icUInt32Number nMaxColorants = 0xffff;
+  icUInt32Number nCount = m_nCount;
+  if (!m_pData)
+    nCount = 0;
+  else if (nCount > nMaxColorants)
+    nCount = nMaxColorants;
+
+  snprintf(buf, bufSize, "BEGIN_COLORANTS %u\n", (unsigned int) m_nCount);
   sDescription += buf;
 
-  for (i=0; i<m_nCount; i++) {
+  for (i=0; i<nCount; i++) {
     nLen = (icUInt32Number)strlen(m_pData[i].name);
     if (nLen>nMaxLen)
       nMaxLen =nLen;
@@ -8949,8 +9861,8 @@ void CIccTagColorantTable::Describe(std::string &sDescription, int /* nVerbosene
     snprintf(buf, bufSize, "Lab_L Lab_a Lab_b\n");
     sDescription += buf;
   }
-  for (i=0; i<m_nCount; i++) {
-    snprintf(buf, bufSize, "%2u \"%s\"", i, m_pData[i].name);
+  for (i=0; i<nCount; i++) {
+    snprintf(buf, bufSize, "%2u \"%s\"", (unsigned int) i, m_pData[i].name);
     sDescription += buf;
     memset(buf, ' ', 128);
     buf[nMaxLen + 1 - strlen(m_pData[i].name)] ='\0';
@@ -8989,7 +9901,6 @@ bool CIccTagColorantTable::SetSize(icUInt16Number nSize, bool bZeroNew/*=true*/)
     return true;
 
   m_pData = (icColorantTableEntry*)icRealloc(m_pData, nSize*sizeof(icColorantTableEntry));
-
   if (!m_pData) {
     m_nCount = 0;
     return false;
@@ -9318,6 +10229,7 @@ CIccProfileDescText::CIccProfileDescText(const CIccProfileDescText &IPDC)
 {
   if (IPDC.m_pTag) {
     m_pTag = IPDC.m_pTag->NewCopy();
+    m_pTag->SetParentObject(this);
     m_bNeedsPading = IPDC.m_bNeedsPading;
   }
   else {
@@ -9342,11 +10254,14 @@ CIccProfileDescText &CIccProfileDescText::operator=(const CIccProfileDescText &P
   if (&ProfDescText == this)
     return *this;
 
-  if (m_pTag)
+  if (m_pTag) {
+    m_pTag->SetParentObject(nullptr);
     delete m_pTag;
+  }
 
   if (ProfDescText.m_pTag) {
     m_pTag = ProfDescText.m_pTag->NewCopy();
+    m_pTag->SetParentObject(this);
     m_bNeedsPading = ProfDescText.m_bNeedsPading;
   }
   else {
@@ -9368,8 +10283,10 @@ CIccProfileDescText &CIccProfileDescText::operator=(const CIccProfileDescText &P
  */
 CIccProfileDescText::~CIccProfileDescText()
 {
-  if (m_pTag)
+  if (m_pTag) {
+    m_pTag->SetParentObject(nullptr);
     delete m_pTag;
+  }
 }
 
 
@@ -9393,14 +10310,18 @@ bool CIccProfileDescText::SetType(icTagTypeSignature nType)
     if (m_pTag->GetType() == nType)
       return true;
 
+    m_pTag->SetParentObject(nullptr);
     delete m_pTag;
   }
 
   if (nType == icSigMultiLocalizedUnicodeType ||
       nType == icSigTextDescriptionType)
-    m_pTag = CIccTag::Create(nType);
+    m_pTag = CIccTagCreator::CreateTag(nType);
   else
     m_pTag = NULL;
+
+  if (m_pTag)
+    m_pTag->SetParentObject(this);
 
   return(m_pTag != NULL);
 }
@@ -9699,6 +10620,14 @@ bool CIccTagProfileSeqDesc::Read(icUInt32Number size, CIccIO *pIO)
   size_t nPos;
   CIccProfileDescStruct ProfileDescStruct;
 
+  // Reject counts that can't possibly fit even a bare-minimum record
+  // per entry (20 bytes: mfg + model + attrs + tech). Without this,
+  // a crafted nCount of ~40,000 drives ~1M nested MLU allocations
+  // before per-iteration Read*() finally fails on EOF.
+  static const icUInt32Number kProfSeqDescMinBytesPerEntry = 20;
+  if (nCount > size / kProfSeqDescMinBytesPerEntry)
+    return false;
+
   for (i=0; i<nCount; i++) {
 
     if (!pIO->Read32(&ProfileDescStruct.m_deviceMfg) ||
@@ -9709,10 +10638,19 @@ bool CIccTagProfileSeqDesc::Read(icUInt32Number size, CIccIO *pIO)
 
     nPos = pIO->Tell();
 
+    // Guard against previous iteration having advanced the cursor past
+    // our tag window; otherwise (nEnd - nPos) wraps to near UINT32_MAX
+    // and is passed as `size` to the nested MLU Read - a second,
+    // independent overflow primitive.
+    if (nPos >= nEnd)
+      return false;
+
     if (!ProfileDescStruct.m_deviceMfgDesc.Read((icUInt32Number)(nEnd - nPos), pIO))
       return false;
-    
+
     nPos = pIO->Tell();
+    if (nPos >= nEnd)
+      return false;
     if (!ProfileDescStruct.m_deviceModelDesc.Read((icUInt32Number)(nEnd - nPos), pIO))
       return false;
 
@@ -9786,13 +10724,13 @@ void CIccTagProfileSeqDesc::Describe(std::string &sDescription, int nVerboseness
   icChar buf[bufSize], buf2[28];
   icUInt32Number count=0;
 
-  snprintf(buf, bufSize, "Number of Profile Description Structures: %u\n", (icUInt32Number)m_Descriptions->size());
+  snprintf(buf, bufSize, "Number of Profile Description Structures: %zu\n", m_Descriptions->size());
   sDescription += buf;
 
   for (i=m_Descriptions->begin(); i!=m_Descriptions->end(); i++, count++) {
     sDescription += "\n";
 
-    snprintf(buf, bufSize, "Profile Description Structure Number [%u] follows:\n", count+1);
+    snprintf(buf, bufSize, "Profile Description Structure Number [%u] follows:\n", (unsigned int)(count+1));
     sDescription += buf;
 
     snprintf(buf, bufSize, "Device Manufacturer Signature: %s\n", icGetSig(buf2, bufSize, i->m_deviceMfg, false));
@@ -9801,7 +10739,7 @@ void CIccTagProfileSeqDesc::Describe(std::string &sDescription, int nVerboseness
     snprintf(buf, bufSize, "Device Model Signature: %s\n", icGetSig(buf2, bufSize, i->m_deviceModel, false));
     sDescription += buf;
 
-    snprintf(buf, bufSize, "Device Attributes: %08x%08x\n", (icUInt32Number)(i->m_attributes >> 32), (icUInt32Number)(i->m_attributes));
+    snprintf(buf, bufSize, "Device Attributes: %08x%08x\n", (unsigned int)(i->m_attributes >> 32), (unsigned int)(i->m_attributes));
     sDescription += buf;
 
     snprintf(buf, bufSize, "Device Technology Signature: %s\n", icGetSig(buf2, bufSize, i->m_technology, false));
@@ -9959,7 +10897,8 @@ CIccResponseCurveStruct::CIccResponseCurveStruct(const CIccResponseCurveStruct &
   m_measurementUnitSig = IRCS.m_measurementUnitSig;
 
   m_maxColorantXYZ = (icXYZNumber*)calloc(m_nChannels, sizeof(icXYZNumber));
-  memcpy(m_maxColorantXYZ, IRCS.m_maxColorantXYZ, m_nChannels*sizeof(icXYZNumber));
+  if (m_maxColorantXYZ)
+    memcpy(m_maxColorantXYZ, IRCS.m_maxColorantXYZ, m_nChannels*sizeof(icXYZNumber));
 
   m_Response16ListArray = new CIccResponse16List[m_nChannels];
   for (icUInt32Number i=0; i<m_nChannels; i++)
@@ -9985,14 +10924,12 @@ CIccResponseCurveStruct &CIccResponseCurveStruct::operator=(const CIccResponseCu
   m_nChannels = RespCurveStruct.m_nChannels;
   m_measurementUnitSig = RespCurveStruct.m_measurementUnitSig;
 
-  if (m_maxColorantXYZ)
-    free(m_maxColorantXYZ);
-
+  free(m_maxColorantXYZ);
   m_maxColorantXYZ = (icXYZNumber*)calloc(m_nChannels, sizeof(icXYZNumber));
-  memcpy(m_maxColorantXYZ, RespCurveStruct.m_maxColorantXYZ, m_nChannels*sizeof(icXYZNumber));
+  if (m_maxColorantXYZ)
+    memcpy(m_maxColorantXYZ, RespCurveStruct.m_maxColorantXYZ, m_nChannels*sizeof(icXYZNumber));
 
-  if (m_Response16ListArray)
-    delete [] m_Response16ListArray;
+  delete [] m_Response16ListArray;
   m_Response16ListArray = new CIccResponse16List[m_nChannels];
   for (icUInt32Number i=0; i<m_nChannels; i++)
     m_Response16ListArray[i] = RespCurveStruct.m_Response16ListArray[i];
@@ -10011,11 +10948,8 @@ CIccResponseCurveStruct &CIccResponseCurveStruct::operator=(const CIccResponseCu
  */
 CIccResponseCurveStruct::~CIccResponseCurveStruct()
 {
-  if (m_maxColorantXYZ)
-    free(m_maxColorantXYZ);
-
-  if (m_Response16ListArray)
-    delete [] m_Response16ListArray;
+  free(m_maxColorantXYZ);
+  delete [] m_Response16ListArray;
 }
 
 
@@ -10051,7 +10985,9 @@ bool CIccResponseCurveStruct::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read32(&m_measurementUnitSig))
     return false;
 
-  icUInt32Number* nMeasurements = new icUInt32Number[m_nChannels];
+  icUInt32Number* nMeasurements = new (std::nothrow) icUInt32Number[m_nChannels];
+  if (!nMeasurements)
+    return false;
 
   if (pIO->Read32(&nMeasurements[0],m_nChannels) != m_nChannels) {
     delete[] nMeasurements;
@@ -10116,7 +11052,10 @@ bool CIccResponseCurveStruct::Write(CIccIO *pIO)
 
   if (m_nChannels) {
 
-    icUInt32Number* nMeasurements = new icUInt32Number[m_nChannels];
+    icUInt32Number* nMeasurements = new (std::nothrow) icUInt32Number[m_nChannels];
+    if (!nMeasurements)
+      return false;
+    
     for (int i=0; i<m_nChannels; i++)
       nMeasurements[i] = (icUInt32Number)m_Response16ListArray[i].size();
 
@@ -10175,14 +11114,14 @@ void CIccResponseCurveStruct::Describe(std::string &sDescription, int /* nVerbos
     nResponseList = m_Response16ListArray[i];
 
     sDescription += "\n";
-    snprintf(buf, bufSize, "Maximum Colorant XYZ Measurement for Channel-%u : X=%.4lf, Y=%.4lf, Z=%.4lf\n", i+1,
+    snprintf(buf, bufSize, "Maximum Colorant XYZ Measurement for Channel-%d : X=%.4lf, Y=%.4lf, Z=%.4lf\n", i+1,
       icFtoD(m_maxColorantXYZ[i].X), icFtoD(m_maxColorantXYZ[i].Y), icFtoD(m_maxColorantXYZ[i].Z));
     sDescription += buf;
 
-    snprintf(buf, bufSize, "Number of Measurements for Channel-%u : %u\n", i+1, (icUInt32Number)nResponseList.size());
+    snprintf(buf, bufSize, "Number of Measurements for Channel-%d : %zu\n", i+1, nResponseList.size());
     sDescription += buf;
 
-    snprintf(buf, bufSize, "Measurement Data for Channel-%u follows:\n", i+1);
+    snprintf(buf, bufSize, "Measurement Data for Channel-%d follows:\n", i+1);
     sDescription += buf;
 
     for (j=nResponseList.begin(); j!=nResponseList.end(); j++) {
@@ -10373,7 +11312,9 @@ bool CIccTagResponseCurveSet16::Read(icUInt32Number size, CIccIO *pIO)
   if ((icUInt32Number)nCountMeasmntTypes * sizeof(icUInt32Number) > size - headerSize)
     return false;
 
-  icUInt32Number* nOffset = new icUInt32Number[nCountMeasmntTypes];
+  icUInt32Number* nOffset = new (std::nothrow) icUInt32Number[nCountMeasmntTypes];
+  if (!nOffset)
+    return false;
 
   if (pIO->Read32(&nOffset[0], nCountMeasmntTypes) != nCountMeasmntTypes) {
     delete[] nOffset;
@@ -10383,7 +11324,12 @@ bool CIccTagResponseCurveSet16::Read(icUInt32Number size, CIccIO *pIO)
   CIccResponseCurveStruct entry;
 
   for (icUInt16Number i=0; i<nCountMeasmntTypes; i++) {
-    if (nOffset[i] + 4 > size) {
+    if ( (nOffset[i] + (size_t)4) > size) {
+      delete[] nOffset;
+      return false;
+    }
+    size_t offsetCalc = startPos + nOffset[i];
+    if (offsetCalc > size || offsetCalc > 0xFFFFFFFFULL) {
       delete[] nOffset;
       return false;
     }
@@ -10439,8 +11385,9 @@ bool CIccTagResponseCurveSet16::Write(CIccIO *pIO)
     return false;
 
   size_t offsetPos = pIO->GetLength();
-  icUInt32Number* nOffset = new icUInt32Number[nCountMeasmntTypes];
-
+  icUInt32Number* nOffset = new (std::nothrow) icUInt32Number[nCountMeasmntTypes];
+  if (!nOffset)
+    return false;
 
   int j;
   for (j=0; j<nCountMeasmntTypes; j++) {
@@ -10492,14 +11439,14 @@ void CIccTagResponseCurveSet16::Describe(std::string &sDescription, int nVerbose
   snprintf(buf, bufSize, "Number of Channels: %u\n", m_nChannels);
   sDescription += buf;
 
-  snprintf(buf, bufSize, "Number of Measurement Types used: %u\n", (icUInt32Number)m_ResponseCurves->size());
+  snprintf(buf, bufSize, "Number of Measurement Types used: %zu\n", m_ResponseCurves->size() );
   sDescription += buf;
 
   int count = 0;
   for (i=m_ResponseCurves->begin(); i!=m_ResponseCurves->end(); i++, count++) {
      sDescription += "\n";
 
-    snprintf(buf, bufSize, "Response Curve for measurement type [%u] follows:\n", count+1);
+    snprintf(buf, bufSize, "Response Curve for measurement type [%d] follows:\n", count+1);
     sDescription += buf;
 
     i->Describe(sDescription, nVerboseness);
@@ -10925,7 +11872,7 @@ icValidateStatus CIccTagSpectralDataInfo::Validate(std::string sigPath, std::str
   std::string sSigPathName = Info.GetSigPathName(sigPath);
   icSignature sig = icGetFirstSigPathSig(sigPath);
 
-  if (sig==icSigSpectralDataInfoTag && pProfile->m_Header.spectralPCS) {
+  if (sig==icSigSpectralDataInfoTag && pProfile && pProfile->m_Header.spectralPCS) {
     const icHeader *pHdr = &pProfile->m_Header;
 
     if (m_nSig != pHdr->spectralPCS ||
@@ -10946,10 +11893,239 @@ icValidateStatus CIccTagSpectralDataInfo::Validate(std::string sigPath, std::str
 
 /**
  ****************************************************************************
- * Name: CIccTagSpectralViewingConditions::CIccTagSpectralViewingConditions
- * 
+ * Name: CIccTagSpectralRange::CIccTagSpectralRange
+ *
  * Purpose: Constructor
- * 
+ *
+ *****************************************************************************
+ */
+CIccTagSpectralRange::CIccTagSpectralRange()
+{
+  m_nReserved = 0;
+  memset(&m_spectralRange, 0, sizeof(m_spectralRange));
+  memset(&m_biSpectralRange, 0, sizeof(m_biSpectralRange));
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::CIccTagSpectralRange
+ *
+ * Purpose: Copy Constructor
+ *
+ * Args:
+ *  ITSR = The CIccTagSpectralRange object to be copied
+ *****************************************************************************
+ */
+CIccTagSpectralRange::CIccTagSpectralRange(const CIccTagSpectralRange &ITSR)
+{
+  m_nReserved = ITSR.m_nReserved;
+  m_spectralRange = ITSR.m_spectralRange;
+  m_biSpectralRange = ITSR.m_biSpectralRange;
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::operator=
+ *
+ * Purpose: Copy Operator
+ *
+ * Args:
+ *  SpectralRangeTag = The CIccTagSpectralRange object to be copied
+ *****************************************************************************
+ */
+CIccTagSpectralRange &CIccTagSpectralRange::operator=(const CIccTagSpectralRange &SpectralRangeTag)
+{
+  if (&SpectralRangeTag == this)
+    return *this;
+
+  m_nReserved = SpectralRangeTag.m_nReserved;
+  m_spectralRange = SpectralRangeTag.m_spectralRange;
+  m_biSpectralRange = SpectralRangeTag.m_biSpectralRange;
+
+  return *this;
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::~CIccTagSpectralRange
+ *
+ * Purpose: Destructor
+ *
+ *****************************************************************************
+ */
+CIccTagSpectralRange::~CIccTagSpectralRange()
+{
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::Read
+ *
+ * Purpose: Read in the tag contents into a data block
+ *
+ * Args:
+ *  size - # of bytes in tag,
+ *  pIO - IO object to read tag from
+ *
+ * Return:
+ *  true = successful, false = failure
+ *****************************************************************************
+ */
+bool CIccTagSpectralRange::Read(icUInt32Number size, CIccIO *pIO)
+{
+  icTagTypeSignature sig;
+
+  // spectralRangeType is a fixed 20-byte structure (Table W): type signature,
+  // 4 reserved bytes, then two icSpectralRange (6 bytes each).
+  if (sizeof(icTagTypeSignature) + sizeof(icUInt32Number) + 6*sizeof(icUInt16Number) > size)
+    return false;
+
+  if (!pIO) {
+    m_nReserved = 0;
+    memset(&m_spectralRange, 0, sizeof(m_spectralRange));
+    memset(&m_biSpectralRange, 0, sizeof(m_biSpectralRange));
+    return false;
+  }
+
+  if (!pIO->Read32(&sig))
+    return false;
+
+  if (!pIO->Read32(&m_nReserved))
+    return false;
+
+  if (!pIO->Read16(&m_spectralRange.start))
+    return false;
+
+  if (!pIO->Read16(&m_spectralRange.end))
+    return false;
+
+  if (!pIO->Read16(&m_spectralRange.steps))
+    return false;
+
+  if (!pIO->Read16(&m_biSpectralRange.start))
+    return false;
+
+  if (!pIO->Read16(&m_biSpectralRange.end))
+    return false;
+
+  if (!pIO->Read16(&m_biSpectralRange.steps))
+    return false;
+
+  return true;
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::Write
+ *
+ * Purpose: Write the tag to a file
+ *
+ * Args:
+ *  pIO - The IO object to write tag to.
+ *
+ * Return:
+ *  true = succesful, false = failure
+ *****************************************************************************
+ */
+bool CIccTagSpectralRange::Write(CIccIO *pIO)
+{
+  icTagTypeSignature sig = GetType();
+
+  if (!pIO)
+    return false;
+
+  if (!pIO->Write32(&sig))
+    return false;
+
+  if (!pIO->Write32(&m_nReserved))
+    return false;
+
+  if (!pIO->Write16(&m_spectralRange.start))
+    return false;
+
+  if (!pIO->Write16(&m_spectralRange.end))
+    return false;
+
+  if (!pIO->Write16(&m_spectralRange.steps))
+    return false;
+
+  if (!pIO->Write16(&m_biSpectralRange.start))
+    return false;
+
+  if (!pIO->Write16(&m_biSpectralRange.end))
+    return false;
+
+  if (!pIO->Write16(&m_biSpectralRange.steps))
+    return false;
+
+  return true;
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralRange::Describe
+ *
+ * Purpose: Dump data associated with the tag to a string
+ *
+ * Args:
+ *  sDescription - string to concatenate tag dump to
+ *****************************************************************************
+ */
+void CIccTagSpectralRange::Describe(std::string &sDescription, int /* nVerboseness */)
+{
+  const size_t bufSize = 256;
+  icChar buf[bufSize];
+
+  snprintf(buf, bufSize, "SpectralRange: start %fnm end %fnm with %d steps\n", icF16toF(m_spectralRange.start), icF16toF(m_spectralRange.end), m_spectralRange.steps);
+  sDescription += buf;
+  if (m_biSpectralRange.steps) {
+    snprintf(buf, bufSize, "BiSpectralRange: start %fnm end %fnm with %d steps\n", icF16toF(m_biSpectralRange.start), icF16toF(m_biSpectralRange.end), m_biSpectralRange.steps);
+    sDescription += buf;
+  }
+}
+
+
+/**
+******************************************************************************
+* Name: CIccTagSpectralRange::Validate
+*
+* Purpose: Check tag data validity.
+*
+* Args:
+*  sig = signature of tag being validated,
+*  sReport = String to add report information to
+*
+* Return:
+*  icValidateStatusOK if valid, or other error status.
+******************************************************************************
+*/
+icValidateStatus CIccTagSpectralRange::Validate(std::string sigPath, std::string &sReport, const CIccProfile* pProfile/*=NULL*/) const
+{
+  icValidateStatus rv = CIccTag::Validate(sigPath, sReport, pProfile);
+
+  CIccInfo Info;
+  std::string sSigPathName = Info.GetSigPathName(sigPath);
+
+  rv = icMaxStatus(rv, Info.CheckData(sReport, m_spectralRange, "Spectral Range"));
+  if (m_biSpectralRange.steps)
+    rv = icMaxStatus(rv, Info.CheckData(sReport, m_biSpectralRange, "Bispectral Range"));
+
+  return rv;
+}
+
+
+/**
+ ****************************************************************************
+ * Name: CIccTagSpectralViewingConditions::CIccTagSpectralViewingConditions
+ *
+ * Purpose: Constructor
+ *
  *****************************************************************************
  */
 CIccTagSpectralViewingConditions::CIccTagSpectralViewingConditions()
@@ -10995,7 +12171,7 @@ CIccTagSpectralViewingConditions::CIccTagSpectralViewingConditions(const CIccTag
   m_observerRange = SVCT.m_observerRange;
 
   if (SVCT.m_observer && SVCT.m_observerRange.steps) {
-    m_observer = new icFloat32Number[SVCT.m_observerRange.steps*3];
+    m_observer = new (std::nothrow) icFloat32Number[SVCT.m_observerRange.steps*3];
     if (m_observer) {
       memcpy(m_observer, SVCT.m_observer, SVCT.m_observerRange.steps*3*sizeof(icFloat32Number));
     }
@@ -11008,7 +12184,7 @@ CIccTagSpectralViewingConditions::CIccTagSpectralViewingConditions(const CIccTag
   m_colorTemperature = SVCT.m_colorTemperature;
 
   if (SVCT.m_illuminant && SVCT.m_illuminantRange.steps) {
-    m_illuminant = new icFloat32Number[SVCT.m_illuminantRange.steps];
+    m_illuminant = new (std::nothrow) icFloat32Number[SVCT.m_illuminantRange.steps];
     if (m_illuminant) {
       memcpy(m_illuminant, SVCT.m_illuminant, SVCT.m_illuminantRange.steps*sizeof(icFloat32Number));
     }
@@ -11039,7 +12215,7 @@ CIccTagSpectralViewingConditions &CIccTagSpectralViewingConditions::operator=(co
   m_observerRange = SVCT.m_observerRange;
 
   if (SVCT.m_observer && SVCT.m_observerRange.steps) {
-    m_observer = new icFloat32Number[SVCT.m_observerRange.steps*3];
+    m_observer = new (std::nothrow) icFloat32Number[SVCT.m_observerRange.steps*3];
     if (m_observer) {
       memcpy(m_observer, SVCT.m_observer, SVCT.m_observerRange.steps*3*sizeof(icFloat32Number));
     }
@@ -11052,7 +12228,7 @@ CIccTagSpectralViewingConditions &CIccTagSpectralViewingConditions::operator=(co
   m_colorTemperature = SVCT.m_colorTemperature;
 
   if (SVCT.m_illuminant && SVCT.m_illuminantRange.steps) {
-    m_illuminant = new icFloat32Number[SVCT.m_illuminantRange.steps];
+    m_illuminant = new (std::nothrow) icFloat32Number[SVCT.m_illuminantRange.steps];
     if (m_illuminant) {
       memcpy(m_illuminant, SVCT.m_illuminant, SVCT.m_illuminantRange.steps*sizeof(icFloat32Number));
     }
@@ -11079,11 +12255,8 @@ CIccTagSpectralViewingConditions &CIccTagSpectralViewingConditions::operator=(co
  */
 CIccTagSpectralViewingConditions::~CIccTagSpectralViewingConditions()
 {
-  if (m_observer)
-    delete [] m_observer;
-
-  if (m_illuminant)
-    delete [] m_illuminant;
+  delete [] m_observer;
+  delete [] m_illuminant;
 }
 
 
@@ -11127,24 +12300,20 @@ bool CIccTagSpectralViewingConditions::Read(icUInt32Number size, CIccIO *pIO)
       !pIO->Read16(&m_reserved2))
     return false;
 
-  icUInt32Number vals;
-
-  if (m_observer) {
-    delete [] m_observer;
-    m_observer = NULL;
-  }
+  delete [] m_observer;
+  m_observer = NULL;
 
   icUInt32Number observerSize = 0;
 
   if (m_observerRange.steps) {
-    vals = m_observerRange.steps * 3;
+    icUInt32Number vals = m_observerRange.steps * 3;
 
     observerSize = vals * sizeof(icFloat32Number);
 
     if (headerSize + observerSize > size)
       return false;
     
-    m_observer = new icFloat32Number[vals];
+    m_observer = new (std::nothrow) icFloat32Number[vals];
     if (!m_observer)
       return false;
 
@@ -11165,22 +12334,20 @@ bool CIccTagSpectralViewingConditions::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
 
-  if (m_illuminant) {
-    delete [] m_illuminant;
-    m_illuminant = NULL;
-  }
+  delete [] m_illuminant;
+  m_illuminant = NULL;
 
   icUInt32Number illuminantSize = 0;
 
   if (m_illuminantRange.steps) {
-    vals = m_illuminantRange.steps;
+    icUInt32Number vals = m_illuminantRange.steps;
 
     illuminantSize = vals * sizeof(icFloat32Number);
 
     if (headerSize + observerSize + illumInfoSize + illuminantSize > size)
       return false;
 
-    m_illuminant = new icFloat32Number[vals];
+    m_illuminant = new (std::nothrow) icFloat32Number[vals];
     if (!m_illuminant)
       return false;
 
@@ -11313,7 +12480,7 @@ void CIccTagSpectralViewingConditions::Describe(std::string &sDescription, int n
   sDescription += info.GetIlluminantName(m_stdIlluminant);
   sDescription += "\n";
 
-  snprintf(buf, bufSize, "Color Temperature: %.1fK\n\n", m_colorTemperature);
+  snprintf(buf, bufSize, "Colour Temperature: %.1fK\n\n", m_colorTemperature);
   sDescription += buf;
 
   if (m_illuminant) {
@@ -11416,15 +12583,21 @@ icFloatNumber *CIccTagSpectralViewingConditions::applyRangeToObserver(const icSp
   int n = newRange.steps*3;
   icFloatNumber *rv = (icFloatNumber*)malloc(n*sizeof(icFloatNumber));
 
-  CIccMatrixMath *range = CIccMatrixMath::rangeMap(m_observerRange, newRange);
-  if (range) {
-    range->VectorMult(rv, m_observer);
-    range->VectorMult(&rv[newRange.steps], &m_observer[m_observerRange.steps]);
-    range->VectorMult(&rv[newRange.steps*2], &m_observer[m_observerRange.steps*2]);
-    delete range;
-  }
-  else {
-    memcpy(rv, m_observer, m_observerRange.steps*3*sizeof(icFloatNumber));
+  if (rv) {
+    CIccMatrixMath *range = CIccMatrixMath::rangeMap(m_observerRange, newRange);
+    if (range) {
+      range->VectorMult(rv, m_observer);
+      range->VectorMult(&rv[newRange.steps], &m_observer[m_observerRange.steps]);
+      range->VectorMult(&rv[newRange.steps*2], &m_observer[m_observerRange.steps*2]);
+      delete range;
+    }
+    else {
+      if ( m_observerRange.steps > newRange.steps) {
+        free(rv);
+        return NULL;
+      }
+      memcpy(rv, m_observer, m_observerRange.steps*3*sizeof(icFloatNumber));
+    }
   }
 
   return rv;
@@ -11432,17 +12605,26 @@ icFloatNumber *CIccTagSpectralViewingConditions::applyRangeToObserver(const icSp
 
 CIccMatrixMath *CIccTagSpectralViewingConditions::getObserverMatrix(const icSpectralRange &newRange) const
 {
+  icSpectralRange observerRange;
+  const icFloatNumber *observer = getObserver(observerRange);
+  if (!observer || !observerRange.steps || !newRange.steps)
+    return NULL;
+
   CIccMatrixMath *pMtx=new CIccMatrixMath(3, newRange.steps);
 
-  CIccMatrixMath *range = CIccPcsXform::rangeMap(m_observerRange, newRange);
+  CIccMatrixMath *range = CIccPcsXform::rangeMap(observerRange, newRange);
   if (range) {
-    range->VectorMult(pMtx->entry(0), m_observer);
-    range->VectorMult(pMtx->entry(1), &m_observer[m_observerRange.steps]);
-    range->VectorMult(pMtx->entry(2), &m_observer[m_observerRange.steps*2]);
+    range->VectorMult(pMtx->entry(0), observer);
+    range->VectorMult(pMtx->entry(1), &observer[observerRange.steps]);
+    range->VectorMult(pMtx->entry(2), &observer[observerRange.steps*2]);
     delete range;
   }
   else {
-    memcpy(pMtx->entry(0), m_observer, m_observerRange.steps*3*sizeof(icFloatNumber));
+    if ( observerRange.steps > newRange.steps) {
+      delete pMtx;
+      return NULL;
+    }
+    memcpy(pMtx->entry(0), observer, observerRange.steps*3*sizeof(icFloatNumber));
   }
 
   return pMtx;
@@ -11535,16 +12717,14 @@ bool CIccTagSpectralViewingConditions::setIlluminant(icIlluminant illumId, const
   m_stdIlluminant = illumId;
   m_colorTemperature = illumCCT;
 
-  if (m_illuminant) {
-    delete[] m_illuminant;
-    m_illuminant = nullptr;
-  }
+  delete[] m_illuminant;
+  m_illuminant = nullptr;
 
   m_illuminantRange = illumRange;
 
   if (illumRange.steps && illum) {
     icUInt32Number size = illumRange.steps;
-    m_illuminant = new icFloatNumber[size]; // Replaced malloc with new[]
+    m_illuminant = new (std::nothrow) icFloatNumber[size];
     if (m_illuminant)
       memcpy(m_illuminant, illum, size * sizeof(icFloatNumber)); // Retained memcpy
     else {
@@ -11698,13 +12878,11 @@ bool CIccTagSpectralViewingConditions::setObserver(icStandardObserver observerId
 {
   m_stdObserver = observerId;
   m_observerRange = observerRange;
-  if (m_observer) {
-    delete [] m_observer;
-  }
+  delete [] m_observer;
 
   if (observerRange.steps && observer) {
     icUInt32Number size = observerRange.steps * 3;
-    m_observer = new icFloatNumber[size];
+    m_observer = new (std::nothrow) icFloatNumber[size];
     if (m_observer)
       memcpy(m_observer, observer, size*sizeof(icFloatNumber));
     else {
@@ -11714,7 +12892,7 @@ bool CIccTagSpectralViewingConditions::setObserver(icStandardObserver observerId
   }
   else {
     if (!observer)
-      memset(&m_observerRange, 0, sizeof(m_illuminantRange));
+      memset(&m_observerRange, 0, sizeof(m_observerRange));
 
     m_observer = NULL;
   }
@@ -11818,6 +12996,8 @@ CIccTagEmbeddedHeightImage::CIccTagEmbeddedHeightImage(int nSize/*=1*/)
   if (m_nSize <1)
     m_nSize = 1;
   m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  if (!m_pData)
+    m_nSize = 0;
   m_nSeamlesIndicator = 0;
   m_nEncodingFormat = icPngImageType;
   m_fMetersMinPixelValue = 0;
@@ -11844,7 +13024,10 @@ CIccTagEmbeddedHeightImage::CIccTagEmbeddedHeightImage(const CIccTagEmbeddedHeig
   m_nSize = IEHI.m_nSize;
 
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, IEHI.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, IEHI.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 }
 
 
@@ -11869,10 +13052,12 @@ CIccTagEmbeddedHeightImage &CIccTagEmbeddedHeightImage::operator=(const CIccTagE
   m_fMetersMaxPixelValue = HeightImageTag.m_fMetersMaxPixelValue;
   m_nSize = HeightImageTag.m_nSize;
 
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, HeightImageTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, HeightImageTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -11888,8 +13073,7 @@ CIccTagEmbeddedHeightImage &CIccTagEmbeddedHeightImage::operator=(const CIccTagE
 */
 CIccTagEmbeddedHeightImage::~CIccTagEmbeddedHeightImage()
 {
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
 }
 
 
@@ -12014,7 +13198,7 @@ void CIccTagEmbeddedHeightImage::Describe(std::string &sDescription, int /* nVer
   const size_t bufSize = 128;
   icChar buf[bufSize];
 
-  snprintf(buf, bufSize, "\nSeamlessIndicater: %d\n", m_nSeamlesIndicator);
+  snprintf(buf, bufSize, "\nSeamlessIndicater: %u\n", (unsigned int) m_nSeamlesIndicator);
   sDescription += buf;
 
   switch (m_nEncodingFormat) {
@@ -12025,7 +13209,7 @@ void CIccTagEmbeddedHeightImage::Describe(std::string &sDescription, int /* nVer
     strcpy(buf, "EncodingFormat: TIFF\n");
     break;
   default:
-    snprintf(buf, bufSize, "EncodingFormat: %d", m_nEncodingFormat);
+    snprintf(buf, bufSize, "EncodingFormat: %u", (unsigned int) m_nEncodingFormat);
     break;
   }
   sDescription += buf;
@@ -12034,6 +13218,13 @@ void CIccTagEmbeddedHeightImage::Describe(std::string &sDescription, int /* nVer
   snprintf(buf, bufSize, "Height maximum pixel: %.4fmeters\n", m_fMetersMaxPixelValue);
 
   sDescription += "\nImage Data:\n";
+
+  // CWE-400/CWE-834: m_nSize is the image byte count derived from the tag byte size
+  // in Read() and m_pData is allocated to match; assert an explicit ceiling so a
+  // corrupted size can't drive an unbounded per-byte hex dump of the image data.
+  const icUInt32Number nMaxImageDataBytes = 0x10000000;
+  if (m_nSize > nMaxImageDataBytes)
+    return;
 
   for (int i = 0; i<(int)m_nSize; i++) {
     if (!(i & 0x1f))
@@ -12061,7 +13252,6 @@ bool CIccTagEmbeddedHeightImage::SetSize(icUInt32Number nSize, bool bZeroNew/*=t
     return true;
 
   m_pData = (icUInt8Number*)icRealloc(m_pData, nSize * sizeof(icUInt8Number));
-
   if (!m_pData) {
     m_nSize = 0;
     return false;
@@ -12141,6 +13331,8 @@ CIccTagEmbeddedNormalImage::CIccTagEmbeddedNormalImage(int nSize/*=1*/)
   if (m_nSize < 1)
     m_nSize = 1;
   m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  if (!m_pData)
+    m_nSize = 0;
   m_nSeamlesIndicator = 0;
   m_nEncodingFormat = icPngImageType;
 }
@@ -12163,7 +13355,10 @@ CIccTagEmbeddedNormalImage::CIccTagEmbeddedNormalImage(const CIccTagEmbeddedNorm
   m_nSize = IENI.m_nSize;
 
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, IENI.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, IENI.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 }
 
 
@@ -12186,10 +13381,12 @@ CIccTagEmbeddedNormalImage &CIccTagEmbeddedNormalImage::operator=(const CIccTagE
   m_nEncodingFormat = NormalImageTag.m_nEncodingFormat;
   m_nSize = NormalImageTag.m_nSize;
 
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
   m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
-  memcpy(m_pData, NormalImageTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  if (m_pData)
+    memcpy(m_pData, NormalImageTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  else
+    m_nSize = 0;
 
   return *this;
 }
@@ -12205,8 +13402,7 @@ CIccTagEmbeddedNormalImage &CIccTagEmbeddedNormalImage::operator=(const CIccTagE
 */
 CIccTagEmbeddedNormalImage::~CIccTagEmbeddedNormalImage()
 {
-  if (m_pData)
-    free(m_pData);
+  free(m_pData);
 }
 
 
@@ -12317,7 +13513,7 @@ void CIccTagEmbeddedNormalImage::Describe(std::string &sDescription, int /* nVer
   const size_t bufSize = 128;
   icChar buf[bufSize];
 
-  snprintf(buf, bufSize, "\nSeamlessIndicater: %d\n", m_nSeamlesIndicator);
+  snprintf(buf, bufSize, "\nSeamlessIndicater: %u\n", (unsigned int)m_nSeamlesIndicator);
   sDescription += buf;
 
   switch (m_nEncodingFormat) {
@@ -12328,12 +13524,19 @@ void CIccTagEmbeddedNormalImage::Describe(std::string &sDescription, int /* nVer
     strcpy(buf, "EncodingFormat: TIFF\n");
     break;
   default:
-    snprintf(buf, bufSize, "EncodingFormat: %d", m_nEncodingFormat);
+    snprintf(buf, bufSize, "EncodingFormat: %u", (unsigned int)m_nEncodingFormat);
     break;
   }
   sDescription += buf;
 
   sDescription += "\nImage Data:\n";
+
+  // CWE-400/CWE-834: m_nSize is the image byte count derived from the tag byte size
+  // in Read() and m_pData is allocated to match; assert an explicit ceiling so a
+  // corrupted size can't drive an unbounded per-byte hex dump of the image data.
+  const icUInt32Number nMaxImageDataBytes = 0x10000000;
+  if (m_nSize > nMaxImageDataBytes)
+    return;
 
   for (int i = 0; i < (int)m_nSize; i++) {
     if (!(i & 0x1f))
@@ -12361,7 +13564,6 @@ bool CIccTagEmbeddedNormalImage::SetSize(icUInt32Number nSize, bool bZeroNew/*=t
     return true;
 
   m_pData = (icUInt8Number*)icRealloc(m_pData, nSize * sizeof(icUInt8Number));
-
   if (!m_pData) {
     m_nSize = 0;
     return false;

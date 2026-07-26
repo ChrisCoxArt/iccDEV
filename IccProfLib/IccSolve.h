@@ -81,6 +81,8 @@ Copyright:  (c) see Software License
 class IIccMatrixSolver
 {
 public:
+  virtual ~IIccMatrixSolver() {}
+
   /**
   ****************************************************************************
   * Member Function: Solve
@@ -131,7 +133,7 @@ void ICCPROFLIB_API IccSetMatrixSolver(IIccMatrixSolver *pSolver);
 *  determine the matrix solver object.  
 *****************************************************************************
 */
-IIccMatrixSolver ICCPROFLIB_API *IccGetDefaultMatrixSolver();
+ICCPROFLIB_API IIccMatrixSolver *IccGetDefaultMatrixSolver();
 
 /**
 ****************************************************************************
@@ -144,6 +146,8 @@ IIccMatrixSolver ICCPROFLIB_API *IccGetDefaultMatrixSolver();
 class IIccMatrixInverter
 {
 public:
+  virtual ~IIccMatrixInverter() {}
+
   /**
   ****************************************************************************
   * Member Function: Invert
@@ -191,7 +195,7 @@ void ICCPROFLIB_API IccSetMatrixInverter(IIccMatrixInverter *pInverter);
 *  determine the matrix solver object.
 *****************************************************************************
 */
-IIccMatrixInverter ICCPROFLIB_API *IccGetDefaultMatrixInverter();
+ICCPROFLIB_API IIccMatrixInverter *IccGetDefaultMatrixInverter();
 
 #endif //_ICCSOLVE_H
 

@@ -84,13 +84,17 @@ IIccArray* CIccBasicArrayFactory::CreateArray(icArraySignature arrayTypeSig, CIc
 {
   switch(arrayTypeSig) {
     case icSigNamedColorArray:
-      return new CIccArrayNamedColor(pTagArray);
+      return new (std::nothrow) CIccArrayNamedColor(pTagArray);
 
     case icSigColorantInfoArray:
-      return new CIccArrayColorantInfo(pTagArray);
+      return new (std::nothrow) CIccArrayColorantInfo(pTagArray);
+
+    case icSigUtf8TextTypeArray:
+      // UTF-8 arrays are validated directly by CIccTagArray::Validate().
+      return NULL;
 
     default:
-      return new CIccArrayUnknown(pTagArray, arrayTypeSig);
+      return new (std::nothrow) CIccArrayUnknown(pTagArray, arrayTypeSig);
   }
 }
 
@@ -190,6 +194,9 @@ bool CIccArrayCreator::DoGetArraySigName(std::string &arrayName, icArraySignatur
 
 icArraySignature CIccArrayCreator::DoGetArraySig(const icChar* structName)
 {
+  if (!structName || !structName[0])
+    return (icArraySignature)0;
+
   CIccArrayFactoryList::iterator i;
 
   for (i = factoryStack.begin(); i != factoryStack.end(); i++) {

@@ -9,6 +9,8 @@
 #include "IccUtil.h"
 #include "IccProfLibVer.h"
 #include "IccLibXMLVer.h"
+#include "IccXmlConfig.h"
+#include <cstdlib>
 #include <cstring> /* C strings strcpy, memcpy ... */
 
 int main(int argc, char* argv[])
@@ -18,6 +20,12 @@ int main(int argc, char* argv[])
     printf("Usage: IccFromXml xml_file saved_profile_file {-noid -v{=[relax_ng_schema_file - optional]}}\n");
     return 0;
   }
+
+  // Profile XML on the CLI tool's filesystem is trusted by the invoking
+  // user (same trust boundary as the XML file itself), so opt in to
+  // <tag File="..."/> / <tag Filename="..."/> loaders. Library/WASM
+  // callers leave the flag at its default-off state.
+  IccXmlSetAllowFileIncludes(true);
 
   CIccTagCreator::PushFactory(new CIccTagXmlFactory());
   CIccMpeCreator::PushFactory(new CIccMpeXmlFactory());
@@ -72,14 +80,12 @@ int main(int argc, char* argv[])
     printf("\n");
 #endif
     printf("Unable to Parse '%s'\n", argv[1]);
-    return -1;
+    return EXIT_FAILURE;
   }
 
   std::string valid_report;
 
   if (profile.Validate(valid_report)<=icValidateWarning) {
-    int i;
-
     for (i=0; i<16; i++) {
       if (profile.m_Header.profileID.ID8[i])
         break;
@@ -89,12 +95,10 @@ int main(int argc, char* argv[])
     }
     else {
       printf("Unable to save profile as '%s'\n", argv[2]);
-      return -1;
+      return EXIT_FAILURE;
     }
   }
   else {
-    int i;
-
     for (i=0; i<16; i++) {
       if (profile.m_Header.profileID.ID8[i])
         break;
@@ -104,12 +108,11 @@ int main(int argc, char* argv[])
     }
     else {
       printf("Unable to save profile - profile is invalid!\n");
-      return -1;
+      return EXIT_FAILURE;
     }
     printf("%s", valid_report.c_str());
   }
 
   printf("\n");
-  return 0;
+  return EXIT_SUCCESS;
 }
-

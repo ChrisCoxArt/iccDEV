@@ -80,9 +80,14 @@ namespace iccDEV {
 
   class CIccSearchVec {
   public:
-    CIccSearchVec() {}
-    CIccSearchVec(unsigned int n) : n(n) {
-      val.resize(n, 0);
+    CIccSearchVec() : n(0) {}
+    CIccSearchVec(unsigned int nElems) : n(nElems) {
+      if (nElems) {
+        val.reserve(nElems);
+        for (unsigned int i = 0; i < nElems; i++) {
+          val.push_back(0.0f);
+        }
+      }
     }
     CIccSearchVec(std::initializer_list<icFloatNumber> c) {
       n = (unsigned int)c.size();
@@ -110,13 +115,13 @@ namespace iccDEV {
       return val[idx];
     }
 
-    CIccSearchVec operator=(const CIccSearchVec& rhs) {
+    CIccSearchVec& operator=(const CIccSearchVec& rhs) {
       val = rhs.val;
       n = rhs.n;
       return *this;
     }
 
-    CIccSearchVec operator=(const icFloatVector& rhs) {
+    CIccSearchVec& operator=(const icFloatVector& rhs) {
       val = rhs;
       n = (unsigned int)rhs.size();
       return *this;
@@ -432,7 +437,7 @@ namespace iccDEV {
 
 
 #ifdef USEICCDEVNAMESPACE
-}; // namespace iccDEV {
+} //namespace iccDEV
 #endif
 
 #endif  // _ICCSEARCH_H

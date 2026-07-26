@@ -1,0 +1,40 @@
+{
+  "name": "iccdev",
+  "version": "2.3.2.2",
+  "port-version": 2,
+  "description": "ICC color profile libraries and tools (RefIccMAX / iccDEV)",
+  "homepage": "https://github.com/InternationalColorConsortium/iccDEV",
+  "license": "BSD-3-Clause",
+  "supports": "!uwp",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    "zlib"
+  ],
+  "features": {
+    "json": {
+      "description": "Build IccJSON2 and IccConnect2 JSON libraries plus JSON conversion tools when tools are enabled",
+      "dependencies": [
+        "nlohmann-json"
+      ]
+    },
+    "tools": {
+      "description": "Build core CLI tools (iccDumpProfile, iccRoundTrip, iccApplyNamedCmm, etc.)",
+      "dependencies": [
+        "nlohmann-json"
+      ]
+    },
+    "xml": {
+      "description": "Build IccXML2 XML serialization library and iccFromXml/iccToXml tools",
+      "dependencies": [
+        "libxml2"
+      ]
+    }
+  }
+}

@@ -53,8 +53,6 @@ static const UTF32 halfMask = 0x3FFUL;
 #define UNI_SUR_HIGH_END    (UTF32)0xDBFF
 #define UNI_SUR_LOW_START   (UTF32)0xDC00
 #define UNI_SUR_LOW_END     (UTF32)0xDFFF
-#define false	   0
-#define true	    1
 
 /* --------------------------------------------------------------------- */
 
@@ -199,8 +197,14 @@ icUtfConversionResult icConvertUTF16toUTF32 (const UTF16** sourceStart, const UT
   return result;
 }
 
-icUtfConversionResult icConvertUTF16toUTF32 (const UTF16* source, const UTF16* sourceEnd, 
-                                             icUtf32Vector target, UTF32* /* targetEnd */, icUtfConversionFlags flags)
+// Take `target` by reference so caller sees the populated vector, and
+// drop the dead `UTF32* targetEnd` parameter. The header declares this
+// overload with a reference (see IccConvertUTF.h); the previous
+// by-value signature here never matched the header, so the header's
+// declaration went undefined and any caller silently got a local-only
+// populate + empty return — classic data-loss bug.
+icUtfConversionResult icConvertUTF16toUTF32 (const UTF16* source, const UTF16* sourceEnd,
+                                             icUtf32Vector &target, icUtfConversionFlags flags)
 {
   icUtfConversionResult result = conversionOK;
   target.clear();
@@ -480,6 +484,11 @@ static Boolean isLegalUTF8(const UTF8 *source, int length)
 */
 Boolean icIsLegalUTF8Sequence(const UTF8 *source, const UTF8 *sourceEnd)
 {
+  // Reject empty range before dereferencing *source. Otherwise this
+  // reads one byte past the end of the supplied buffer.
+  if (source >= sourceEnd)
+    return false;
+
   int length = trailingBytesForUTF8[*source]+1;
   if (source+length > sourceEnd) {
     return false;

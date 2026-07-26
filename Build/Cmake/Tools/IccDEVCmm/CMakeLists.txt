@@ -1,6 +1,6 @@
 #################################################################################
 # iccMAXCmm Cmake Project Configuration | iccMAX Project
-# Copyright (©) 2024-2025 The International Color Consortium.
+# Copyright (c) 2024-2025 The International Color Consortium.
 #                                        All rights reserved.
 # Last Updated: 13-AUGUST-2025 at 1600Z by David Hoyt
 #
@@ -34,13 +34,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # Output Directory based on Configuration
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Tools/IccDEVCmm/x64/$<CONFIG>")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Tools/IccDEVCmm/x64/$<CONFIG>")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Tools/IccDEVCmm/x64/$<CONFIG>")
+if(ICCDEV_WINDOWS_UNIFIED_RUNTIME)
+    set(_iccdevcmm_output_directory "${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}")
+    get_property(_iccdevcmm_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_iccdevcmm_is_multi_config)
+        set(_iccdevcmm_pch_directory "${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}/$<CONFIG>")
+    else()
+        set(_iccdevcmm_pch_directory "${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}")
+    endif()
+else()
+    set(_iccdevcmm_output_directory "${CMAKE_BINARY_DIR}/Tools/IccDEVCmm/x64/$<CONFIG>")
+    set(_iccdevcmm_pch_directory "${_iccdevcmm_output_directory}")
+endif()
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${_iccdevcmm_output_directory}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${_iccdevcmm_output_directory}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${_iccdevcmm_output_directory}")
 
 # Source Files
 set(SOURCES
     "${OS_SPECIFIC_SOURCES}/IccDEVCmm.cpp"
+    "${OS_SPECIFIC_SOURCES}/IccDEVCmm.def"
     "${OS_SPECIFIC_SOURCES}/IccDEVCmm.rc"
     "${OS_SPECIFIC_SOURCES}/resource.h"
     "${OS_SPECIFIC_SOURCES}/IccDEVCmm.h"
@@ -53,17 +66,13 @@ add_library(${TARGET_NAME} SHARED ${SOURCES})
 
 # MSVC-Specific Settings
 if (MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
+    if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY OR CMAKE_MSVC_RUNTIME_LIBRARY STREQUAL "")
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
+    endif()
+    set_target_properties(${TARGET_NAME} PROPERTIES
+        MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
 
-    # Precompiled header: create with stdafx.cpp, use for other .cpp files
-    set_source_files_properties("${OS_SPECIFIC_SOURCES}/stdafx.cpp"
-        PROPERTIES COMPILE_FLAGS "/Ycstdafx.h /Fp${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/RefIccMAX.pch")
-    foreach(SRC ${SOURCES})
-        if (NOT SRC STREQUAL "${OS_SPECIFIC_SOURCES}/stdafx.cpp" AND SRC MATCHES "^.*\\.cpp$")
-            set_source_files_properties("${SRC}"
-                PROPERTIES COMPILE_FLAGS "/Yustdafx.h /Fp${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/RefIccMAX.pch")
-        endif()
-    endforeach()
+    target_precompile_headers(${TARGET_NAME} PRIVATE "${OS_SPECIFIC_SOURCES}/stdafx.h")
     set_source_files_properties("${OS_SPECIFIC_SOURCES}/IccDEVCmm.rc" PROPERTIES COMPILE_FLAGS "")
 endif()
 
@@ -84,14 +93,17 @@ target_link_libraries(${TARGET_NAME} PRIVATE ${LINK_LIBS})
 
 # ---- Name & PDB via properties (no /OUT or /PDB overrides) -------------------
 set_target_properties(${TARGET_NAME} PROPERTIES
-    OUTPUT_NAME "RefIccMAX"                               # DLL name → RefIccMAX.dll
+    OUTPUT_NAME "IccDEVCmm"                               # DLL name aligns with Winnt DEF/RC metadata
+    DEBUG_POSTFIX ""
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
     PDB_OUTPUT_DIRECTORY     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
 )
 
-# Keep non-path link flags
-target_link_options(${TARGET_NAME} PRIVATE "/DYNAMICBASE:NO" "/NODEFAULTLIB:LIBCMT")
+if(MSVC)
+    # Keep non-path MSVC link flags off MinGW, where ld treats them as files.
+    target_link_options(${TARGET_NAME} PRIVATE "/DYNAMICBASE:NO" "/NODEFAULTLIB:LIBCMT")
+endif()
 
 message(STATUS "RefIccMAX.dll build configuration complete.")

@@ -1,63 +1,33 @@
-# 🖨️ iccTiffDump
+# IccTiffDump
 
-**iccTiffDump** is a command-line tool for extracting ICC profile metadata and technical characteristics from TIFF images.
-It helps color scientists and developers audit TIFF structure, verify embedded color profiles, and analyze imaging parameters.
+`iccTiffDump` prints TIFF metadata and embedded ICC profile information.
 
----
+## Usage
 
-## 🔧 Features
+Run without arguments to print the current command syntax and supported options:
 
-- ✅ **TIFF Metadata Reporting**
-  - Image dimensions, DPI, compression type, photometric model
-- ✅ **ICC Profile Analysis**
-  - Extracts embedded ICC profile with PCS, signature, description
-- ✅ **Sample Precision Reporting**
-  - Bits per component, sample format, samples per pixel
-- ✅ **Tag Visibility**
-  - Shows image layout, color space tags, resolution units
-- ✅ **Multilingual Support**
-  - Recognizes multi-language ICC descriptions and localized tags
-
----
-
-## 🚀 Usage
-
-### 📤 Extract Profile and Metadata
-
-```bash
-iccTiffDump input.tiff
+```sh
+iccTiffDump
 ```
 
-Prints TIFF structure summary and ICC profile block if present.
+Dump TIFF metadata and embedded ICC profile metadata:
 
----
+```sh
+iccTiffDump image.tif
+```
 
-## 📘 Output Highlights
+Extract an embedded ICC profile:
 
-- **Image Size** — Width × Height, DPI resolution
-- **Color Model** — Photometric (RGB, CMYK, grayscale, etc.)
-- **Compression** — e.g., LZW, PackBits, JPEG
-- **ICC Block** — Version, size, PCS, rendering intent, description
+```sh
+iccTiffDump image.tif embedded.icc
+```
 
----
+The no-argument form is a help/syntax path and exits successfully. Other
+malformed invocations fail: extra trailing arguments are rejected, missing input
+files fail, and export requests fail when the TIFF has no embedded ICC profile.
 
-## 🧪 Advanced Use
+## See Also
 
-- Suitable for fuzzing TIFF encoders with profile injection
-- Validates deterministic TIFF profile roundtrips
-
----
-
-## 📚 Related Tools
-
-- `iccEval`, `iccFromXml`, `iccApplyProfiles`
-- Compatible with PNG and JPEG ICC tools from same suite
-
----
-
-## 🔒 Notes
-
-- Supports baseline and BigTIFF variants
-- Reports errors for malformed tag blocks
-
----
+- [CLI tool reference](../../../docs/tools-cli-reference.md)
+- [IccJpegDump](../IccJpegDump/Readme.md)
+- [IccPngDump](../IccPngDump/Readme.md)

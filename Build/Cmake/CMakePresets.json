@@ -11,37 +11,77 @@
       "hidden": true,
       "generator": "Ninja",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
     {
       "name": "vs2022-x64",
       "inherits": "default-base",
       "displayName": "Windows MSVC (VS2022)",
+      "description": "Builds Windows executables and DLLs into bin/<Config> so tools run from the build tree without an iccDEV PATH helper.",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build/vs2022-x64",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "$penv{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_MANIFEST_DIR": "${sourceDir}"
+        "VCPKG_MANIFEST_DIR": "${sourceDir}",
+        "ICCDEV_WINDOWS_UNIFIED_RUNTIME": "ON"
+      }
+    },
+    {
+      "name": "vs2022-clangcl-x64",
+      "inherits": "vs2022-x64",
+      "displayName": "Windows ClangCL (VS2022)",
+      "description": "Builds with the Visual Studio LLVM toolset and the same unified bin/<Config> runtime layout as vs2022-x64.",
+      "toolset": "ClangCL"
+    },
+    {
+      "name": "mingw-ucrt64-base",
+      "inherits": "default-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "environment": {
+        "PATH": "C:/msys64/ucrt64/bin;C:/msys64/usr/bin;$penv{PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "C:/msys64/ucrt64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
+        "CMAKE_PREFIX_PATH": "C:/msys64/ucrt64"
       }
     },
     {
       "name": "mingw-x64",
-      "inherits": "default-base",
-      "displayName": "Windows MinGW x64",
-      "binaryDir": "${sourceDir}/build/mingw-x64",
+      "inherits": "mingw-ucrt64-base",
+      "displayName": "Windows MinGW UCRT64",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
-        "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-g++"
+        "ICCDEV_WINDOWS_UNIFIED_RUNTIME": "ON",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_CMM_TOOLS": "OFF",
+        "ENABLE_IIS_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "mingw-core-x64",
+      "inherits": "mingw-ucrt64-base",
+      "displayName": "Windows MinGW UCRT64 core static",
+      "cacheVariables": {
+        "ENABLE_TESTS": "ON",
+        "ENABLE_TOOLS": "ON",
+        "ICCDEV_WINDOWS_UNIFIED_RUNTIME": "ON",
+        "ENABLE_STATIC_LIBS": "ON",
+        "ENABLE_SHARED_LIBS": "OFF",
+        "ENABLE_ICCXML": "OFF",
+        "ENABLE_ICCJSON": "ON",
+        "ENABLE_IMAGE_TOOLS": "OFF",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_CMM_TOOLS": "OFF",
+        "ENABLE_IIS_TOOLS": "OFF"
       }
     },
     {
       "name": "linux-gcc",
       "inherits": "default-base",
       "displayName": "Linux GCC",
-      "binaryDir": "${sourceDir}/build/linux-gcc",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++"
@@ -51,7 +91,6 @@
       "name": "linux-clang",
       "inherits": "default-base",
       "displayName": "Linux Clang",
-      "binaryDir": "${sourceDir}/build/linux-clang",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
@@ -61,50 +100,143 @@
       "name": "linux-gcc-asan",
       "inherits": "linux-gcc",
       "displayName": "Linux GCC with AddressSanitizer",
-      "binaryDir": "${sourceDir}/build/linux-gcc-asan",
       "cacheVariables": {
-        "ENABLE_SANITIZERS": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "ENABLE_ASAN": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "linux-clang-asan",
       "inherits": "linux-clang",
       "displayName": "Linux Clang with AddressSanitizer",
-      "binaryDir": "${sourceDir}/build/linux-clang-asan",
+      "cacheVariables": {
+        "ENABLE_ASAN": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-sanitizers",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with ASan, UBSan, IntSan, and float sanitizers",
       "cacheVariables": {
         "ENABLE_SANITIZERS": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-ubsan-int-float",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with UBSan, IntSan, and float sanitizers",
+      "cacheVariables": {
+        "ENABLE_UBSAN": "ON",
+        "ENABLE_INTEGER_SANITIZER": "ON",
+        "ENABLE_FLOAT_SANITIZER": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "linux-clang-tsan",
       "inherits": "linux-clang",
       "displayName": "Linux Clang with ThreadSanitizer",
-      "binaryDir": "${sourceDir}/build/linux-clang-tsan",
       "cacheVariables": {
         "ENABLE_TSAN": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "linux-clang-msan",
       "inherits": "linux-clang",
       "displayName": "Linux Clang with MemorySanitizer",
-      "binaryDir": "${sourceDir}/build/linux-clang-msan",
       "cacheVariables": {
         "ENABLE_MSAN": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "linux-clang-ubsan",
       "inherits": "linux-clang",
       "displayName": "Linux Clang with UBSanitizer",
-      "binaryDir": "${sourceDir}/build/linux-clang-ubsan",
       "cacheVariables": {
         "ENABLE_UBSAN": "ON",
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-coverage",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with source coverage",
+      "cacheVariables": {
+        "ENABLE_COVERAGE": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-profiling",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang with gprof/perf profiling",
+      "cacheVariables": {
+        "ENABLE_PROFILING": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-raspi",
+      "inherits": "default-base",
+      "displayName": "Linux Raspberry Pi (GCC, Release, no GUI)",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_CMM_TOOLS": "OFF",
+        "ENABLE_IIS_TOOLS": "OFF",
+        "ENABLE_LTO": "OFF"
+      }
+    },
+    {
+      "name": "linux-raspi-debug",
+      "inherits": "linux-raspi",
+      "displayName": "Linux Raspberry Pi (GCC, Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "macos-clang",
+      "inherits": "default-base",
+      "displayName": "macOS Clang",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "macos-clang-guard-malloc",
+      "inherits": "macos-clang",
+      "displayName": "macOS Clang with GuardMalloc support",
+      "description": "Debug tool build for DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib. Use the check-macos-guard-malloc target to verify LC_UUID load commands before running libgmalloc.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_TOOLS": "ON",
+        "ENABLE_MACOS_GUARD_MALLOC": "ON"
+      }
+    },
+    {
+      "name": "macos-clang-sanitizers",
+      "inherits": "macos-clang",
+      "displayName": "macOS Clang with ASan, UBSan, IntSan, and float sanitizers",
+      "description": "Debug sanitizer build for crash and UB attribution. Keep this separate from GuardMalloc/libgmalloc runs.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_TOOLS": "ON",
+        "ENABLE_SANITIZERS": "ON"
       }
     },
     {
@@ -112,25 +244,29 @@
       "inherits": "default-base",
       "displayName": "macOS (Xcode)",
       "generator": "Xcode",
-      "binaryDir": "${sourceDir}/build/macos-xcode"
+      "binaryDir": "${sourceDir}/../../out/${presetName}"
     }
   ],
   "buildPresets": [
     {
-      "name": "build-release",
-      "configurePreset": "vs2022-x64",
+      "name": "macos-clang",
+      "configurePreset": "macos-clang",
       "configuration": "Release"
     },
     {
-      "name": "build-debug",
-      "configurePreset": "vs2022-x64",
+      "name": "macos-clang-guard-malloc",
+      "configurePreset": "macos-clang-guard-malloc",
       "configuration": "Debug"
-    }
-  ],
-  "testPresets": [
+    },
     {
-      "name": "test-default",
-      "configurePreset": "vs2022-x64"
+      "name": "macos-clang-sanitizers",
+      "configurePreset": "macos-clang-sanitizers",
+      "configuration": "Debug"
+    },
+    {
+      "name": "macos-xcode",
+      "configurePreset": "macos-xcode",
+      "configuration": "Release"
     }
   ]
 }

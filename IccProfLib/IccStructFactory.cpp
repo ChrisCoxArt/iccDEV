@@ -84,28 +84,31 @@ IIccStruct* CIccBasicStructFactory::CreateStruct(icStructSignature structTypeSig
 {
   switch(structTypeSig) {
     case icSigBRDFStruct:
-      return new CIccStructBRDF(pTagStruct);
+      return new (std::nothrow) CIccStructBRDF(pTagStruct);
 
     case icSigColorantInfoStruct:
-      return new CIccStructColorantInfo(pTagStruct);
+      return new (std::nothrow) CIccStructColorantInfo(pTagStruct);
 
     case icSigColorEncodingParamsSruct:
-      return new CIccStructColorEncodingParams(pTagStruct);
+      return new (std::nothrow) CIccStructColorEncodingParams(pTagStruct);
 
     case icSigMeasurementInfoStruct:
-      return new CIccStructMeasurementInfo(pTagStruct);
+      return new (std::nothrow) CIccStructMeasurementInfo(pTagStruct);
 
     case icSigNamedColorStruct:
-      return new CIccStructNamedColor(pTagStruct);
+      return new (std::nothrow) CIccStructNamedColor(pTagStruct);
+
+    case icSigProfileConnectionConditionsStruct:
+      return new (std::nothrow) CIccStructProfileConnectionConditions(pTagStruct);
 
     case icSigProfileInfoStruct:
-      return new CIccStructProfileInfo(pTagStruct);
+      return new (std::nothrow) CIccStructProfileInfo(pTagStruct);
 
     case icSigTintZeroStruct:
-      return new CIccStructTintZero(pTagStruct);
+      return new (std::nothrow) CIccStructTintZero(pTagStruct);
 
     default:
-      return new CIccStructUnknown(pTagStruct);
+      return new (std::nothrow) CIccStructUnknown(pTagStruct);
   }
 }
 
@@ -120,6 +123,7 @@ static struct {
   {icSigColorEncodingParamsSruct, "colorEncodingParamsStructure"},
   {icSigMeasurementInfoStruct, "measurementInfoStructure"},
   {icSigNamedColorStruct, "namedColorStructure"},
+  {icSigProfileConnectionConditionsStruct, "profileConnectionConditionsStructure"},
   {icSigProfileInfoStruct, "profileInfoStructure"},
   {icSigTintZeroStruct, "tintZeroStructure"},
   {(icStructSignature)0, ""},
@@ -210,6 +214,9 @@ bool CIccStructCreator::DoGetStructSigName(std::string &structName, icStructSign
 
 icStructSignature CIccStructCreator::DoGetStructSig(const icChar* structName)
 {
+  if (!structName || !structName[0])
+    return (icStructSignature)0;
+
   CIccStructFactoryList::iterator i;
 
   for (i = factoryStack.begin(); i != factoryStack.end(); i++) {

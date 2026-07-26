@@ -1,36 +1,25 @@
 #!/bin/sh
 #################################################################################
-# Testing/RunTests.sh | iccMAX Project
-# Copyright (C) 2024-2025 The International Color Consortium. 
+# Testing/RunTests.sh | iccDEV Project
+# Copyright (C) 2024-2026 The International Color Consortium.
 #                                        All rights reserved.
-# 
 #
-#  Last Updated: Thu May  8 07:33:04 EDT 2025 by David Hoyt
+#  Last Updated: 2026-04-09
 #
-#
-#
-#
-#
-#
-# Intent: iccMAX CICD
-#
-#
-#
-#
+# Intent: iccDEV CICD
 #################################################################################
 
+# Auto-source path.sh if present (sets PATH and LD_LIBRARY_PATH/DYLD_LIBRARY_PATH)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/path.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$SCRIPT_DIR/path.sh"
+fi
+
 echo "====================== Entering Testing/RunTests.sh =========================="
+RUNTEST_STATUS=0
 
-# Properly handle newline-separated paths as a list
-find ../Build/Tools -type f -perm -111 -exec dirname {} \; | sort -u | while read -r d; do
-  abs_path=$(cd "$d" && pwd)
-  PATH="$abs_path:$PATH"
-done
-
-export PATH
-
-
-if ! command -v iccApplyNamedCmm   # print which executable is being used
+if ! command -v iccApplyNamedCmm > /dev/null
 then
 	exit 1
 fi
@@ -40,40 +29,44 @@ echo "Test CalcElement Operations return of zero's indicates that something bad 
 iccApplyNamedCmm Calc/srgbCalcTest.txt 2 0 Calc/srgbCalcTest.icc 3 sRGB_v4_ICC_preference.icc 3
 
 echo "==========================================================================="
+echo "Test Extended CalcElement Operations return of zero's indicates that something bad happened"
+iccApplyNamedCmm Calc/srgbCalcTest.txt 2 0 Calc/srgbCalc++Test.icc 3 sRGB_v4_ICC_preference.icc 3
+
+echo "==========================================================================="
 echo "Test NamedColor"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 sRGB_v4_ICC_preference.icc 1
+iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Lab_float-D50_2deg.icc sRGB_v4_ICC_preference.icc 1
 
 echo "==========================================================================="
 echo "Test NamedColor with D93 2degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with D93 10degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_10deg-MAT.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_10deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with D65 2degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D65_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with D65 10degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D65_10deg-MAT.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D65_10deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with D50 2degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D50_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with D50 10degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D50_10deg-MAT.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-D50_10deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with Illuminant A 2degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-IllumA_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-IllumA_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test NamedColor with Illuminant A 10degree"
-iccApplyNamedCmm Named/NamedColorTest.txt 2 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-IllumA_10deg-MAT.icc PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm Named/NamedColorTest.txt 3 0 Named/NamedColor.icc 3 -pcc PCC/Spec400_10_700-IllumA_10deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test Grayscale GSDF Display link profile with ambient luminance of 20cd/m^2"
@@ -87,13 +80,13 @@ echo "==========================================================================
 echo "Test Fluorescent Color under D93"
 iccApplyNamedCmm Named/FluorescentNamedColorTest.txt 2 0 Named/FluorescentNamedColor.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc SpecRef/SixChanCameraRef.icc 1
 
-echo "========================================="
+echo "==========================================================================="
 echo "Test Fluorescent Color under D65"
 iccApplyNamedCmm Named/FluorescentNamedColorTest.txt 2 0 Named/FluorescentNamedColor.icc 3 -pcc PCC/Spec400_10_700-D65_2deg-Abs.icc SpecRef/SixChanCameraRef.icc 1
 
 echo "==========================================================================="
 echo "Test Fluorescent under D50"
-iccApplyNamedCmm Named/FluorescentNamedColorTest.txt 2 0 Named/FluorescentNamedColor.icc 3 -pcc PCC/Spec400_10_700-D50_10deg.icc SpecRef/SixChanCameraRef.icc 1
+iccApplyNamedCmm Named/FluorescentNamedColorTest.txt 2 0 Named/FluorescentNamedColor.icc 3 -pcc PCC/Spec400_10_700-D50_10deg-Abs.icc SpecRef/SixChanCameraRef.icc 1
 
 echo "==========================================================================="
 echo "Test Fluorescent under Illuminant A"
@@ -105,10 +98,53 @@ iccApplyNamedCmm SpecRef/sixChanTest.txt 2 0 SpecRef/SixChanCameraRef.icc 3 PCC/
 
 echo "==========================================================================="
 echo "Test Six Channel Reflectance Camera to Lab"
-iccApplyNamedCmm SpecRef/sixChanTest.txt 3 0 SpecRef/SixChanCameraRef.icc 3 PCC/Lab_float-D50_2deg.icc 3
+iccApplyNamedCmm SpecRef/sixChanTest.txt 3 0 SpecRef/SixChanCameraRef.icc 3 -pcc PCC/Spec400_10_700-D50_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
 echo "==========================================================================="
 echo "Test Six Channel Reflectance Camera reflectance under D93 to Lab"
 iccApplyNamedCmm SpecRef/sixChanTest.txt 3 0 SpecRef/SixChanCameraRef.icc 3 -pcc PCC/Spec400_10_700-D93_2deg-Abs.icc PCC/Lab_float-D50_2deg.icc 3
 
+echo "==========================================================================="
+echo "Test 380_5_780 Reflectance under D50 to XYZ"
+iccApplyNamedCmm ApplyDataFiles/cc_ref-380_5_780.txt 1 0 PCC/Spec380_5_780-D50_2deg.icc 3 PCC/XYZ_float-D50_2deg.icc 3
+
+echo "==========================================================================="
+echo "Test 380_10_730 Reflectance under D50 to XYZ"
+iccApplyNamedCmm ApplyDataFiles/cc_ref-380_10_730.txt 1 0 PCC/Spec380_10_730-D50_2deg.icc 3 PCC/XYZ_float-D50_2deg.icc 3
+
+echo "==========================================================================="
+echo "CalcElement based aRGB profile test"
+iccApplyNamedCmm -debugcalc Calc/srgbCalcTest.txt 3 0 Calc/argbCalc.icc 1
+
+echo "==========================================================================="
+echo "Test JSON round-trip (iccToJson / iccFromJson)"
+if command -v iccToJson > /dev/null && command -v iccFromJson > /dev/null
+then
+	JSON_RT_DIR="${TMPDIR:-/tmp}/iccdev-json-roundtrip-$$"
+	rm -rf "$JSON_RT_DIR"
+	mkdir -p "$JSON_RT_DIR" || exit 1
+	JSON_RT_FILE="$JSON_RT_DIR/sRGB_v4_ICC_preference.json"
+	JSON_RT_PROFILE="$JSON_RT_DIR/sRGB_v4_ICC_preference_rt.icc"
+	iccToJson sRGB_v4_ICC_preference.icc "$JSON_RT_FILE"
+	iccFromJson "$JSON_RT_FILE" "$JSON_RT_PROFILE"
+	if [ -f "$JSON_RT_PROFILE" ]; then
+		echo "JSON round-trip: PASS"
+	else
+		echo "JSON round-trip: FAIL"
+		RUNTEST_STATUS=1
+	fi
+	rm -rf "$JSON_RT_DIR"
+else
+	echo "iccToJson/iccFromJson not found -- skipping JSON tests"
+	if [ "${ICCDEV_REQUIRE_JSON_ROUNDTRIP:-0}" = "1" ]; then
+		RUNTEST_STATUS=1
+	fi
+fi
+
+echo "==========================================================================="
+echo "Test iccProfileVisualize with sRGBv4_preference"
+iccProfileVisualize sRGB_v4_ICC_preference.icc
+
+
 echo "====================== Exiting Testing/RunTests.sh =========================="
+exit "$RUNTEST_STATUS"

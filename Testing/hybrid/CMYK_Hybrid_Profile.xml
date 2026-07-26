@@ -26998,7 +26998,9 @@
       <Header>
         <PreferredCMMType>ONYX</PreferredCMMType>
         <ProfileVersion>5.10</ProfileVersion>
+        <ProfileSubClassVersion>1.0</ProfileSubClassVersion>
         <ProfileDeviceClass>prtr</ProfileDeviceClass>
+        <ProfileDeviceSubClass>sref</ProfileDeviceSubClass>
         <DataColourSpace>CMYK</DataColourSpace>
         <PCS></PCS>
         <CreationDateTime>now</CreationDateTime>
@@ -27013,7 +27015,7 @@
         <ProfileID>1</ProfileID>
         <SpectralPCS>rs0024</SpectralPCS>
         <SpectralRange>
-         <Wavelengths start="380.00000000" end="720.00000000" steps="36"/>
+         <Wavelengths start="380.00000000" end="730.00000000" steps="36"/>
         </SpectralRange>
       </Header>
       <Tags>

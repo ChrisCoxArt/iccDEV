@@ -1,92 +1,54 @@
-# iccApplySearch
+# IccApplySearch
 
-## Overview
-
-`iccApplySearch` is a command-line tool that applies a sequence of profiles, utilizing a search with the forward transform of the last profile. When the first profile is a PCS encoding profile this provides a logical inverse of the forward transform of the last profile. This is especially useful when the forward transform of the last profile results in a spectral PCS without the availability of a reverse transform in the last profile and the first profile is a spectral PCS encoding profile. Using a colorimetric PCS encoding intermediate profile with a weighted set of Profile Connection Conditions profiles allows for spectral color reproduction to be performed. This tool supports JSON and legacy data inputs, and ICCv5 capabilities including debugging of calculator-based profiles.
-
----
-
-## Features
-
-- Supports color data in:
-  - Legacy (plain text)
-  - JSON structured format
-  - Embedded ICC configurations
-- Applies ICC profiles using ICCMAX-enabled CMM
-- Outputs transformed color data in:
-  - IT8
-  - JSON
-  - Text
-
----
+`iccApplySearch` applies a profile sequence using search against the forward
+transform of the last profile. It is useful when a reverse transform is not
+available, including spectral PCS workflows.
 
 ## Usage
 
-### Config-Based Mode
+Run without arguments to print the current command syntax and supported options:
 
 ```sh
-iccApplySearch -cfg config.json
+iccApplySearch
 ```
 
-- `config.json` must include:
-  - `dataFiles`
-  - `reverseProfileSequence`
-  - (optionally) `colorData`
+## Search Cost and Metamerism Index
 
-### Legacy CLI Mode
+The underlying [`CIccCmmSearch`](../../../IccProfLib/IccCmmSearch.h) class
+exposes a `GetApplyCost(icFloatNumber& dCost, const icFloatNumber* SrcPixel)`
+method that returns the residual cost of an inverse-search apply. The cost
+is the weighted average of color differences between the target appearance
+(`SrcPixel`) and the appearance the matched device values produce under
+each attached Profile Connection Condition (PCC):
 
-```sh
-iccApplySearch {-debugcalc} data_file_path encoding[:precision[:digits]] interpolation {-ENV:tag value} profile1_path intent1 {{-ENV:tag value} middle_profile_path mid_intent} {-ENV:tag value} profile2_path intent2 -INIT init_intent2 {pcc_path1 weight1 ...}
+```text
+cost = (sum over PCC_i of weight_i * || dst_to_pcc_i(dev) - target_i ||) / sum(weight_i)
 ```
 
----
+For a single-PCC chain the cost reflects how close the optimizer got to the
+exact match (small = near-perfect; large = the target is outside the
+device's reachable set under that observation condition).
 
-## Arguments
+For a multi-PCC chain - for example, an `iccApplySearch` invocation that
+attaches the same chain under D50, D93, F11, and Illuminant A - the cost
+is the unavoidable residual after the optimizer trades a perfect match
+under one PCC for a better compromise across all. In this role it
+functions as an **index of metamerism** for the input reflectance / PCS
+value: a low cost means a single device value exists that reproduces the
+target across every attached observation condition; a high cost means the
+target is metameric - the device must compromise between conditions, and
+the cost quantifies that compromise.
 
-- **`encoding` values**:
-  - `0` = Lab/XYZ Value
-  - `1` = Percent
-  - `2` = Unit Float
-  - `3` = Raw Float
-  - `4` = 8-bit
-  - `5` = 16-bit
-  - `6` = 16-bit ICCv2 style
+`GetApplyCost` is a library-level entry point; the CLI does not currently
+print costs alongside the apply output. To obtain costs programmatically,
+construct the search CMM via [`CIccConnectCmm::CreateSearch`](../../../docs/icc-connect.md)
+(or directly with `CIccCmmSearch::AddXform` + `AttachPCC`), call `Begin()`,
+and then call `GetApplyCost` per sample. The method is not thread-safe; it
+shares apply state with `Apply()`.
 
-- **Interpolation**:
-  - `0` = Linear
-  - `1` = Tetrahedral
+## See Also
 
-- **Intent** (plus modifiers):
-  - `0–3`: Perceptual, Relative, Saturation, Absolute
-  - `+10`: Disable D2Bx/B2Dx
-  - `+40`: With BPC
-  - `+90 + Intent - Colorimetric Only`
-  - `100 + Intent - Spectral Only`
-  - `+10000 - Use V5 sub-profile if present`
-
----
-
-## Output Formats
-
-Determined by config or filename:
-- `output.txt`: legacy textual
-- `output.json`: JSON color set
-- `output.it8`: IT8 table
-
----
-
-## Example
-
-```sh
-iccApplySearch -cfg config_named.json
-```
-
-```sh
-iccApplySearch colors.txt 0:4:7 1 3 spec400-10-700.icc 3 profile.icc 1003 lab.icc 3 d50.icc d95.icc illA.icc
-```
-
----
-
-## Changelog
-
-- Original implementation by Max Derhak (2025)
+- [CLI tool reference](../../../docs/tools-cli-reference.md)
+- [IccJSON guide](../../../docs/iccjson.md)
+- [IccConnect library](../../../docs/icc-connect.md) - `CreateSearch` factory
+  and JSON-driven setup of multi-PCC search chains.

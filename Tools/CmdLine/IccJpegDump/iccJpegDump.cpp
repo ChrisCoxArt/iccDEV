@@ -84,10 +84,17 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include "../IccCmdLineUtil.h"
 #if defined(_WIN32)
   #include <winsock2.h>
 #else
   #include <arpa/inet.h>
+#endif
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 
@@ -139,6 +146,30 @@ void Usage() {
 }
 
 // ============================================================================
+
+static
+FILE* icOpenWriteBinaryFile(const char* szFname)
+{
+  return icOpenRegularWriteBinaryFile(szFname);
+}
+
+static bool ReadBinaryStream(std::istream& input, std::vector<unsigned char>& data)
+{
+    data.clear();
+    unsigned char buffer[4096];
+
+    while (input) {
+        input.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
+        std::streamsize count = input.gcount();
+        if (count > 0) {
+            data.insert(data.end(), buffer, buffer + static_cast<size_t>(count));
+        }
+    }
+
+    return input.eof();
+}
+
+// ============================================================================
 // Function: ExtractIccFromJpeg
 // ----------------------------------------------------------------------------
 // Description:
@@ -157,95 +188,98 @@ void Usage() {
 //   true if a valid ICC profile was found and written to disk, false otherwise.
 // ============================================================================
 bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
-    FILE* fp = fopen(jpegPath, "rb");
-    if (!fp) safe_exit("Cannot open input JPEG file.");
+    std::ifstream file(jpegPath, std::ios::binary);
+    if (!file) safe_exit("Cannot open input JPEG file.");
 
-    std::vector<unsigned char> iccData;
-    unsigned char marker[2];
-    bool found = false;
+    std::vector<unsigned char> data;
+    if (!ReadBinaryStream(file, data)) safe_exit("Failed to read input JPEG file.");
 
-    // ------------------------------------------------------------
-    // Iterate JPEG markers and scan for APPx segments
-    // ------------------------------------------------------------
-    while (fread(marker, 1, 2, fp) == 2) {
-        if (marker[0] != 0xFF) break;
-        if (marker[1] == 0xD9) break;  // EOI
-
-        unsigned short len = 0;
-        if (fread(&len, 2, 1, fp) != 1) break;
-        len = ntohs(len);
-
-        if (len < 2) break;
-        std::vector<unsigned char> segment(len - 2);
-        if (fread(segment.data(), 1, segment.size(), fp) != segment.size())
-            break;
-
-        printf("[INFO] Scanning segment 0x%02X, length: %u bytes\n", marker[1], len);
-
-        // --------------------------------------------------------
-        // Check for APP2 ICC_PROFILE header (spec-compliant)
-        // --------------------------------------------------------
-        if (marker[1] == 0xE2 && len > 16) {
-            if (memcmp(segment.data(), "ICC_PROFILE\0", 12) == 0) {
-                unsigned char* dataStart = segment.data() + 14;
-                size_t dataLen = segment.size() - 14;
-                iccData.insert(iccData.end(), dataStart, dataStart + dataLen);
-                printf("[INFO] Found ICC_PROFILE in APP2 segment.\n");
-                found = true;
-                break;
-            }
-        }
-
-        // --------------------------------------------------------
-        // Fallback: Search all APPx for "acsp" ICC signature
-        // --------------------------------------------------------
-        if (marker[1] >= 0xE0 && marker[1] <= 0xEF) {
-            for (size_t i = 0; i + 4 < segment.size(); ++i) {
-                if (memcmp(&segment[i], "acsp", 4) == 0) {
-                    iccData.insert(iccData.end(), segment.begin() + i, segment.end());
-                    printf("[INFO] Found 'acsp' ICC magic in APP segment 0x%02X at offset %zu.\n", marker[1], i);
-                    goto done;
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------
-    // Raw Fallback: Scan entire file for "acsp"
-    // ------------------------------------------------------------
-    if (!found) {
-        std::ifstream file(jpegPath, std::ios::binary);
-        if (!file) {
-            LOG_ERROR("Fallback open failed.");
-            return false;
-        }
-
-        std::vector<unsigned char> raw((std::istreambuf_iterator<char>(file)),
-                                       std::istreambuf_iterator<char>());
-
-        for (size_t i = 0; i + 4 < raw.size(); ++i) {
-            if (memcmp(&raw[i], "acsp", 4) == 0) {
-                iccData.insert(iccData.end(), raw.begin() + i, raw.end());
-                printf("[INFO] Fallback: Found 'acsp' in raw file at offset %zu.\n", i);
-                break;
-            }
-        }
-    }
-
-done:
-    fclose(fp);
-
-    if (iccData.empty()) {
-        LOG_ERROR("No ICC profile found.");
+    const size_t n = data.size();
+    if (n < 2 || data[0] != 0xFF || data[1] != 0xD8) {
+        LOG_ERROR("Not a valid JPEG file (missing SOI).");
         return false;
     }
 
-    FILE* out = fopen(iccOutPath, "wb");
-    if (!out) safe_exit("Failed to open output ICC file.");
-    fwrite(iccData.data(), 1, iccData.size(), out);
-    fclose(out);
+    // ICC profiles are carried in one or more APP2 segments, each beginning with
+    // the 12-byte "ICC_PROFILE\0" signature followed by a 1-based chunk number and
+    // a chunk count; the profile is those chunks concatenated in order (ITU-T T.871
+    // / ICC Annex B).  Walk the JPEG marker structure and reassemble them.  The old
+    // code stopped at the first APP2 and otherwise scanned raw bytes for 'acsp',
+    // which truncated multi-segment profiles and matched arbitrary data (#1382).
+    static const unsigned char kSig[12] = {
+        'I','C','C','_','P','R','O','F','I','L','E','\0' };
 
-    printf("[INFO] ICC profile extracted to: %s\n", iccOutPath);
+    std::vector<std::vector<unsigned char> > chunks;
+    std::vector<bool> seen;
+    unsigned int totalChunks = 0;
+    size_t pos = 2;  // past SOI
+
+    while (pos < n) {
+        if (data[pos] != 0xFF) { pos++; continue; }        // resync to next marker
+        while (pos < n && data[pos] == 0xFF) pos++;         // skip marker 0xFF + fill
+        if (pos >= n) break;
+        unsigned char m = data[pos++];
+
+        if (m == 0xD9 || m == 0xDA) break;                  // EOI, or SOS (entropy data follows)
+        if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue; // standalone markers (no length)
+
+        if (pos + 2 > n) break;
+        unsigned int segLen = (unsigned int)((data[pos] << 8) | data[pos + 1]);
+        pos += 2;
+        if (segLen < 2 || pos + (segLen - 2) > n) break;
+        size_t payloadLen = segLen - 2;
+        const unsigned char* seg = &data[pos];
+
+        if (m == 0xE2 && payloadLen >= 14 && memcmp(seg, kSig, 12) == 0) {
+            unsigned int seq = seg[12];
+            unsigned int total = seg[13];
+            if (seq == 0 || total == 0 || seq > total) {
+                LOG_ERROR("Invalid ICC_PROFILE APP2 chunk sequence.");
+                return false;
+            }
+            if (totalChunks == 0) {
+                totalChunks = total;
+                chunks.resize(total);
+                seen.assign(total, false);
+            }
+            else if (total != totalChunks) {
+                LOG_ERROR("Inconsistent ICC_PROFILE APP2 chunk count.");
+                return false;
+            }
+            if (seen[seq - 1]) {
+                LOG_ERROR("Duplicate ICC_PROFILE APP2 chunk.");
+                return false;
+            }
+            seen[seq - 1] = true;
+            chunks[seq - 1].assign(seg + 14, seg + payloadLen);
+            printf("[INFO] ICC_PROFILE APP2 chunk %u/%u (%zu bytes).\n",
+                   seq, total, payloadLen - 14);
+        }
+        pos += payloadLen;
+    }
+
+    if (totalChunks == 0) {
+        LOG_ERROR("No ICC_PROFILE APP2 marker found.");
+        return false;
+    }
+
+    std::vector<unsigned char> iccData;
+    for (unsigned int i = 0; i < totalChunks; ++i) {
+        if (!seen[i]) {
+            LOG_ERROR("Incomplete ICC_PROFILE APP2 sequence (missing chunk).");
+            return false;
+        }
+        iccData.insert(iccData.end(), chunks[i].begin(), chunks[i].end());
+    }
+
+    FILE* out = icOpenWriteBinaryFile(iccOutPath);
+    if (!out) safe_exit("Failed to open output ICC file.");
+    bool failed = fwrite(iccData.data(), 1, iccData.size(), out) != iccData.size();
+    if (failed) safe_exit("Failed to write output ICC file.");
+    if (!icFlushAndClose(out)) safe_exit("Failed to close output ICC file.");
+
+    printf("[INFO] ICC profile extracted to: %s (%zu bytes, %u chunk(s))\n",
+           iccOutPath, iccData.size(), totalChunks);
     return true;
 }
 
@@ -273,7 +307,7 @@ done:
 // ============================================================================
 bool InjectIccIntoJpeg(const char* inputPath, const char* iccPath, const char* outputPath) {
     FILE* in = fopen(inputPath, "rb");
-    FILE* out = fopen(outputPath, "wb");
+    FILE* out = icOpenWriteBinaryFile(outputPath);
     std::ifstream icc(iccPath, std::ios::binary);
 
     if (!in || !out || !icc.is_open())
@@ -282,8 +316,10 @@ bool InjectIccIntoJpeg(const char* inputPath, const char* iccPath, const char* o
     // ------------------------------------------------------------------------
     // Read ICC profile into memory
     // ------------------------------------------------------------------------
-    std::vector<unsigned char> iccData((std::istreambuf_iterator<char>(icc)),
-                                        std::istreambuf_iterator<char>());
+    std::vector<unsigned char> iccData;
+    if (!ReadBinaryStream(icc, iccData)) {
+        safe_exit("Failed to read ICC profile.");
+    }
 
     // ------------------------------------------------------------------------
     // Verify and copy SOI marker (0xFFD8)
@@ -301,7 +337,8 @@ bool InjectIccIntoJpeg(const char* inputPath, const char* iccPath, const char* o
     }
     if (soi[0] != 0xFF || soi[1] != 0xD8)
         safe_exit("Not a valid JPEG file.");
-    fwrite(soi, 1, 2, out);
+    if (fwrite(soi, 1, 2, out) != 2)
+        safe_exit("Failed to write JPEG SOI marker.");
 
     // ------------------------------------------------------------------------
     // Write APP2 segment with ICC header and payload
@@ -313,26 +350,51 @@ bool InjectIccIntoJpeg(const char* inputPath, const char* iccPath, const char* o
     //   - Total Segs  : 1
     //   - ICC Data    : full profile binary
     // ------------------------------------------------------------------------
-    std::string sig = "ICC_PROFILE";
-    unsigned short markerLen = 2 + sig.size() + 1 + 2 + iccData.size(); // length includes itself
-    unsigned short markerBE = htons(markerLen);
+    // Split the profile across as many APP2 segments as needed.  Each segment's
+    // length is a 2-byte field, so a profile larger than ~64 KB MUST be chunked --
+    // the previous single-segment write overflowed that field for large profiles.
+    // Each segment carries "ICC_PROFILE\0" + a 1-based chunk number + the total
+    // chunk count, matching the reassembly in ExtractIccFromJpeg (#1382).
+    static const unsigned char kSig[12] = {
+        'I','C','C','_','P','R','O','F','I','L','E','\0' };
+    const size_t kMaxChunk = 65535 - 2 - 12 - 2;   // length field - len - sig - seq/count
+    size_t totalChunks = (iccData.size() + kMaxChunk - 1) / kMaxChunk;
+    if (totalChunks == 0)
+        totalChunks = 1;
+    if (totalChunks > 255)
+        safe_exit("ICC profile too large to embed in a JPEG (>255 APP2 chunks).");
 
-    fputc(0xFF, out); fputc(0xE2, out);                   // APP2
-    fwrite(&markerBE, 2, 1, out);                         // segment length
-    fwrite(sig.c_str(), 1, sig.size(), out);              // "ICC_PROFILE"
-    fputc(0x00, out);                                     // null terminator
-    fputc(1, out); fputc(1, out);                         // sequence 1 of 1
-    fwrite(iccData.data(), 1, iccData.size(), out);       // profile payload
+    for (size_t i = 0; i < totalChunks; ++i) {
+        size_t off = i * kMaxChunk;
+        size_t remaining = iccData.size() - off;
+        size_t chunkLen = remaining < kMaxChunk ? remaining : kMaxChunk;
+        unsigned short segLen = (unsigned short)(2 + 12 + 2 + chunkLen);
+        unsigned short segLenBE = htons(segLen);
+
+        if (fputc(0xFF, out) == EOF || fputc(0xE2, out) == EOF ||
+            fwrite(&segLenBE, 2, 1, out) != 1 ||
+            fwrite(kSig, 1, 12, out) != 12 ||
+            fputc((int)(i + 1), out) == EOF ||       // chunk number (1-based)
+            fputc((int)totalChunks, out) == EOF ||   // chunk count
+            fwrite(iccData.data() + off, 1, chunkLen, out) != chunkLen) {
+            safe_exit("Failed to write ICC APP2 segment.");
+        }
+    }
 
     // ------------------------------------------------------------------------
     // Append remainder of JPEG file unmodified
     // ------------------------------------------------------------------------
     unsigned char buf[4096];
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
-        fwrite(buf, 1, n, out);
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n)
+            safe_exit("Failed to write JPEG output.");
+    }
 
-    fclose(in); fclose(out); icc.close();
+    fclose(in);
+    if (!icFlushAndClose(out))
+        safe_exit("Failed to close output JPEG file.");
+    icc.close();
     return true;
 }
 

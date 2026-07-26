@@ -1,0 +1,18 @@
+# UBSAN ignorelist -- known-benign integer sanitizer findings
+# Used with -fsanitize-ignorelist= (compile-time suppression)
+# Reference: https://clang.llvm.org/docs/SanitizerSpecialCaseList.html
+#
+# These are NOT bugs. They are correct code that -fsanitize=integer
+# flags because the integer sanitizer catches well-defined but
+# potentially surprising unsigned arithmetic.
+#
+# See also: issue #763 for vptr runtime suppression pattern
+
+# RFC 1321 MD5 uses intentional unsigned 32-bit wrapping arithmetic
+# and bit rotation via left shift -- all well-defined for unsigned types
+# Fires in: IccMD5.cpp MD5Transform() lines 185-254
+[unsigned-integer-overflow]
+fun:*MD5Transform*
+
+[unsigned-shift-base]
+fun:*MD5Transform*

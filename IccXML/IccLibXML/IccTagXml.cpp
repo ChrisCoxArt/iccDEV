@@ -5,7 +5,7 @@
 
     Version:    V1
 
-    Copyright:  © see ICC Software License
+    Copyright:  see ICC Software License
 */
 
 /*
@@ -71,11 +71,13 @@
 #include "IccStructFactory.h"
 #include "IccArrayFactory.h"
 #include "IccConvertUTF.h"
+#include <new>     /* std::nothrow */
 #include <cstring> /* C strings strcpy, memcpy ... */
 #include <set>
 #include <map>
 #include <sstream>  // Make sure to include this header
 #include <iomanip>  // Include this header for setw and setfill
+#include <cmath>    // std::isfinite for NaN/Inf-safe float->int casts
 
 typedef  std::map<icUInt32Number, icTagSignature> IccOffsetTagSigMap;
 
@@ -83,8 +85,47 @@ typedef  std::map<icUInt32Number, icTagSignature> IccOffsetTagSigMap;
 namespace iccDEV {
 #endif
 
+// Parse a non-negative integer XML attribute value.
+//
+// atoi() returns a signed int, but the ParseXml handlers below store these
+// attributes into unsigned icUIntNN members/locals.  A negative attribute
+// therefore used to wrap to a huge unsigned value -- either implicitly (caught
+// by UBSan's implicit-integer-sign-change, e.g. #1342/#1343) or silently behind
+// an explicit (icUIntNN) cast (invisible to UBSan).  This helper centralizes
+// the fix: any negative (invalid) input is floored to 0 so the stored value is
+// always well-defined.
+//
+// Usage: replace `atoi(icXmlAttrValue(...))` with
+// `icXmlAttrToUInt(icXmlAttrValue(...))`.  The helper returns the widest
+// unsigned type (icUInt32Number); callers that target an 8- or 16-bit member
+// keep their explicit (icUInt8Number)/(icUInt16Number) cast exactly as before,
+// which both narrows the value and suppresses the implicit-integer-truncation
+// check, so no behavior other than the negative-wrap is changed (#1346).
+static icUInt32Number icXmlAttrToUInt(const char *szValue)
+{
+  int nValue = atoi(szValue);
+  return nValue < 0 ? 0u : (icUInt32Number)nValue;
+}
 
-bool CIccTagXmlUnknown::ToXml(std::string &xml, std::string blanks/* = ""*/) 
+static void icXmlCopyFixedString(char *dst, size_t dstSize, const char *src)
+{
+  if (!dst || !dstSize) {
+    return;
+  }
+  if (!src) {
+    src = "";
+  }
+
+  size_t len = strlen(src);
+  if (len >= dstSize) {
+    len = dstSize - 1;
+  }
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+}
+
+
+bool CIccTagXmlUnknown::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   xml += blanks + "<UnknownData>\n";
   icXmlDumpHexData(xml, blanks+" ", m_pData, m_nSize);
@@ -108,12 +149,13 @@ bool CIccTagXmlUnknown::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
   if (pNode && pNode->children && pNode->children->content) {
     m_nSize = icXmlGetHexDataSize((const icChar*)pNode->children->content);
 
-    if (m_pData) {
-      delete [] m_pData;
-      m_pData = NULL;
-    }
+    delete [] m_pData;
+    m_pData = NULL;
+
     if (m_nSize) {
-      m_pData = new icUInt8Number[m_nSize];
+      m_pData = new (std::nothrow) icUInt8Number[m_nSize];
+      if (!m_pData)
+        return false;
 
       if (icXmlGetHexData(m_pData, (const icChar*)pNode->children->content, m_nSize)!=m_nSize)
         return false;
@@ -129,12 +171,10 @@ static bool isTextLegalCDATA( const char *szText )
   if (szText[0] == 0)
     return true;
 
-// XML says CR and other control characters are legal inside a CDATA block...
-// W3C also says XML normalizes the file by removing CR before parsing.  https://www.w3.org/TR/REC-xml/#sec-line-ends
-// In order to preserve data, we either have to hex encode, or escape all CR
-  // scan for any CR
-  if (strchr(szText,'\r'))
-    return false;
+  for (const unsigned char *ptr = (const unsigned char *)szText; *ptr; ptr++) {
+    if (*ptr < 0x20 && *ptr != '\n' && *ptr != '\t')
+      return false;
+  }
 
   // scan for XML tags that would make this an invalid text block
   if ( strstr(szText, "]]>") )
@@ -168,6 +208,89 @@ static bool icXmlDumpTextData(std::string &xml, std::string blanks, const char *
   }
 
   return true;
+}
+
+static void icXmlDumpLocalizedText(std::string &xml, const std::string &blanks,
+                                   const char *elementName, const char *languageCountry,
+                                   const std::string &text)
+{
+  std::string fix;
+
+  xml += blanks + "<";
+  xml += elementName;
+  xml += " LanguageCountry=\"";
+  xml += icFixXml(fix, languageCountry);
+  xml += "\">";
+
+  if (text.find('\0') != std::string::npos || !isTextLegalCDATA(text.c_str())) {
+    xml += "\n";
+    xml += blanks + "  <HexTextData>";
+    icXmlDumpHexData(xml, blanks + "   ", (void*)text.data(), text.size());
+    xml += blanks + "  </HexTextData>\n";
+    xml += blanks;
+  }
+  else {
+    xml += "<![CDATA[";
+    xml += icFixXml(fix, text.c_str());
+    xml += "]]>";
+  }
+
+  xml += "</";
+  xml += elementName;
+  xml += ">\n";
+}
+
+static xmlAttr *icXmlFindLanguageCountryAttr(xmlNode *pNode)
+{
+  xmlAttr *pAttr = icXmlFindAttr(pNode, "LanguageCountry");
+  if (!pAttr)
+    pAttr = icXmlFindAttr(pNode, "languageCountry");
+  if (!pAttr)
+    pAttr = icXmlFindAttr(pNode, "LanguangeCountry");
+  return pAttr;
+}
+
+static bool icXmlParseLocalizedText(xmlNode *pNode, std::string &text)
+{
+  bool haveText = false;
+  text.clear();
+
+  for (xmlNode *pText = pNode ? pNode->children : NULL; pText; pText = pText->next) {
+    if (pText->type == XML_ELEMENT_NODE && !icXmlStrCmp(pText->name, "HexTextData") &&
+        pText->children && pText->children->content) {
+      CIccUInt8Array buf;
+      icUInt32Number hexSize = icXmlGetHexDataSize((const icChar*)pText->children->content);
+      if (!buf.SetSize(hexSize+2) ||
+          icXmlGetHexData(buf.GetBuf(), (const icChar*)pText->children->content, hexSize)!=hexSize)
+        return false;
+
+      uint8_t *strPtr = buf.GetBuf();
+      strPtr[hexSize] = 0;
+      strPtr[hexSize+1] = 0;
+      text.assign((char*)strPtr, hexSize);
+      return true;
+    }
+    if (!haveText && (pText->type == XML_TEXT_NODE || pText->type == XML_CDATA_SECTION_NODE)) {
+      text = (const char*)pText->content;
+      haveText = true;
+    }
+  }
+
+  return haveText;
+}
+
+static bool icXmlSetLocalizedUtf8(CIccTagMultiLocalizedUnicode &tag,
+                                  const std::string &text,
+                                  icLanguageCode langCode,
+                                  icCountryCode countryCode)
+{
+  CIccUTF16String wstr;
+  const char *src = text.empty() ? "" : text.data();
+  if (!wstr.FromUtf8(src, text.size()))
+    return false;
+  if (wstr.Size() > (size_t)((icUInt32Number)-1))
+    return false;
+  return tag.SetText(wstr.c_str(), (icUInt32Number)wstr.Size(), langCode, countryCode);
 }
 
 bool CIccTagXmlText::ToXml(std::string &xml, std::string blanks/* = ""*/)
@@ -227,18 +350,22 @@ static bool icXmlParseTextString(xmlNode *pNode, std::string &parseStr, std::str
         const icChar *filename = icXmlAttrValue(pNode, "File");
 
         // file exists
-        if (filename[0]) {        
-          CIccIO *file = IccOpenFileIO(filename, "rb");        
+        if (filename && filename[0]) {        
+          CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");        
           if (!file){          
             parseStr += "Error! - File '";
             parseStr += filename;
-            parseStr +="' not found.\n";
+            parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
             delete file;
             return false;
           }
 
-          size_t fileLength = file->GetLength();
-          char *ansiStr = (char *)malloc(fileLength+1);
+          icUInt32Number fileLength;
+          if (!icXmlValidateFileCount(file->GetLength(), fileLength, parseStr, filename)) {
+            delete file;
+            return false;
+          }
+          char *ansiStr = (char *)malloc((size_t)fileLength + 1);
 
           if (!ansiStr) {
             perror("Memory Error");
@@ -256,7 +383,8 @@ static bool icXmlParseTextString(xmlNode *pNode, std::string &parseStr, std::str
             free(ansiStr);
             delete file;             
             return false;
-          }   
+          }
+          ansiStr[fileLength] = '\0';
           // convert utf8 (xml format) to ansi (icc format)
           if (bConvert)
             icUtf8ToAnsi(buf, ansiStr);
@@ -309,8 +437,8 @@ bool CIccTagXmlZipUtf8Text::ParseXml(xmlNode *pNode, std::string &parseStr)
     if (pNode->type==XML_ELEMENT_NODE) {
       if (!icXmlStrCmp(pNode->name, "HexCompressedData") && pNode->children && pNode->children->content) {
         CIccUInt8Array buf;
-        if (!buf.SetSize(icXmlGetHexDataSize((const icChar*)pNode->children->content) ||
-            icXmlGetHexData(buf.GetBuf(), (const icChar*)pNode->children->content, buf.GetSize())!=buf.GetSize()))
+        if (!buf.SetSize(icXmlGetHexDataSize((const icChar*)pNode->children->content)) ||
+            icXmlGetHexData(buf.GetBuf(), (const icChar*)pNode->children->content, buf.GetSize())!=buf.GetSize())
           return false;
   
         AllocBuffer(buf.GetSize());
@@ -336,8 +464,8 @@ bool CIccTagXmlZipXml::ParseXml(xmlNode *pNode, std::string &parseStr)
     if (pNode->type==XML_ELEMENT_NODE) {
       if (!icXmlStrCmp(pNode->name, "HexCompressedData") && pNode->children && pNode->children->content) {
         CIccUInt8Array buf;
-        if (!buf.SetSize(icXmlGetHexDataSize((const icChar*)pNode->children->content) ||
-          icXmlGetHexData(buf.GetBuf(), (const icChar*)pNode->children->content, buf.GetSize())!=buf.GetSize()))
+        if (!buf.SetSize(icXmlGetHexDataSize((const icChar*)pNode->children->content)) ||
+          icXmlGetHexData(buf.GetBuf(), (const icChar*)pNode->children->content, buf.GetSize())!=buf.GetSize())
           return false;
 
         AllocBuffer(buf.GetSize());
@@ -427,19 +555,28 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
   const icChar *filename = icXmlAttrValue(pNode, "File");
 
   // file exists
-  if (filename[0]) {
-    CIccIO *file = IccOpenFileIO(filename, "rb");
+  if (filename && filename[0]) {
+    CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
 
     if (!file){
       parseStr += "Error! - File '";
       parseStr += filename;
-      parseStr +="' not found.\n";
+      parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
       delete file;
       return false;
     }
 
-    size_t fileLength = file->GetLength();
-    char *buf = (char *)malloc(fileLength);
+    icUInt32Number fileLength;
+    if (!icXmlValidateFileCount(file->GetLength(), fileLength, parseStr, filename)) {
+      delete file;
+      return false;
+    }
+    // +1 for the NUL terminator. icUtf8ToAnsi(buf) and CIccUTF16String(buf)
+    // both treat `buf` as a C-string and walk it with strlen-like logic;
+    // without the extra byte plus the explicit terminator below, those
+    // functions read past the allocation until they happen to find a
+    // zero byte in adjacent heap.
+    char *buf = (char *)malloc((size_t)fileLength + 1);
 
     if (!buf) {
       perror("Memory Error");
@@ -449,6 +586,7 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
       delete file;
       return false;
     }
+    buf[fileLength] = '\0';
 
     if (file->ReadLine(buf, fileLength)!=fileLength) {
       parseStr += "Error while reading file '";
@@ -457,7 +595,8 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
       free(buf);
       delete file;             
       return false;
-    }   
+    }
+    buf[fileLength] = '\0';
 
     // set ANSII string
     std::string ansiStr;    
@@ -473,7 +612,14 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
       m_szText[0] = '\0';
 
     // set Unicode String
-    CIccUTF16String wstr(buf);
+    CIccUTF16String wstr;
+    if (!wstr.FromUtf8(buf, fileLength)) {
+      parseStr += "'";
+      parseStr += filename;
+      parseStr += "' is not valid UTF-8.\n";
+      delete file;
+      return false;
+    }
 
     nStrSize = (icUInt32Number)wstr.Size();
     m_uzUnicodeText = GetUnicodeBuffer(nStrSize);
@@ -490,10 +636,16 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
     else
       m_uzUnicodeText[0] = 0;
 
-    // Set ScriptCode
-    m_nScriptCode=0;
-    m_nScriptSize = (icUInt8Number) fileLength + 1;  
-    memcpy(m_szScriptText, buf, 67);
+    // Set ScriptCode (m_szScriptText is a fixed 67-byte field per ICC v2
+    // textDescriptionType; clamp source read to buf size to avoid OOB read,
+    // and clamp m_nScriptSize before the icUInt8Number narrowing.)
+    m_nScriptCode = 0;
+    icUInt32Number nScriptCopy = fileLength < 67 ? fileLength : 67;
+    icUInt32Number nScriptSize = nScriptCopy < 255 ? nScriptCopy + 1 : 255;
+    m_nScriptSize = (icUInt8Number)nScriptSize;
+    memset(m_szScriptText, 0, sizeof(m_szScriptText));
+    if (nScriptCopy)
+      memcpy(m_szScriptText, buf, nScriptCopy);
 
     delete file;
   }
@@ -529,7 +681,11 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
 
           // *pRegion may not have value.
           if (pRegion && /* *pRegion && */pNode->children && pNode->children->content) {
-            CIccUTF16String wstr((const char*)pNode->children->content);
+            CIccUTF16String wstr;
+            if (!wstr.FromUtf8((const char*)pNode->children->content)) {
+              parseStr += "Invalid UTF-8 in Unicode text.\n";
+              return false;
+            }
 
             nSize = (icUInt32Number)wstr.Size();
 
@@ -606,7 +762,7 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
 
 bool CIccTagXmlSignature::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  char fix[40];
+  std::string fix;
   char buf[40];
   const size_t lineSize = 256;
   char line[lineSize];
@@ -631,7 +787,7 @@ bool CIccTagXmlSignature::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
 
 bool CIccTagXmlSpectralDataInfo::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  char fix[40];
+  std::string fix;
   char buf[40];
   const size_t lineSize = 256;
   char line[lineSize];
@@ -675,17 +831,70 @@ bool CIccTagXmlSpectralDataInfo::ParseXml(xmlNode *pNode, std::string &parseStr)
     return false;
   }
 
-  m_spectralRange.start = icFtoF16((icUInt16Number)atof(icXmlAttrValue(pChild, "start")));
-  m_spectralRange.end = icFtoF16((icUInt16Number)atof(icXmlAttrValue(pChild, "end")));
-  m_spectralRange.steps = (icUInt16Number)atoi(icXmlAttrValue(pChild, "steps"));
+  m_spectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "start")));
+  m_spectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "end")));
+  m_spectralRange.steps = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pChild, "steps"));
 
   pChild = icXmlFindNode(pNode, "BiSpectralRange");
 
   if (pChild) {
     if ((pChild = icXmlFindNode(pChild->children, "Wavelengths"))) {
-      m_biSpectralRange.start = icFtoF16((icUInt16Number)atof(icXmlAttrValue(pChild, "start")));
-      m_biSpectralRange.end = icFtoF16((icUInt16Number)atof(icXmlAttrValue(pChild, "end")));
-      m_biSpectralRange.steps = (icUInt16Number)atoi(icXmlAttrValue(pChild, "steps"));
+      m_biSpectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "start")));
+      m_biSpectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "end")));
+      m_biSpectralRange.steps = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pChild, "steps"));
+    }
+  }
+
+  return true;
+}
+
+
+bool CIccTagXmlSpectralRange::ToXml(std::string &xml, std::string blanks/* = ""*/)
+{
+  const size_t lineSize = 256;
+  char line[lineSize];
+
+  xml += blanks + "<SpectralRange>\n";
+  snprintf(line, lineSize, "  <Wavelengths start=\"" icXmlHalfFmt "\" end=\"" icXmlHalfFmt "\" steps=\"%d\"/>\n", icF16toF(m_spectralRange.start), icF16toF(m_spectralRange.end), m_spectralRange.steps);
+  xml += blanks + line;
+  xml += blanks + "</SpectralRange>\n";
+
+  if (m_biSpectralRange.steps) {
+    xml += blanks + "<BiSpectralRange>\n";
+    snprintf(line, lineSize, "  <Wavelengths start=\"" icXmlHalfFmt "\" end=\"" icXmlHalfFmt "\" steps=\"%d\"/>\n", icF16toF(m_biSpectralRange.start), icF16toF(m_biSpectralRange.end), m_biSpectralRange.steps);
+    xml += blanks + line;
+    xml += blanks + "</BiSpectralRange>\n";
+  }
+
+  return true;
+}
+
+
+bool CIccTagXmlSpectralRange::ParseXml(xmlNode *pNode, std::string &parseStr)
+{
+  xmlNode *pChild;
+
+  if (!(pChild = icXmlFindNode(pNode, "SpectralRange"))) {
+    parseStr += "No SpectralRange section found\n";
+    return false;
+  }
+
+  if (!(pChild = icXmlFindNode(pChild->children, "Wavelengths"))) {
+    parseStr += "SpectralRange missing Wavelengths\n";
+    return false;
+  }
+
+  m_spectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "start")));
+  m_spectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "end")));
+  m_spectralRange.steps = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pChild, "steps"));
+
+  pChild = icXmlFindNode(pNode, "BiSpectralRange");
+
+  if (pChild) {
+    if ((pChild = icXmlFindNode(pChild->children, "Wavelengths"))) {
+      m_biSpectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "start")));
+      m_biSpectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(pChild, "end")));
+      m_biSpectralRange.steps = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pChild, "steps"));
     }
   }
 
@@ -696,13 +905,24 @@ bool CIccTagXmlSpectralDataInfo::ParseXml(xmlNode *pNode, std::string &parseStr)
 bool CIccTagXmlNamedColor2::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   const size_t bufSize = 256;
-  char fix[bufSize];
+  std::string fix;
   char line[bufSize];
   char buf[bufSize];
   int i, j;
   std::string str;
 
-  snprintf(line, bufSize, "<NamedColors VendorFlag=\"%08x\" CountOfDeviceCoords=\"%d\" DeviceEncoding=\"int16\"", m_nVendorFlags, m_nDeviceCoords);
+  // CWE-400/CWE-834: the entry walk below iterates m_nSize and, per entry, the
+  // device-coord walk iterates m_nDeviceCoords. Read() caps these at
+  // kMaxNamedColorEntries / kMaxNamedColorDeviceCoords and sizes the entry list
+  // and each entry's deviceCoords[] to match (IccTagBasic.cpp), so on a valid
+  // tag the loops never exceed the allocations; assert those same bounds here so
+  // a corrupted count can't drive an unbounded serialization walk.
+  const icUInt32Number kMaxNamedColorEntries = 65536;
+  const icUInt32Number kMaxNamedColorDeviceCoords = 256;
+  if (m_nSize > kMaxNamedColorEntries || m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+    return false;
+
+  snprintf(line, bufSize, "<NamedColors VendorFlag=\"%08x\" CountOfDeviceCoords=\"%d\" DeviceEncoding=\"int16\"", (unsigned int) m_nVendorFlags, (unsigned int) m_nDeviceCoords);
   xml += blanks + line;
 
   snprintf(line, bufSize, " Prefix=\"%s\"", icFixXml(fix, icAnsiToUtf8(str, m_szPrefix)));
@@ -746,7 +966,15 @@ bool CIccTagXmlNamedColor2::ToXml(std::string &xml, std::string blanks/* = ""*/)
         for (j=0; j<(int)m_nDeviceCoords; j++) {
           if (j)
             xml+=" ";
-          snprintf(buf, bufSize, "%d", (int)(pEntry->deviceCoords[j] * 65535.0 + 0.5));
+          // CWE-681 (CodeQL #1902): deviceCoords come from a parsed profile and may be
+          // NaN/Inf for malformed input; a non-finite float->int cast is undefined
+          // behaviour. Guard finiteness and clamp to the valid 16-bit device range
+          // [0,65535] before the cast (a no-op for any conformant coord in [0,1]).
+          double dc = pEntry->deviceCoords[j] * 65535.0 + 0.5;
+          if (!std::isfinite(dc)) dc = 0.0;
+          else if (dc < 0.0) dc = 0.0;
+          else if (dc > 65535.0) dc = 65535.0;
+          snprintf(buf, bufSize, "%d", (int)dc);
           xml += buf;
         }
         xml += "\n";
@@ -779,15 +1007,47 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
 
         sscanf(szVendorFlags, "%x", &m_nVendorFlags);
 
-        strncpy(m_szPrefix, icUtf8ToAnsi(str, szPrefix), sizeof(m_szPrefix));
-        m_szPrefix[sizeof(m_szPrefix)-1] = '\0';
+        icXmlCopyFixedString(m_szPrefix, sizeof(m_szPrefix), icUtf8ToAnsi(str, szPrefix));
 
-        strncpy(m_szSufix, icUtf8ToAnsi(str, szSufix), sizeof(m_szSufix));
-        m_szSufix[sizeof(m_szSufix)-1] = '\0';
+        icXmlCopyFixedString(m_szSufix, sizeof(m_szSufix), icUtf8ToAnsi(str, szSufix));
 
-        icUInt32Number newDeviceCoords = atoi(szDeviceCoords);
+        // CountOfDeviceCoords is attacker-controlled text, and atoi() is the wrong
+        // tool for it twice over: it accepts a leading '-', and it is undefined on
+        // a value that does not fit an int.  The #1846/#1847 PoC carries
+        // CountOfDeviceCoords="333333333333", which truncates to -1674115755 and
+        // then changes value again on the way into this icUInt32Number -- the
+        // "implicit conversion from type 'int' of value -1674115755 ... changed
+        // the value to 2620851541" that UBSan reports here.
+        //
+        // icXmlAttrToUInt() (the #1346 helper near the top of this file) is
+        // deliberately not used: it floors negatives to 0 but passes large
+        // positive counts through untouched, and this attribute sizes an
+        // allocation.  Bound it instead with the same two constants
+        // CIccTagNamedColor2::Read (IccTagBasic.cpp) and CIccTagXmlNamedColor2::
+        // ToXml above already enforce, so the XML reader stops being the one
+        // entry point able to install counts that the binary reader and both
+        // writers reject.
+        const icUInt32Number kMaxNamedColorEntries = 65536;
+        const icUInt32Number kMaxNamedColorDeviceCoords = 256;
+
+        icUInt32Number newDeviceCoords = 0;
+        if (!icXmlParseU32(szDeviceCoords, newDeviceCoords, kMaxNamedColorDeviceCoords))
+          return false;
+
         icUInt32Number n = icXmlNodeCount3(pNode->children, "NamedColor", "LabNamedColor", "XYZNamedColor");
-        SetSize(n, newDeviceCoords);
+        if (n > kMaxNamedColorEntries)
+          return false;
+
+        // SetSize allocates the entry array that the loop below walks in
+        // m_nColorEntrySize strides, and it returns false when that allocation
+        // fails.  Discarding the result left m_NamedColor pointing at the
+        // single-entry buffer the constructor allocated while the loop still
+        // wrote one entry per XML node -- a heap-buffer-overflow write (CWE-787)
+        // that ASan catches at the pcsCoords store below.  The bound above makes
+        // the huge-count case unreachable, but the allocation can still fail, so
+        // the result is checked rather than assumed.
+        if (!SetSize(n, (icInt32Number)newDeviceCoords))
+          return false;
 
         icUInt32Number i;
 
@@ -867,8 +1127,7 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
           }
 
           if (szName) {
-            strncpy(pNamedColor->rootName, icUtf8ToAnsi(str, szName), sizeof(pNamedColor->rootName));
-            pNamedColor->rootName[sizeof(pNamedColor->rootName) - 1] = 0;
+            icXmlCopyFixedString(pNamedColor->rootName, sizeof(pNamedColor->rootName), icUtf8ToAnsi(str, szName));
 
             if (m_nDeviceCoords && pNode->children) {
               if (!strcmp(szDeviceEncoding, "int8")) {
@@ -877,8 +1136,18 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
                 coords.ParseArray(pNode->children);
                 icUInt8Number *pBuf = coords.GetBuf();
 
+                // CWE-400/CWE-834: clamp the field to the same load-time bound as
+                // the float branch below (deviceCoords[] is sized to it) so a
+                // corrupted count can't drive an out-of-range copy.  All three
+                // encoding branches share the single kMaxNamedColorDeviceCoords
+                // declared at the top of this parse block -- the same bound
+                // CountOfDeviceCoords was accepted against above -- rather than
+                // each redeclaring its own, which would shadow it (-Wshadow is
+                // -Werror in the strict build profiles).
+                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
                 icUInt32Number j;
-                for (j = 0; j < m_nDeviceCoords && j < coords.GetSize(); j++) {
+                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
                   pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j] / 255.0f;
                 }
               }
@@ -888,8 +1157,15 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
                 coords.ParseArray(pNode->children);
                 icUInt16Number *pBuf = coords.GetBuf();
 
+                // CWE-400/CWE-834: clamp the field to the same load-time bound as
+                // the float branch below (deviceCoords[] is sized to it) so a
+                // corrupted count can't drive an out-of-range copy.  Shares the
+                // single kMaxNamedColorDeviceCoords declared at the top of this
+                // parse block, as the int8 branch above does.
+                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
                 icUInt32Number j;
-                for (j = 0; j < m_nDeviceCoords && j < coords.GetSize(); j++) {
+                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
                   pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j] / 65535.0f;
                 }
               }
@@ -899,8 +1175,16 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
                 coords.ParseArray(pNode->children);
                 icFloatNumber *pBuf = coords.GetBuf();
 
+                // CWE-400/CWE-834: m_nDeviceCoords is capped at
+                // kMaxNamedColorDeviceCoords on load and sizes deviceCoords[];
+                // clamp to that bound so a corrupted count can't drive an
+                // unbounded or out-of-range copy.  Shares the single
+                // kMaxNamedColorDeviceCoords declared at the top of this parse
+                // block, as the int8/int16 branches above do.
+                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
                 icUInt32Number j;
-                for (j = 0; j < m_nDeviceCoords && j < coords.GetSize(); j++) {
+                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
                   pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j];
                 }
               }
@@ -1046,22 +1330,22 @@ bool CIccTagXmlCicp::ParseXml(xmlNode* pNode, std::string& /*parseStr*/)
   if (pNode) {
     xmlAttr* attr;
     if ((attr = icXmlFindAttr(pNode, "ColorPrimaries")))
-      m_nColorPrimaries = atoi(icXmlAttrValue(attr));
+      m_nColorPrimaries = (icUInt8Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     else
       m_nColorPrimaries = 0;
 
     if ((attr = icXmlFindAttr(pNode, "TransferCharacteristics")))
-      m_nTransferCharacteristics = atoi(icXmlAttrValue(attr));
+      m_nTransferCharacteristics = (icUInt8Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     else
       m_nTransferCharacteristics = 0;
 
     if ((attr = icXmlFindAttr(pNode, "MatrixCoefficients")))
-      m_nMatrixCoefficients = atoi(icXmlAttrValue(attr));
+      m_nMatrixCoefficients = (icUInt8Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     else
       m_nMatrixCoefficients = 0;
 
     if ((attr = icXmlFindAttr(pNode, "VideoFullRangeFlag")))
-      m_nVideoFullRangeFlag = atoi(icXmlAttrValue(attr));
+      m_nVideoFullRangeFlag = (icUInt8Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     else
       m_nVideoFullRangeFlag = 0;
   }
@@ -1084,8 +1368,19 @@ bool CIccTagXmlSparseMatrixArray::ToXml(std::string &xml, std::string blanks/* =
   CIccSparseMatrix mtx;
   icUInt32Number bytesPerMatrix = GetBytesPerMatrix();
 
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_RawData
+  // is allocated to m_nSize*bytesPerMatrix; assert an explicit upper limit so a
+  // corrupted count can't drive an unbounded serialization walk.
+  const icUInt32Number nMaxMatrices = 0xffffff;
+  if (m_nSize > nMaxMatrices)
+    return false;
+
   for (i=0; i<(int)m_nSize; i++) {
-    mtx.Reset(m_RawData+i*bytesPerMatrix, bytesPerMatrix, icSparseMatrixFloatNum, true);
+    if (!mtx.Reset(m_RawData+i*bytesPerMatrix, bytesPerMatrix, icSparseMatrixFloatNum, true) ||
+        mtx.GetNumEntries() > mtx.GetMaxEntries() ||
+        !mtx.IsValid())
+      return false;
+
     snprintf(buf, bufSize, " <SparseMatrix rows=\"%d\" cols=\"%d\">\n", mtx.Rows(), mtx.Cols());
     xml += blanks + buf;
 
@@ -1122,7 +1417,7 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
     xmlAttr *matrixType = icXmlFindAttr(pNode, "matrixType");
 
     if (outputChan && matrixType) {
-      icUInt32Number nChannelsPerMatrix = atoi(icXmlAttrValue(outputChan));
+      icUInt32Number nChannelsPerMatrix = icXmlAttrToUInt(icXmlAttrValue(outputChan));
       icSparseMatrixType nMatrixType = (icSparseMatrixType)atoi(icXmlAttrValue(matrixType));
 
       xmlNode *pChild;
@@ -1151,8 +1446,8 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
             if (rows && cols) {
               icUInt16Number nRows, nCols;
 
-              nRows = atoi(icXmlAttrValue(rows));
-              nCols = atoi(icXmlAttrValue(cols));
+              nRows = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(rows));
+              nCols = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(cols));
 
               mtx.Init(nRows, nCols, true);
 
@@ -1212,14 +1507,14 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
             if (rows && cols) {
               icUInt16Number nRows, nCols;
 
-              nRows = atoi(icXmlAttrValue(rows));
-              nCols = atoi(icXmlAttrValue(cols));
+              nRows = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(rows));
+              nCols = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(cols));
 
               mtx.Init(nRows, nCols, true);
 
               CIccFloatArray data;
               data.ParseTextArray(pChild);
-              if (data.GetSize()==nRows*nCols) {
+              if (data.GetSize()==(icUInt32Number)nRows*nCols) {
                 if (!mtx.FillFromFullMatrix(data.GetBuf()))
                   parseStr += "Exceeded maximum number of sparse matrix entries\n";
               }
@@ -1267,6 +1562,13 @@ bool CIccTagXmlFixedNum<T, Tsig>::ToXml(std::string &xml, std::string blanks/* =
   const size_t bufSize = 256;
   char buf[bufSize];
   int i;
+
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_Num is
+  // allocated to match; assert an explicit upper limit so a corrupted count can't
+  // drive an unbounded serialization walk.
+  const icUInt32Number nMaxNumValues = 0xffffff;
+  if (this->m_nSize > nMaxNumValues)
+    return false;
 
   if (Tsig==icSigS15Fixed16ArrayType) {
     int n = 8;
@@ -1374,6 +1676,15 @@ bool CIccTagXmlNum<T, A, Tsig>::ToXml(std::string &xml, std::string blanks/* = "
   char buf[bufSize];
   int i;
 
+  // CWE-400/CWE-834: m_nSize is derived from the tag byte size in Read() and m_Num is
+  // allocated to match; assert an explicit upper limit so a corrupted count can't drive
+  // an unbounded serialization walk (each element expands to several XML characters, so
+  // a multi-megabyte ui08/ui16/ui32/ui64 array would otherwise balloon the output).
+  // Mirrors the guard already applied to the sibling CIccTagXmlFixedNum::ToXml above.
+  const icUInt32Number nMaxNumValues = 0xffffff;
+  if (this->m_nSize > nMaxNumValues)
+    return false;
+
   xml += blanks + "<Array>\n";
   for (i=0; i<(int)this->m_nSize; i++) {
     if (!(i%16)) {
@@ -1387,7 +1698,7 @@ bool CIccTagXmlNum<T, A, Tsig>::ToXml(std::string &xml, std::string blanks/* = "
     if (sizeof(T)==16)
       snprintf(buf, bufSize, "%llu", (icUInt64Number)this->m_Num[i]);
     else
-      snprintf(buf, bufSize, "%u", (icUInt32Number)this->m_Num[i]);
+      snprintf(buf, bufSize, "%u", (unsigned int) this->m_Num[i]);
     xml += buf;
   }
 
@@ -1461,6 +1772,13 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ToXml(std::string &xml, std::string blanks/
   const size_t bufSize = 512;
   char buf[bufSize];
 
+  // CWE-400/CWE-834: m_nSize is bounded by the tag byte size in Read() and m_Num is
+  // allocated to match; assert the same explicit upper limit used by the FixedNum/Num
+  // siblings so a corrupted count can't drive an unbounded serialization walk.
+  const icUInt32Number nMaxNumValues = 0xffffff;
+  if (this->m_nSize > nMaxNumValues)
+    return false;
+
   if (this->m_nSize==1) {
 #ifdef _WIN32
     if (sizeof(T)==sizeof(icFloat32Number))
@@ -1523,12 +1841,12 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
 
   A a;
 
-  if (filename[0]) {
-    CIccIO *file = IccOpenFileIO(filename, "rb");
+  if (filename && filename[0]) {
+    CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
     if (!file){
       parseStr += "Error! - File '";
       parseStr += filename;
-      parseStr +="' not found.\n";
+      parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
       delete file;
       return false;
     }
@@ -1536,15 +1854,20 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
     size_t len = file->GetLength();
 
     if (!stricmp(icXmlAttrValue(pNode, "Format", "text"), "text")) {
-      char *fbuf = (char*)malloc(len+1);
-      fbuf[len]=0;
+      icUInt32Number nLen;
+      if (!icXmlValidateFileCount(len, nLen, parseStr, filename)) {
+        delete file;
+        return false;
+      }
+      char *fbuf = (char*)malloc((size_t)nLen + 1);
       if (!fbuf) {
         parseStr += "Memory error!\n";
         delete file;
         return false;
       }
+      fbuf[nLen] = 0;
 
-      if (file->Read8(fbuf, len)!=len) {
+      if (file->Read8(fbuf, nLen)!=nLen) {
         parseStr += "Read error of (";
         parseStr += filename;
         parseStr += ")!\n";
@@ -1564,7 +1887,11 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
       free(fbuf);
     }
     else if (Tsig==icSigFloat16ArrayType && sizeof(T)==sizeof(icFloat16Number)) {
-      icUInt32Number n = len/sizeof(icFloat16Number);
+      icUInt32Number n;
+      if (!icXmlValidateFileCount(len / sizeof(icFloat16Number), n, parseStr, filename)) {
+        delete file;
+        return false;
+      }
       this->SetSize(n);
       if (file->Read16(&this->m_Num[0], n)!=n) {
         delete file;
@@ -1574,7 +1901,11 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
       return true;
     }
     else if (Tsig==icSigFloat16ArrayType && sizeof(T)==sizeof(icFloat32Number)) {
-      icUInt32Number n = (icUInt32Number)(len/sizeof(icFloat32Number));
+      icUInt32Number n;
+      if (!icXmlValidateFileCount(len / sizeof(icFloat32Number), n, parseStr, filename)) {
+        delete file;
+        return false;
+      }
       this->SetSize(n);
       if (file->ReadFloat16Float(&this->m_Num[0], n)!=n) {
         delete file;
@@ -1584,7 +1915,11 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
       return true;
     }
     else if (Tsig==icSigFloat32ArrayType && sizeof(T)==sizeof(icFloat32Number)) {
-      icUInt32Number n =  (icUInt32Number)(len/sizeof(icFloat32Number));
+      icUInt32Number n;
+      if (!icXmlValidateFileCount(len / sizeof(icFloat32Number), n, parseStr, filename)) {
+        delete file;
+        return false;
+      }
       this->SetSize(n);
       if (file->ReadFloat32Float(&this->m_Num[0], n)!=n) {
         delete file;
@@ -1594,7 +1929,11 @@ bool CIccTagXmlFloatNum<T, A, Tsig>::ParseXml(xmlNode *pNode, std::string &parse
       return true;
     }
     else if (Tsig==icSigFloat64ArrayType && sizeof(T)==sizeof(icFloat64Number)) {
-      icUInt32Number n =  (icUInt32Number)(len/sizeof(icFloat64Number));
+      icUInt32Number n;
+      if (!icXmlValidateFileCount(len / sizeof(icFloat64Number), n, parseStr, filename)) {
+        delete file;
+        return false;
+      }
       this->SetSize(n);
       if (file->Read64(&this->m_Num[0], n)!=n) {
         delete file;
@@ -1715,7 +2054,6 @@ bool CIccTagXmlMeasurement::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
 
 bool CIccTagXmlMultiLocalizedUnicode::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
-  std::string xmlbuf;
   char data[256];
   std::string bufstr;
   CIccMultiLocalizedUnicode::iterator i;
@@ -1724,11 +2062,18 @@ bool CIccTagXmlMultiLocalizedUnicode::ToXml(std::string &xml, std::string blanks
     return false;
 
   for (i=m_Strings->begin(); i!=m_Strings->end(); i++) {
-    xml += blanks + "<LocalizedText LanguageCountry=\"";
-    xml += icFixXml(xmlbuf, icGetSigStr(data, 256, (i->m_nLanguageCode<<16) + i->m_nCountryCode));
-    xml += "\"><![CDATA[";
-    xml += icFixXml(xmlbuf, icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength()));
-    xml += "]]></LocalizedText>\n";
+    icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength());
+    // Pack the 16-bit language/country codes into the 32-bit signature expected by
+    // icGetSigStr(). m_nLanguageCode is a 16-bit unsigned that promotes to (signed)
+    // int before the shift, so a high-bit language code (>= 0x8000) makes
+    // m_nLanguageCode<<16 overflow into negative territory -- signed overflow UB,
+    // and the resulting negative int silently wraps when passed to icGetSigStr's
+    // icUInt32Number parameter. Cast to icUInt32Number first so the whole pack is
+    // computed in well-defined unsigned arithmetic.
+    icXmlDumpLocalizedText(xml, blanks, "LocalizedText",
+                           icGetSigStr(data, 256, ((icUInt32Number)i->m_nLanguageCode << 16) |
+                                       (icUInt32Number)i->m_nCountryCode),
+                           bufstr);
   }
   return true;
 }
@@ -1740,19 +2085,13 @@ bool CIccTagXmlMultiLocalizedUnicode::ParseXml(xmlNode *pNode, std::string & /*p
   int n = 0;
 
   for (pNode = icXmlFindNode(pNode, "LocalizedText"); pNode; pNode = icXmlFindNode(pNode->next, "LocalizedText")) {    
-    if ((langCode = icXmlFindAttr(pNode, "LanguageCountry"))) {
-      xmlNode *pText;
+    if ((langCode = icXmlFindLanguageCountryAttr(pNode))) {
+      std::string text;
 
-      for (pText = pNode->children; pText; pText = pText->next) {
-        if (pText->type == XML_TEXT_NODE || pText->type == XML_CDATA_SECTION_NODE)
-          break;
-      }
-
-      if (pText) {
+      if (icXmlParseLocalizedText(pNode, text)) {
         icUInt32Number lc = icGetSigVal(icXmlAttrValue(langCode));
-        CIccUTF16String str((const char*)pText->content);
-
-        SetText(str.c_str(), (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff));
+        if (!icXmlSetLocalizedUtf8(*this, text, (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff)))
+          return false;
         n++;
       }
       else {
@@ -1831,10 +2170,15 @@ bool CIccTagXmlColorantOrder::ToXml(std::string &xml, std::string blanks/* = ""*
 {
   const size_t bufSize = 40;
   char buf[bufSize];
-  int i;
 
   xml += blanks + "<ColorantOrder>\n"; //+ blanks + "  ";
-  for (i=0; i<(int)m_nCount; i++) {
+  // CWE-400/CWE-834: SetSize() caps the colorant count at 0xffff and allocates
+  // m_pData to match; assert that bound locally so the serialization walk has an
+  // explicit upper limit.
+  const icUInt32Number nMaxColorants = 0xffff;
+  if (m_nCount > nMaxColorants)
+    return false;
+  for (icUInt32Number i=0; i<m_nCount; i++) {
     snprintf(buf, bufSize, "  <n>%d</n>\n", m_pData[i]);
     xml += blanks + buf;
   }
@@ -1868,12 +2212,17 @@ bool CIccTagXmlColorantTable::ToXml(std::string &xml, std::string blanks/* = ""*
 {
   const size_t bufSize = 256;
   char buf[bufSize];
-  char fix[bufSize];
-  int i;
+  std::string fix;
   std::string str;
 
   xml += blanks + "<ColorantTable>\n";
-  for (i=0; i<(int)m_nCount; i++) {
+  // CWE-400/CWE-834: SetSize() caps the colorant count at 0xffff and allocates
+  // m_pData to match; assert that bound locally so the serialization walk has an
+  // explicit upper limit.
+  const icUInt32Number nMaxColorants = 0xffff;
+  if (m_nCount > nMaxColorants)
+    return false;
+  for (icUInt32Number i=0; i<m_nCount; i++) {
     icFloatNumber lab[3];
     lab[0] = icU16toF(m_pData[i].data[0]);
     lab[1] = icU16toF(m_pData[i].data[1]);
@@ -1914,7 +2263,7 @@ bool CIccTagXmlColorantTable::ParseXml(xmlNode *pNode, std::string & /*parseStr*
             xmlAttr *b = icXmlFindAttr(pNode, "Channel3");
 
             if (name && L && a && b) {
-              strncpy(m_pData[i].name, icUtf8ToAnsi(str, name), sizeof(m_pData[i].name));
+              strncpy(m_pData[i].name, icUtf8ToAnsi(str, name), sizeof(m_pData[i].name)-1);
               m_pData[i].name[sizeof(m_pData[i].name)-1]=0;
 
               icFloatNumber lab[3];
@@ -2151,22 +2500,31 @@ bool CIccTagXmlSpectralViewingConditions::ParseXml(xmlNode *pNode, std::string &
     }
     attr = icXmlFindAttr(pChild, "steps");
     if (attr) {
-      m_observerRange.steps = (icUInt16Number)atoi(icXmlAttrValue(attr));
+      int tempSteps = atoi(icXmlAttrValue(attr));
+      if (tempSteps <= 0 || tempSteps > 0xffff)
+        return false;
+      m_observerRange.steps = (icUInt16Number)tempSteps;
     }
     attr = icXmlFindAttr(pChild, "reserved");
     if (attr) {
-      m_reserved2 = (icUInt16Number)atoi(icXmlAttrValue(attr));
+      m_reserved2 = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     }
+    
+    // if these are not set correctly, then later allocations and calculations WILL fail
+    if (m_observerRange.start == 0 || m_observerRange.end == 0 || m_observerRange.steps == 0)
+      return false;
 
     if (pChild->children && pChild->children->content) {
       CIccFloatArray vals;
       vals.ParseTextArray((icChar*)pChild->children->content);
       if (vals.GetSize()!=m_observerRange.steps*3)
         return false;
-      m_observer = new icFloatNumber[m_observerRange.steps*3];
+      m_observer = new (std::nothrow) icFloatNumber[m_observerRange.steps*3];
       if (!m_observer)
         return false;
       icFloatNumber *pBuf = vals.GetBuf();
+      if (!pBuf)
+        return false;
       memcpy(m_observer, pBuf, m_observerRange.steps*3*sizeof(icFloatNumber));
     }
     else {
@@ -2196,22 +2554,31 @@ bool CIccTagXmlSpectralViewingConditions::ParseXml(xmlNode *pNode, std::string &
     }
     attr = icXmlFindAttr(pChild, "steps");
     if (attr) {
-      m_illuminantRange.steps = (icUInt16Number)atoi(icXmlAttrValue(attr));
+      int tempSteps = atoi(icXmlAttrValue(attr));
+      if (tempSteps <= 0 || tempSteps > 0xffff)
+        return false;
+      m_illuminantRange.steps = (icUInt16Number)tempSteps;
     }
     attr = icXmlFindAttr(pChild, "reserved");
     if (attr) {
-      m_reserved3 = (icUInt16Number)atoi(icXmlAttrValue(attr));
+      m_reserved3 = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(attr));
     }
+    
+    // if these are not set correctly, then later allocations and calculations WILL fail
+    if (m_illuminantRange.start == 0 || m_illuminantRange.end == 0 || m_illuminantRange.steps == 0)
+      return false;
 
-    if (pChild->children && pChild->children->content && m_illuminantRange.steps) {
+    if (pChild->children && pChild->children->content) {
       CIccFloatArray vals;
       vals.ParseTextArray((icChar*)pChild->children->content);
       if (vals.GetSize()!=m_illuminantRange.steps)
         return false;
-      m_illuminant = new icFloatNumber[m_illuminantRange.steps];
+      m_illuminant = new (std::nothrow) icFloatNumber[m_illuminantRange.steps];
       if (!m_illuminant)
         return false;
       icFloatNumber *pBuf = vals.GetBuf();
+      if (!pBuf)
+        return false;
       memcpy(m_illuminant, pBuf, m_illuminantRange.steps * sizeof(icFloatNumber));
     }
     else {
@@ -2245,7 +2612,7 @@ bool CIccTagXmlSpectralViewingConditions::ParseXml(xmlNode *pNode, std::string &
 bool icProfDescToXml(std::string &xml, CIccProfileDescStruct &p, std::string blanks = "")
 {
   const size_t bufSize = 256;
-  char fix[bufSize];
+  std::string fix;
   char buf[bufSize];
   char data[bufSize];
 
@@ -2518,7 +2885,7 @@ bool CIccTagXmlResponseCurveSet16::ParseXml(xmlNode *pNode, std::string & /*pars
         if (pChild->type == XML_ELEMENT_NODE && !icXmlStrCmp(pChild->name, "ChannelResponses")) {
           CIccResponse16List *pResponseList = curves.GetResponseList(i);
           icXYZNumber *pXYZ = curves.GetXYZ(i);
-          icResponse16Number response;
+          icResponse16Number response{};  // zero-init (.reserved is conditionally set; ICC spec requires it be 0)
 
           const icChar *szX = icXmlAttrValue(pChild, "X");
           const icChar *szY = icXmlAttrValue(pChild, "Y");
@@ -2572,12 +2939,21 @@ bool CIccTagXmlCurve::ToXml(std::string &xml, icConvertType nType, std::string b
   char buf[bufSize];
   int i;
 
+  // CWE-400/CWE-834: each encoding branch below walks m_Curve over m_nSize.
+  // CIccTagCurve::Read() bounds m_nSize by the tag byte size and allocates
+  // m_Curve to match (IccTagLut.cpp), so on a valid tag the walk never exceeds
+  // the allocation; assert an explicit upper limit so a corrupted count can't
+  // drive an unbounded serialization walk.
+  const icUInt32Number nMaxCurveEntries = 0xffffff;
+  if (m_nSize > nMaxCurveEntries)
+    return false;
+
   if (!m_nSize) {
     xml += blanks + "<Curve/>\n";
   }
   else if (IsIdentity()) {
     xml += blanks + "<Curve IdentitySize=\"";
-    snprintf(buf, bufSize, "%d", m_nSize);
+    snprintf(buf, bufSize, "%d", (unsigned int) m_nSize);
     xml += buf;
     xml += "\"/>\n";
   }
@@ -2588,7 +2964,7 @@ bool CIccTagXmlCurve::ToXml(std::string &xml, icConvertType nType, std::string b
         xml += "\n";
         xml += blanks;  
       }
-      snprintf(buf, bufSize, " %3u", (int)(m_Curve[i] * 255.0 + 0.5));
+      snprintf(buf, bufSize, " %3u", icFtoU8(m_Curve[i]));
       xml += buf;
     }
     xml += "\n";
@@ -2601,7 +2977,7 @@ bool CIccTagXmlCurve::ToXml(std::string &xml, icConvertType nType, std::string b
         xml += "\n";
         xml += blanks + " ";
       }
-      snprintf(buf, bufSize, " %5u", (int)(m_Curve[i] * 65535.0 + 0.5));
+      snprintf(buf, bufSize, " %5u", icFtoU16(m_Curve[i]));
       xml += buf;
     }
     xml += "\n";
@@ -2643,12 +3019,12 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
     const char *filename = icXmlAttrValue(pCurveNode, "File");
 
     // file exists
-    if (filename[0]) {
-      CIccIO *file = IccOpenFileIO(filename, "rb");
+    if (filename && filename[0]) {
+      CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
       if (!file){
         parseStr += "Error! - File '";
         parseStr += filename;
-        parseStr +="' not found.\n";
+        parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
         delete file;
         return false;
       }
@@ -2657,28 +3033,45 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
 
       // format is text
       if (!strcmp(format, "text")) {
-        size_t num = file->GetLength();
-        char *buf = (char *) new char[num];
-
-        if (!buf) {          
-          perror("Memory Error");
+        icUInt32Number num;
+        if (!icXmlValidateFileCount(file->GetLength(), num, parseStr, filename)) {
+          delete file;
+          return false;
+        }
+        // Shared ceiling: prevents num+1 from wrapping size_t and caps
+        // downstream ParseTextArrayNum memory use. See IccUtilXml.h.
+        if (num > icXmlMaxTextFileBytes) {
           parseStr += "'";
           parseStr += filename;
-          parseStr += "' may not be a valid text file.\n";
-          delete [] buf;
+          parseStr += "' exceeds 256 MB limit.\n";
+          delete file;
+          return false;
+        }
+        // +1 and explicit NUL; use nothrow so the immediate
+        // !buf check below actually fires on OOM.
+        char *buf = new(std::nothrow) char[num + 1];
+
+        if (!buf) {
+          parseStr += "Out of memory allocating ";
+          parseStr += std::to_string(num + 1);
+          parseStr += " bytes for text buffer from '";
+          parseStr += filename;
+          parseStr += "'.\n";
           delete file;
           return false;
         }
 
-        if (file->Read8(buf, num) !=num) {
-          perror("Read-File Error");
-          parseStr += "'";
+        if (file->Read8(buf, num) != num) {
+          parseStr += "Read error: could not read ";
+          parseStr += std::to_string(num);
+          parseStr += " bytes from '";
           parseStr += filename;
-          parseStr += "' may not be a valid text file.\n";
+          parseStr += "'.\n";
           delete [] buf;
-          delete file;             
+          delete file;
           return false;
-        }         
+        }
+        buf[num] = '\0';  // NUL-terminate for ParseText downstream
 
         // lut8type
         if (nType == icConvert8Bit) {
@@ -2794,11 +3187,29 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
         bool little_endian = !strcmp(order, "little");    
 
         if (nType == icConvert8Bit){
-          size_t num = file->GetLength();
+          icUInt32Number num;
           icUInt8Number value;
 
-          SetSize( (icUInt32Number)num);
+          if (!icXmlValidateFileCount(file->GetLength(), num, parseStr, filename)) {
+            delete file;
+            return false;
+          }
+
+          if (!SetSize(num)) {
+            parseStr += "Out of memory allocating curve data from '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
           icFloatNumber *dst =  GetData(0);
+          if (num && !dst) {
+            parseStr += "Curve data allocation failed for '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
           icUInt32Number i;
           for (i=0; i<num; i++) {
             if (!file->Read8(&value)) { 
@@ -2815,13 +3226,31 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
           return true;
         }        
         else if (nType == icConvert16Bit || nType == icConvertVariable){
-          size_t num = file->GetLength() / sizeof(icUInt16Number);
+          icUInt32Number num;
           icUInt16Number value;
           icUInt8Number *ptr = (icUInt8Number*)&value;
 
-          SetSize((icUInt32Number)num);
+          if (!icXmlValidateFileCount(file->GetLength() / sizeof(icUInt16Number), num, parseStr, filename)) {
+            delete file;
+            return false;
+          }
+
+          if (!SetSize(num)) {
+            parseStr += "Out of memory allocating curve data from '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
           icFloatNumber *dst = GetData(0);
-          size_t i;
+          if (num && !dst) {
+            parseStr += "Curve data allocation failed for '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
+          icUInt32Number i;
           for (i=0; i<num; i++) {
             if (!file->Read16(&value)) {  //this assumes data is big endian
               perror("Read-File Error");
@@ -2846,14 +3275,32 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
           return true;
         }
         else if (nType == icConvertFloat) {
-          size_t num = file->GetLength()/sizeof(icFloat32Number);
+          icUInt32Number num;
           icFloat32Number value;
           icUInt8Number *ptr = (icUInt8Number*)&value;
 
-          SetSize((icUInt32Number)num);
-          icFloatNumber *dst = GetData(0);
+          if (!icXmlValidateFileCount(file->GetLength() / sizeof(icFloat32Number), num, parseStr, filename)) {
+            delete file;
+            return false;
+          }
 
-          size_t i;
+          if (!SetSize(num)) {
+            parseStr += "Out of memory allocating curve data from '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
+          icFloatNumber *dst = GetData(0);
+          if (num && !dst) {
+            parseStr += "Curve data allocation failed for '";
+            parseStr += filename;
+            parseStr += "'.\n";
+            delete file;
+            return false;
+          }
+
+          icUInt32Number i;
           for (i=0; i<num; i++) {
             if (!file->ReadFloat32Float(&value)) { //assumes data is big endian
               perror("Read-File Error");
@@ -2897,7 +3344,11 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
 
           if (szSize && *szSize) {
             icUInt32Number nSize = (icUInt32Number)atol(szSize);
-            SetSize(nSize);
+            if (nSize <= 1)
+              return false;
+            
+            if (!SetSize(nSize))
+              return false;
 
             if (m_nSize == nSize) {
               icUInt32Number j;
@@ -2915,7 +3366,8 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
           }
         }
         else {
-          SetSize(data.GetSize());
+          if (!SetSize(data.GetSize()) || m_nSize != data.GetSize())
+            return false;
 
           icUInt32Number j;
           icUInt8Number *src = data.GetBuf();
@@ -2943,7 +3395,11 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
 
           if (szSize && *szSize) {
             icUInt32Number nSize = (icUInt32Number)atol(szSize);
-            SetSize(nSize);
+            if (nSize <= 1)
+              return false;
+            
+            if (!SetSize(nSize))
+              return false;
 
             if (m_nSize == nSize) {
               icUInt32Number j;
@@ -2961,7 +3417,8 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
           }
         }              
         else {
-          SetSize(data.GetSize());
+          if (!SetSize(data.GetSize()) || m_nSize != data.GetSize())
+            return false;
 
           icUInt32Number j;
           icUInt16Number *src = data.GetBuf();
@@ -2982,8 +3439,11 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
 
           if (szSize && *szSize) {
             icUInt32Number nSize = (icUInt32Number)atol(szSize);
+            if (nSize <= 1)
+              return false;
 
-            SetSize(nSize);
+            if (!SetSize(nSize))
+              return false;
 
             if (m_nSize == nSize) {
               icUInt32Number j;
@@ -3001,7 +3461,8 @@ bool CIccTagXmlCurve::ParseXml(xmlNode *pNode, icConvertType nType, std::string 
           }
         }
         else {
-          SetSize(data.GetSize());
+          if (!SetSize(data.GetSize()) || m_nSize != data.GetSize())
+            return false;
 
           icUInt32Number j;
           icFloatNumber *src = data.GetBuf();
@@ -3074,7 +3535,34 @@ bool CIccTagXmlParametricCurve::ParseXml(xmlNode *pNode, std::string & /*parseSt
         if (!functionType)
           return false;    
 
-        if (!SetFunctionType(atoi(functionType))){
+        // ICC.1 encodes the parametric curve function type as 0-4 (see the
+        // switch in CIccTagParametricCurve::SetFunctionType), so parse it as a
+        // bounded unsigned value rather than through atoi().
+        //
+        // atoi() returned a signed int that was then narrowed to
+        // SetFunctionType()'s icUInt16Number parameter, which is undefined for
+        // anything outside 0..65535 and silently truncating inside it (#1851):
+        //
+        //   IccTagXml.cpp:3538:30: runtime error: implicit conversion from type
+        //   'int' of value 96948242 (32-bit, signed) to type 'icUInt16Number'
+        //   (aka 'unsigned short') changed the value to 20498 (16-bit, unsigned)
+        //
+        // Truncation is the part that matters beyond the sanitizer diagnostic:
+        // any input congruent to a legal type mod 65536 was laundered into that
+        // legal type, so "65540" was accepted as function type 4 and the profile
+        // was written as though the file had said 4.  atoi() also stops at the
+        // first non-digit, so "96948242 1.23 0.44994" parsed as a number at all.
+        //
+        // The existing `if (!SetFunctionType(...))` guard could not catch either
+        // case: SetFunctionType is documented "Return: always true!!" and ends in
+        // an unconditional `return true`, so this test has never rejected
+        // anything.  Out-of-range types fell through its switch to nNumParam = 0,
+        // leaving the truncated value stored in m_nFunctionType and written back
+        // out by Write16().  icXmlParseU16 rejects trailing garbage, a leading
+        // '-', and anything above the bound, which makes the guard live.
+        icUInt16Number nFunctionType = 0;
+        if (!icXmlParseU16(functionType, nFunctionType, 4) ||
+            !SetFunctionType(nFunctionType)){
           return false;
         }
         CIccFloatArray data;
@@ -3097,7 +3585,7 @@ bool CIccTagXmlParametricCurve::ParseXml(xmlNode *pNode, std::string & /*parseSt
         xmlAttr *reserved2 = icXmlFindAttr(pCurveNode, "Reserved");
 
         if (reserved2) {
-          m_nReserved2 = (icUInt16Number)atoi(icXmlAttrValue(reserved2));
+          m_nReserved2 = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(reserved2));
         }
         return true;
       }
@@ -3146,7 +3634,7 @@ bool CIccTagXmlSegmentedCurve::ParseXml(xmlNode *pNode, std::string &parseStr )
 {
   xmlNode *pCurveNode = icXmlFindNode(pNode, "SegmentedCurve");
   if (pCurveNode) {
-    CIccSegmentedCurveXml *pCurve = new CIccSegmentedCurveXml();
+    CIccSegmentedCurveXml *pCurve = new (std::nothrow) CIccSegmentedCurveXml();
     
     if (pCurve) {
       if (pCurve->ParseXml(pCurveNode, parseStr)) {
@@ -3313,10 +3801,10 @@ bool icCurvesFromXml(LPIccCurve *pCurve, icUInt32Number nChannels, xmlNode *pNod
     if (pCurveNode->type==XML_ELEMENT_NODE) {
       CIccCurve *pCurveTag = NULL;
       if (!icXmlStrCmp(pCurveNode->name, "Curve")) {
-        pCurveTag = new CIccTagXmlCurve;
+        pCurveTag = new (std::nothrow) CIccTagXmlCurve;
       }
       else if (!icXmlStrCmp(pCurveNode->name, "ParametricCurve")) {
-        pCurveTag = new CIccTagXmlParametricCurve();
+        pCurveTag = new (std::nothrow) CIccTagXmlParametricCurve();
       }
 
       if (pCurveTag) {
@@ -3410,7 +3898,7 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
   icUInt8Number nInput = (icUInt8Number)nIn;
   icUInt16Number nOutput = (icUInt16Number)nOut;
 
-  pCLUT = new CIccCLUT(nInput, nOutput, nPrecision);
+  pCLUT = new (std::nothrow) CIccCLUT(nInput, nOutput, nPrecision);
 
   if (!pCLUT){
     parseStr += "Error in creating CLUT Table. Check values of Precision, InputChannel, or OutputChannels.\n";
@@ -3445,7 +3933,7 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
     xmlAttr *gridGranularity = icXmlFindAttr(pNode, "GridGranularity");
 
     if (gridGranularity) {
-      nGridGranularity = (icUInt8Number)atoi(icXmlAttrValue(gridGranularity));
+      nGridGranularity = (icUInt8Number)icXmlAttrToUInt(icXmlAttrValue(gridGranularity));
     }
     else {
       delete pCLUT;
@@ -3478,14 +3966,14 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
       filename = icXmlAttrValue(table, "File");
     }
 
-    if (filename[0]) {
-      CIccIO *file = IccOpenFileIO(filename, "rb");
+    if (filename && filename[0]) {
+      CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
 
       if (!file) {
         // added error message
         parseStr += "Error! - File '";
         parseStr += filename;
-        parseStr +="' not found.\n";
+        parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
         delete pCLUT;
         return NULL;
       }
@@ -3493,7 +3981,12 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
       const char *format = icXmlAttrValue(table, "Format");
 
       if (!strcmp(format, "text")) {
-        size_t num = file->GetLength();
+        icUInt32Number num;
+        if (!icXmlValidateFileCount(file->GetLength(), num, parseStr, filename)) {
+          delete file;
+          delete pCLUT;
+          return NULL;
+        }
         char *buf = (char *)malloc(num);
 
         if (!buf) {  
@@ -3545,7 +4038,7 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
             return NULL;
           }
 
-          if (data.GetSize()!=pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {     
+          if (data.GetSize()!=(size_t)pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {     
             parseStr += "Error! - Number of entries in file '";
             parseStr += filename;
             parseStr += "'is not equal to the size of the CLUT Table.\n";  
@@ -3664,9 +4157,10 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
 
         if (nType == icConvert8Bit){
           size_t num = file->GetLength();
+          icUInt32Number count;
           icUInt8Number value;
           // if number of entries in file is not equal to size of CLUT table, flag as error
-          if (num!=pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
+          if (num!=(size_t)pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
             parseStr += "Error! - Number of entries in file '";
             parseStr += filename;
             parseStr += "'is not equal to the size of the CLUT Table.\n";  
@@ -3676,9 +4170,16 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
             delete pCLUT;
             return NULL;
           }
+
+          if (!icXmlValidateFileCount(num, count, parseStr, filename)) {
+            delete file;
+            delete pCLUT;
+            return NULL;
+          }
+
           icFloatNumber *dst = pCLUT->GetData(0);
           icUInt32Number i;
-          for (i=0; i<num; i++) {
+          for (i=0; i<count; i++) {
             if (!file->Read8(&value)) {
               perror("Read-File Error");
               parseStr += "'";
@@ -3693,10 +4194,11 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
         }
         else if (nType == icConvert16Bit){
           size_t num = file->GetLength() / sizeof(icUInt16Number);
+          icUInt32Number count;
           icUInt16Number value;
           icUInt8Number *ptr = (icUInt8Number*)&value;
 
-          if (num<pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
+          if (num!=(size_t)pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
             parseStr += "Error! - Number of entries in file '";
             parseStr += filename;
             parseStr += "'is not equal to the size of the CLUT Table.\n";
@@ -3706,10 +4208,17 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
             delete pCLUT;
             return NULL;
           }
+
+          if (!icXmlValidateFileCount(num, count, parseStr, filename)) {
+            delete file;
+            delete pCLUT;
+            return NULL;
+          }
+
           icFloatNumber *dst = pCLUT->GetData(0);
 
           icUInt32Number i;
-          for (i=0; i<num; i++) {
+          for (i=0; i<count; i++) {
             if (!file->Read16(&value)) {  //this assumes data is big endian
               perror("Read-File Error");
               parseStr += "'";
@@ -3733,10 +4242,11 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
         }
         else if (nType == icConvertFloat){
           size_t num = file->GetLength()/sizeof(icFloat32Number);
+          icUInt32Number count;
           icFloat32Number value;
           icUInt8Number *ptr = (icUInt8Number*)&value;
 
-          if (num<pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
+          if (num!=(size_t)pCLUT->NumPoints()*pCLUT->GetOutputChannels()) {
             parseStr += "Error! - Number of entries in file '";
             parseStr += filename;
             parseStr += "'is not equal to the size of the CLUT Table.\n";  
@@ -3746,10 +4256,17 @@ CIccCLUT *icCLutFromXml(xmlNode *pNode, int nIn, int nOut, icConvertType nType, 
             delete pCLUT;
             return NULL;
           }
+
+          if (!icXmlValidateFileCount(num, count, parseStr, filename)) {
+            delete file;
+            delete pCLUT;
+            return NULL;
+          }
+
           icFloatNumber *dst = pCLUT->GetData(0);
 
           icUInt32Number i;
-          for (i=0; i<num; i++) {
+          for (i=0; i<count; i++) {
             if (!file->ReadFloat32Float(&value)) {  //this assumes data is big endian
               perror("Read-File Error");
               parseStr += "'";
@@ -3885,6 +4402,14 @@ bool icMBBFromXml(CIccMBB *pMBB, xmlNode *pNode, icConvertType nType, std::strin
 
   int nIn = atoi(icXmlAttrValue(in));
   int nOut = atoi(icXmlAttrValue(out));
+
+  // must have at least 1 input and 1 output
+  if (nIn < 1 || nOut < 1)
+    return false;
+
+  // and the current limit is for 15 channels
+  if (nIn > 15 || nOut > 15)
+    return false;
 
   pMBB->Init(nIn, nOut);
 
@@ -4057,58 +4582,58 @@ bool CIccTagXmlMultiProcessElement::ToXml(std::string &xml, std::string blanks/*
 CIccMultiProcessElement *CIccTagXmlMultiProcessElement::CreateElement(const icChar *szElementNodeName)
 {
   if (!strcmp(szElementNodeName, "CurveSetElement")) {
-    return new CIccMpeXmlCurveSet;
+    return new(std::nothrow) CIccMpeXmlCurveSet;
   }
   if (!strcmp(szElementNodeName, "MatrixElement")) {
-    return new CIccMpeXmlMatrix;
+    return new(std::nothrow) CIccMpeXmlMatrix;
   }
   if (!strcmp(szElementNodeName, "CLutElement")) {
-    return new CIccMpeXmlCLUT;
+    return new(std::nothrow) CIccMpeXmlCLUT;
   }
   if (!strcmp(szElementNodeName, "ExtCLutElement")) {
-    return new CIccMpeXmlExtCLUT;
+    return new(std::nothrow) CIccMpeXmlExtCLUT;
   }
   if (!strcmp(szElementNodeName, "CalculatorElement")) {
-    return new CIccMpeXmlCalculator;
+    return new(std::nothrow) CIccMpeXmlCalculator;
   }
   if (!strcmp(szElementNodeName, "TintArrayElement")) {
-    return new CIccMpeXmlTintArray;
+    return new(std::nothrow) CIccMpeXmlTintArray;
   }
   if (!strcmp(szElementNodeName, "ToneMapElement")) {
-    return new CIccMpeXmlToneMap;
+    return new(std::nothrow) CIccMpeXmlToneMap;
   }
   if (!strcmp(szElementNodeName, "JabToXYZElement")) {
-    return new CIccMpeXmlJabToXYZ;
+    return new(std::nothrow) CIccMpeXmlJabToXYZ;
   }
   if (!strcmp(szElementNodeName, "UnknownElement")) {
-    return new CIccMpeXmlUnknown;
+    return new(std::nothrow) CIccMpeXmlUnknown;
   }
   if (!strcmp(szElementNodeName, "XYZToJabElement")) {
-    return new CIccMpeXmlXYZToJab;
+    return new(std::nothrow) CIccMpeXmlXYZToJab;
   }
   if (!strcmp(szElementNodeName, "EmissionMatrixElement")) {
-    return new CIccMpeXmlEmissionMatrix;
+    return new(std::nothrow) CIccMpeXmlEmissionMatrix;
   }
   if (!strcmp(szElementNodeName, "InvEmissionMatrixElement")) {
-    return new CIccMpeXmlInvEmissionMatrix;
+    return new(std::nothrow) CIccMpeXmlInvEmissionMatrix;
   }
   if (!strcmp(szElementNodeName, "EmissionCLutElement")) {
-    return new CIccMpeXmlEmissionCLUT;
+    return new(std::nothrow) CIccMpeXmlEmissionCLUT;
   }
   if (!strcmp(szElementNodeName, "ReflectanceCLutElement")) {
-    return new CIccMpeXmlReflectanceCLUT;
+    return new(std::nothrow) CIccMpeXmlReflectanceCLUT;
   }
   if (!strcmp(szElementNodeName, "EmissionObserverElement")) {
-    return new CIccMpeXmlEmissionObserver;
+    return new(std::nothrow) CIccMpeXmlEmissionObserver;
   }
   if (!strcmp(szElementNodeName, "ReflectanceObserverElement")) {
-    return new CIccMpeXmlReflectanceObserver;
+    return new(std::nothrow) CIccMpeXmlReflectanceObserver;
   }
   if (!strcmp(szElementNodeName, "BAcsElement")) {
-    return new CIccMpeXmlBAcs;
+    return new(std::nothrow) CIccMpeXmlBAcs;
   }
   if (!strcmp(szElementNodeName, "EAcsElement")) {
-    return new CIccMpeXmlEAcs;
+    return new(std::nothrow) CIccMpeXmlEAcs;
   }
   return NULL;
 }
@@ -4184,11 +4709,13 @@ bool CIccTagXmlMultiProcessElement::ParseXml(xmlNode *pNode, std::string &parseS
     return false;
   }
 
-  m_nInputChannels = atoi(icXmlAttrValue(pInputChannels));
-  m_nOutputChannels = atoi(icXmlAttrValue(pOutputChannels));
+  m_nInputChannels = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pInputChannels));
+  m_nOutputChannels = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(pOutputChannels));
 
   if (!m_list) {
-    m_list = new CIccMultiProcessElementList();
+    m_list = new (std::nothrow) CIccMultiProcessElementList();
+    if (!m_list)
+      return false;
   }
   else {
     m_list->clear();
@@ -4225,7 +4752,6 @@ bool CIccTagXmlProfileSequenceId::ToXml(std::string &xml, std::string blanks/* =
     const size_t bufSize = 256;
     char buf[bufSize];
     char data[bufSize];
-    char fix[bufSize];
     std::string bufstr;
     int n;
 
@@ -4241,11 +4767,14 @@ bool CIccTagXmlProfileSequenceId::ToXml(std::string &xml, std::string blanks/* =
       CIccMultiLocalizedUnicode::iterator i;
 
       for (i=pid->m_desc.m_Strings->begin(); i!=pid->m_desc.m_Strings->end(); i++) {
-        snprintf(buf, bufSize, "<LocalizedText LanguangeCountry=\"%s\"", icFixXml(fix, icGetSigStr(data, bufSize, (i->m_nLanguageCode<<16) + i->m_nCountryCode)));
-        xml += blanks + buf;
-
-        snprintf(buf, bufSize, ">%s</LocalizedText>\n", icFixXml(fix, icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength())));
-        xml += buf;
+        icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength());
+        // Cast to icUInt32Number before the shift: see CIccTagXmlMultiLocalizedUnicode::ToXml
+        // -- m_nLanguageCode<<16 otherwise promotes to signed int and overflows for
+        // language codes >= 0x8000, then wraps when handed to icGetSigStr.
+        icXmlDumpLocalizedText(xml, blanks + " ", "LocalizedText",
+                               icGetSigStr(data, bufSize, ((icUInt32Number)i->m_nLanguageCode << 16) |
+                                           (icUInt32Number)i->m_nCountryCode),
+                               bufstr);
       }
     }
     xml += blanks + " </ProfileIdDesc>\n";
@@ -4276,16 +4805,14 @@ bool CIccTagXmlProfileSequenceId::ParseXml(xmlNode *pNode, std::string & /* pars
 
     xmlNode* pSubNode;
     for (pSubNode = icXmlFindNode(pNode, "LocalizedText"); pSubNode; pSubNode = icXmlFindNode(pSubNode->next, "LocalizedText")) {
-      if ((langCode = icXmlFindAttr(pSubNode, "languageCountry")) &&
+      if ((langCode = icXmlFindLanguageCountryAttr(pSubNode)) &&
         pSubNode->children) {
-          xmlNode *pText;
+          std::string text;
 
-          for (pText = pSubNode->children; pText && pText->type != XML_TEXT_NODE; pText = pText->next);
-
-          if (pText) {
+          if (icXmlParseLocalizedText(pSubNode, text)) {
             icUInt32Number lc = icGetSigVal(icXmlAttrValue(langCode));
-            CIccUTF16String str((const char*)pText->content);
-            desc.m_desc.SetText(str.c_str(), (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff));
+            if (!icXmlSetLocalizedUtf8(desc.m_desc, text, (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff)))
+              return false;
           }
           else {
             desc.m_desc.SetText("");
@@ -4309,20 +4836,22 @@ bool CIccTagXmlDict::ToXml(std::string &xml, std::string blanks/* = ""*/)
     CIccDictEntry *nv = nvp->ptr;
     if (!nv)
       continue;
-      
+
     const size_t bufSize = 256;
-    char buf[bufSize];
     char data[bufSize];
-    char fix[bufSize];
+    std::string fix;
     std::string bufstr;
 
     xml += blanks + " <DictEntry Name=\"";
-    xml += icFixXml(fix, icUtf16ToUtf8(bufstr, (icUInt16Number*)nv->GetName().c_str(), (int)nv->GetName().size()));
+    auto nameStr = nv->GetName();       // wstring
+    xml += icFixXml(fix, icWCharToUtf8(bufstr, nameStr.c_str(), nameStr.size()));
+
     xml += "\"";
 
     if (nv->IsValueSet()) {
       xml += " Value=\"";
-      xml += icFixXml(fix, icUtf16ToUtf8(bufstr, (icUInt16Number*)nv->GetValue().c_str(), (int)nv->GetValue().size()));
+      auto valueStr = nv->GetValue();   // wstring
+      xml += icFixXml(fix, icWCharToUtf8(bufstr, valueStr.c_str(), valueStr.size()));
       xml += "\"";
     }
 
@@ -4336,22 +4865,26 @@ bool CIccTagXmlDict::ToXml(std::string &xml, std::string blanks/* = ""*/)
         CIccMultiLocalizedUnicode::iterator i;
 
         for (i=nv->GetNameLocalized()->m_Strings->begin(); i!=nv->GetNameLocalized()->m_Strings->end(); i++) {
-          snprintf(buf, bufSize, "  <LocalizedName LanguageCountry=\"%s\"", icFixXml(fix, icGetSigStr(data, bufSize, (i->m_nLanguageCode<<16) + i->m_nCountryCode)));
-          xml += blanks + buf;
-
-          snprintf(buf, bufSize, "><![CDATA[%s]]></LocalizedName>\n", icFixXml(fix, icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength())));
-          xml += buf;
+          icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength());
+          // Cast to icUInt32Number before the shift: see CIccTagXmlMultiLocalizedUnicode::ToXml
+          // -- avoids signed-int overflow / value-changing wrap for language codes >= 0x8000.
+          icXmlDumpLocalizedText(xml, blanks + "  ", "LocalizedName",
+                                 icGetSigStr(data, bufSize, ((icUInt32Number)i->m_nLanguageCode << 16) |
+                                             (icUInt32Number)i->m_nCountryCode),
+                                 bufstr);
         }
       }
       if (nv->GetValueLocalized()) {
         CIccMultiLocalizedUnicode::iterator i;
 
         for (i=nv->GetValueLocalized()->m_Strings->begin(); i!=nv->GetValueLocalized()->m_Strings->end(); i++) {
-          snprintf(buf, bufSize, "  <LocalizedValue LanguageCountry=\"%s\"", icFixXml(fix, icGetSigStr(data, bufSize, (i->m_nLanguageCode<<16) + i->m_nCountryCode)));
-          xml += blanks + buf;
-
-          snprintf(buf, bufSize, "><![CDATA[%s]]></LocalizedValue>\n", icFixXml(fix, icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength())));
-          xml += buf;
+          icUtf16ToUtf8(bufstr, i->GetBuf(), i->GetLength());
+          // Cast to icUInt32Number before the shift: see CIccTagXmlMultiLocalizedUnicode::ToXml
+          // -- avoids signed-int overflow / value-changing wrap for language codes >= 0x8000.
+          icXmlDumpLocalizedText(xml, blanks + "  ", "LocalizedValue",
+                                 icGetSigStr(data, bufSize, ((icUInt32Number)i->m_nLanguageCode << 16) |
+                                             (icUInt32Number)i->m_nCountryCode),
+                                 bufstr);
         }
       }
       xml += blanks + " </DictEntry>\n";
@@ -4367,12 +4900,13 @@ bool CIccTagXmlDict::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
 
   for (pNode = icXmlFindNode(pNode, "DictEntry"); pNode; pNode = icXmlFindNode(pNode->next, "DictEntry")) {
     CIccDictEntryPtr ptr;
-    CIccDictEntry *pDesc = new CIccDictEntry();
     xmlAttr *pAttr;
     CIccUTF16String str;
 
+    CIccDictEntry *pDesc = new (std::nothrow) CIccDictEntry();
     if (!pDesc)
       return false;
+    
     ptr.ptr = pDesc;
 
     str = icXmlAttrValue(pNode, "Name", "");
@@ -4393,20 +4927,25 @@ bool CIccTagXmlDict::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
       if (pChild->type == XML_ELEMENT_NODE && !icXmlStrCmp(pChild->name, "LocalizedName")) {
         CIccTagMultiLocalizedUnicode *pTag = pDesc->GetNameLocalized();
         if (!pTag) {
-          pTag = new CIccTagMultiLocalizedUnicode();
+          pTag = new (std::nothrow) CIccTagMultiLocalizedUnicode();
+          if (!pTag) {
+            delete pDesc;
+            ptr.ptr = NULL;
+            return false;
+          }
           pDesc->SetNameLocalized(pTag);
         }
 
-        if ((pAttr = icXmlFindAttr(pChild, "LanguageCountry")) && pChild->children) {
-          xmlNode *pText;
+        if ((pAttr = icXmlFindLanguageCountryAttr(pChild)) && pChild->children) {
+          std::string text;
           icUInt32Number lc = icGetSigVal(icXmlAttrValue(pAttr));
 
-          for (pText = pChild->children; pText && pText->type != XML_TEXT_NODE && pText->type != XML_CDATA_SECTION_NODE; pText = pText->next);
-
-          if (pText) {
-            CIccUTF16String str((const char*)pText->content);
-
-            pTag->SetText(str.c_str(), (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff));
+          if (icXmlParseLocalizedText(pChild, text)) {
+            if (!icXmlSetLocalizedUtf8(*pTag, text, (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff))) {
+              delete pDesc;
+              ptr.ptr = NULL;
+              return false;
+            }
           }
           else {
             pTag->SetText("");
@@ -4416,19 +4955,25 @@ bool CIccTagXmlDict::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
       else if (pChild->type == XML_ELEMENT_NODE && !icXmlStrCmp(pChild->name, "LocalizedValue")) {
         CIccTagMultiLocalizedUnicode *pTag = pDesc->GetValueLocalized();
         if (!pTag) {
-          pTag = new CIccTagMultiLocalizedUnicode();
+          pTag = new (std::nothrow) CIccTagMultiLocalizedUnicode();
+          if (!pTag) {
+            delete pDesc;
+            ptr.ptr = NULL;
+            return false;
+          }
           pDesc->SetValueLocalized(pTag);
         }
 
-        if ((pAttr = icXmlFindAttr(pChild, "LanguageCountry")) && pChild->children) {
-          xmlNode *pText;
+        if ((pAttr = icXmlFindLanguageCountryAttr(pChild)) && pChild->children) {
+          std::string text;
           icUInt32Number lc = icGetSigVal(icXmlAttrValue(pAttr));
 
-          for (pText = pChild->children; pText && pText->type != XML_TEXT_NODE && pText->type != XML_CDATA_SECTION_NODE; pText = pText->next);
-
-          if (pText) {
-            CIccUTF16String str((const char*)pText->content);
-            pTag->SetText(str.c_str(), (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff));
+          if (icXmlParseLocalizedText(pChild, text)) {
+            if (!icXmlSetLocalizedUtf8(*pTag, text, (icLanguageCode)(lc>>16), (icCountryCode)(lc & 0xffff))) {
+              delete pDesc;
+              ptr.ptr = NULL;
+              return false;
+            }
           }
           else {
             pTag->SetText("");
@@ -4447,8 +4992,9 @@ bool CIccTagXmlDict::ParseXml(xmlNode *pNode, std::string & /*parseStr*/)
 bool CIccTagXmlStruct::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   std::string info;
+  std::string fix;
   const size_t bufSize = 256;
-  char buf[bufSize], fix[bufSize], line[bufSize];
+  char buf[bufSize], line[bufSize];
   IIccStruct *pStruct = GetStructHandler();
 
   const icChar *structName = ((pStruct != NULL) ? pStruct->GetDisplayName() : NULL);
@@ -4657,8 +5203,15 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
       icTagTypeSignature sigType = icGetTypeNameTagSig((const icChar*)pTypeNode->name);
 
       if (sigType == icSigUnknownType) {
-        xmlAttr *attr = icXmlFindAttr(pTypeNode, "type");
-        sigType = (icTagTypeSignature)icGetSigVal((icChar*)icXmlAttrValue(attr));
+        attr = icXmlFindAttr(pTypeNode, "type");
+        const char *typeSig = icXmlAttrValue(attr);
+        if (!typeSig[0]) {
+          parseStr += "Invalid private tag type attribute for ";
+          parseStr += nodeName;
+          parseStr += "\n";
+          return false;
+        }
+        sigType = (icTagTypeSignature)icGetSigVal(typeSig);
       }
 
       CIccInfo info;
@@ -4675,7 +5228,15 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
           if ((attr = icXmlFindAttr(pTypeNode, "reserved"))) {
             sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
           }
-          AttachElem(sigTag, pTag);
+          if (!AttachElem(sigTag, pTag)) {
+            parseStr += "Unable to Attach \"";
+            parseStr += (const char*)pTypeNode->name;
+            parseStr += "\" (";
+            parseStr += nodeName;
+            parseStr += ") Tag\n";
+            delete pTag;
+            return false;
+          }
         }
         else {
           parseStr += "Unable to Parse \"";
@@ -4683,6 +5244,7 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
           parseStr += "\" (";
           parseStr += nodeName;
           parseStr += ") Tag\n";
+          delete pTag;
           return false;
         }
       }
@@ -4692,6 +5254,7 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
         parseStr += "\" (";
         parseStr += nodeName;
         parseStr += ") Tag\n";
+        delete pTag;
         return false;
       }
     }
@@ -4701,8 +5264,15 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
     icTagTypeSignature sigType = icGetTypeNameTagSig(nodeName.c_str());
 
     if (sigType == icSigUnknownType) {
-      xmlAttr *attr = icXmlFindAttr(pNode, "type");
-      sigType = (icTagTypeSignature)icGetSigVal((icChar*)icXmlAttrValue(attr));
+      attr = icXmlFindAttr(pNode, "type");
+      const char *typeSig = icXmlAttrValue(attr);
+      if (!typeSig[0]) {
+        parseStr += "Invalid private tag type attribute for ";
+        parseStr += nodeName;
+        parseStr += "\n";
+        return false;
+      }
+      sigType = (icTagTypeSignature)icGetSigVal(typeSig);
     }
 
     CIccInfo info;
@@ -4720,11 +5290,17 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
           sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
         }
 
+        bool bAttached = false;
         for (xmlNode *tagSigNode = pNode->children; tagSigNode; tagSigNode = tagSigNode->next) {
-          if (tagSigNode->type == XML_ELEMENT_NODE && !icXmlStrCmp(tagSigNode->name, "TagSignature")) {
+          if (tagSigNode->type == XML_ELEMENT_NODE && !icXmlStrCmp(tagSigNode->name, "TagSignature")
+            && tagSigNode->children != NULL) {
             sigTag = (icTagSignature)icGetSigVal((const icChar*)tagSigNode->children->content);
-            AttachElem(sigTag, pTag);
+            if (AttachElem(sigTag, pTag))
+              bAttached = true;
           }
+        }
+        if (!bAttached) {
+          delete pTag;
         }
       }
       else {
@@ -4733,6 +5309,7 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
         parseStr += "\" (";
         parseStr += nodeName;
         parseStr += ") Tag\n";
+        delete pTag;
         return false;
       }
     }
@@ -4742,6 +5319,7 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
       parseStr += "\" (";
       parseStr += nodeName;
       parseStr += ") Tag\n";
+      delete pTag;
       return false;
     }
   }
@@ -4818,8 +5396,9 @@ bool CIccTagXmlStruct::ParseXml(xmlNode *pNode, std::string &parseStr)
 bool CIccTagXmlArray::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   std::string info;
+  std::string fix;
   const size_t bufSize = 256;
-  char buf[bufSize], fix[bufSize], line[bufSize];
+  char buf[bufSize], line[bufSize];
 
   std::string arrayName;
   std::string arrayBlanks = "";
@@ -4939,7 +5518,7 @@ bool CIccTagXmlArray::ParseXml(xmlNode *pNode, std::string &parseStr)
       icTagTypeSignature sigType = icGetTypeNameTagSig ((icChar*) tagNode->name);
 
       if (sigType==icSigUnknownType){
-        xmlAttr *attr = icXmlFindAttr(pNode, "type");
+        attr = icXmlFindAttr(pNode, "type");
         sigType = (icTagTypeSignature)icGetSigVal((icChar*) icXmlAttrValue(attr));
       }
 
@@ -4964,6 +5543,7 @@ bool CIccTagXmlArray::ParseXml(xmlNode *pNode, std::string &parseStr)
             parseStr += "Tag Array Index ";
             parseStr += n;
             parseStr += " already filled!\n";
+            delete pTag;
             return false;
           }
         }
@@ -4971,8 +5551,12 @@ bool CIccTagXmlArray::ParseXml(xmlNode *pNode, std::string &parseStr)
           parseStr += "Unable to Parse xml node named  \"";
           parseStr += (icChar*)tagNode->name;
           parseStr += "\"\n";
+          delete pTag;
           return false;
         }
+      }
+      else {
+        delete pTag;
       }
       n++;
     }
@@ -5019,7 +5603,10 @@ bool CIccTagXmlGamutBoundaryDesc::ToXml(std::string &xml, std::string blanks/* =
     xml += blanks + "<Triangles>\n";
 
     for (i=0; i<m_NumberOfTriangles; i++) {
-      snprintf(line, lineSize, " <T>%u %u %u</T>\n", m_Triangles[i].m_VertexNumbers[0], m_Triangles[i].m_VertexNumbers[1], m_Triangles[i].m_VertexNumbers[2]);
+      snprintf(line, lineSize, " <T>%u %u %u</T>\n",
+              (unsigned int) m_Triangles[i].m_VertexNumbers[0],
+              (unsigned int) m_Triangles[i].m_VertexNumbers[1],
+              (unsigned int) m_Triangles[i].m_VertexNumbers[2]);
       xml += blanks + line;
     }
 
@@ -5044,7 +5631,7 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
   subNode = icXmlFindNode(childNode->children, "PCSValues");
 
   if (subNode) {
-    m_nPCSChannels = atoi(icXmlAttrValue(subNode, "channels", "0"));
+    m_nPCSChannels = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(subNode, "channels", "0"));
 
     if (!m_nPCSChannels) {
       parseStr += "Bad PCSValues channels\n";
@@ -5063,13 +5650,14 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
       parseStr += "Must have at least 4 PCSValues vertices\n";
       return false;
     }
-
-    m_PCSValues = new icFloatNumber[m_NumberOfVertices * m_nPCSChannels];
+    
+    size_t totalSize = (size_t)m_NumberOfVertices * (size_t)m_nPCSChannels;
+    m_PCSValues = new (std::nothrow) icFloatNumber[totalSize];
 
     if (!m_PCSValues)
       return false;
 
-    memcpy(m_PCSValues, vals.GetBuf(), m_NumberOfVertices * m_nPCSChannels*sizeof(icFloatNumber));
+    memcpy(m_PCSValues, vals.GetBuf(), totalSize*sizeof(icFloatNumber));
   }
   else {
     parseStr += "Cannot find PCSValues\n";
@@ -5079,7 +5667,7 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
   subNode = icXmlFindNode(childNode->children, "DeviceValues");
 
   if (subNode) {
-    m_nDeviceChannels = atoi(icXmlAttrValue(subNode, "channels", "0"));
+    m_nDeviceChannels = (icUInt16Number)icXmlAttrToUInt(icXmlAttrValue(subNode, "channels", "0"));
 
     if (!m_nDeviceChannels) {
       parseStr += "Bad DeviceValues channels\n";
@@ -5098,13 +5686,14 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
       parseStr += "Number of Device vertices doesn't match PCS verticies\n";
       return false;
     }
-
-    m_DeviceValues = new icFloatNumber[m_NumberOfVertices * m_nDeviceChannels];
+    
+    size_t totalSize = (size_t)m_NumberOfVertices * (size_t)m_nDeviceChannels;
+    m_DeviceValues = new (std::nothrow) icFloatNumber[totalSize];
 
     if (!m_DeviceValues)
       return false;
 
-    memcpy(m_DeviceValues, vals.GetBuf(), m_NumberOfVertices * m_nDeviceChannels * sizeof(icFloatNumber));
+    memcpy(m_DeviceValues, vals.GetBuf(), totalSize * sizeof(icFloatNumber));
   }
   else if (!m_PCSValues)
     m_NumberOfVertices = 0;
@@ -5122,7 +5711,9 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
     }
   }
   m_NumberOfTriangles = nMaxIndex;
-  m_Triangles = new icGamutBoundaryTriangle[m_NumberOfTriangles];
+  m_Triangles = new (std::nothrow) icGamutBoundaryTriangle[m_NumberOfTriangles];
+  if (!m_Triangles)
+    return false;
 
   n=0; 
   for (subNode = childNode->children; subNode && n<nMaxIndex; subNode = subNode->next) {
@@ -5155,11 +5746,11 @@ bool CIccTagXmlEmbeddedProfile::ParseXml(xmlNode *pNode, std::string &parseStr)
   if (!tagNode)
     return false;
 
-  if (m_pProfile) {
-    delete m_pProfile;
-  }
+  delete m_pProfile;
 
-  CIccProfileXml *pProfile = new CIccProfileXml();
+  CIccProfileXml *pProfile = new (std::nothrow) CIccProfileXml();
+  if (!pProfile)
+    return false;
   m_pProfile = pProfile;
 
   if (!pProfile->ParseXml(tagNode, parseStr)) {
@@ -5190,7 +5781,14 @@ bool CIccTagXmlEmbeddedHeightImage::ParseXml(xmlNode *pNode, std::string &parseS
   if (!tagNode)
     return false;
 
-  m_nSeamlesIndicator = atoi(icXmlAttrValue(tagNode, "SeamlessIndicator", "0"));
+  // SeamlessIndicator is stored as an unsigned 32-bit indicator (the binary
+  // Read() path uses Read32).  atoi() returns a signed int, so a negative XML
+  // attribute used to wrap to a huge unsigned value through the implicit
+  // int -> icUInt32Number conversion (#1342).  The value is now parsed into a
+  // signed temporary and any negative (invalid) input is floored to 0, so the
+  // stored indicator is always a well-defined non-negative number.
+  int nSeamlessIndicator = atoi(icXmlAttrValue(tagNode, "SeamlessIndicator", "0"));
+  m_nSeamlesIndicator = nSeamlessIndicator < 0 ? 0 : (icUInt32Number)nSeamlessIndicator;
   m_nEncodingFormat = (icImageEncodingType)atoi(icXmlAttrValue(tagNode, "EncodingFormat", "0"));
   m_fMetersMinPixelValue = (icFloatNumber)atof(icXmlAttrValue(tagNode, "MetersMinPixelValue", "0.0"));
   m_fMetersMaxPixelValue = (icFloatNumber)atof(icXmlAttrValue(tagNode, "MetersMaxPixelValue", "0.0"));
@@ -5205,21 +5803,27 @@ bool CIccTagXmlEmbeddedHeightImage::ParseXml(xmlNode *pNode, std::string &parseS
     }
 
     // file exists
-    if (filename[0]) {
-      CIccIO *file = IccOpenFileIO(filename, "rb");
+    if (filename && filename[0]) {
+      CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
       if (!file) {
         parseStr += "Error! - File '";
         parseStr += filename;
-        parseStr += "' not found.\n";
+        parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
         delete file;
         return false;
       }
 
       size_t num = file->GetLength();
+      icUInt32Number count;
 
-      SetSize((icUInt32Number)num);
+      if (!icXmlValidateFileCount(num, count, parseStr, filename)) {
+        delete file;
+        return false;
+      }
+
+      SetSize(count);
       icUInt8Number *dst = GetData(0);
-      if (file->Read8(dst, num)!=num) {
+      if (file->Read8(dst, count)!=count) {
         perror("Read-File Error");
         parseStr += "'";
         parseStr += filename;
@@ -5252,10 +5856,10 @@ bool CIccTagXmlEmbeddedHeightImage::ToXml(std::string &xml, std::string blanks/*
   char buf[bufSize];
 
   xml += blanks + "<HeightImage";
-  snprintf(buf, bufSize, " SeamlessIndicator=\"%d\"", m_nSeamlesIndicator);
+  snprintf(buf, bufSize, " SeamlessIndicator=\"%d\"", (unsigned int) m_nSeamlesIndicator);
   xml += buf;
 
-  snprintf(buf, bufSize, " EncodingFormat=\"%d\"", m_nEncodingFormat);
+  snprintf(buf, bufSize, " EncodingFormat=\"%d\"", (unsigned int) m_nEncodingFormat);
   xml += buf;
 
   snprintf(buf, bufSize, " MetersMinPixelValue=\"%.12f\"", m_fMetersMinPixelValue);
@@ -5287,7 +5891,14 @@ bool CIccTagXmlEmbeddedNormalImage::ParseXml(xmlNode *pNode, std::string &parseS
   if (!tagNode)
     return false;
 
-  m_nSeamlesIndicator = atoi(icXmlAttrValue(tagNode, "SeamlessIndicator", "0"));
+  // SeamlessIndicator is stored as an unsigned 32-bit indicator (the binary
+  // Read() path uses Read32).  atoi() returns a signed int, so a negative XML
+  // attribute used to wrap to a huge unsigned value through the implicit
+  // int -> icUInt32Number conversion (#1343).  The value is now parsed into a
+  // signed temporary and any negative (invalid) input is floored to 0, so the
+  // stored indicator is always a well-defined non-negative number.
+  int nSeamlessIndicator = atoi(icXmlAttrValue(tagNode, "SeamlessIndicator", "0"));
+  m_nSeamlesIndicator = nSeamlessIndicator < 0 ? 0 : (icUInt32Number)nSeamlessIndicator;
   m_nEncodingFormat = (icImageEncodingType)atoi(icXmlAttrValue(tagNode, "EncodingFormat", "0"));
 
   xmlNode *pImageNode;
@@ -5300,21 +5911,27 @@ bool CIccTagXmlEmbeddedNormalImage::ParseXml(xmlNode *pNode, std::string &parseS
     }
 
     // file exists
-    if (filename[0]) {
-      CIccIO *file = IccOpenFileIO(filename, "rb");
+    if (filename && filename[0]) {
+      CIccIO *file = IccXmlSafeOpenFileIO(filename, "rb");
       if (!file) {
         parseStr += "Error! - File '";
         parseStr += filename;
-        parseStr += "' not found.\n";
+        parseStr += "' could not be opened (file includes may be disabled or path rejected as unsafe).\n";
         delete file;
         return false;
       }
 
       size_t num = file->GetLength();
+      icUInt32Number count;
 
-      SetSize((icUInt32Number)num);
+      if (!icXmlValidateFileCount(num, count, parseStr, filename)) {
+        delete file;
+        return false;
+      }
+
+      SetSize(count);
       icUInt8Number *dst = GetData(0);
-      if (file->Read8(dst, num) != num) {
+      if (file->Read8(dst, count) != count) {
         perror("Read-File Error");
         parseStr += "'";
         parseStr += filename;
@@ -5346,10 +5963,10 @@ bool CIccTagXmlEmbeddedNormalImage::ToXml(std::string &xml, std::string blanks/*
   char buf[bufSize];
 
   xml += blanks + "<NormalImage";
-  snprintf(buf, bufSize, " SeamlessIndicator=\"%d\"", m_nSeamlesIndicator);
+  snprintf(buf, bufSize, " SeamlessIndicator=\"%d\"", (unsigned int) m_nSeamlesIndicator);
   xml += buf;
 
-  snprintf(buf, bufSize, " EncodingFormat=\"%d\"", m_nEncodingFormat);
+  snprintf(buf, bufSize, " EncodingFormat=\"%d\"", (unsigned int) m_nEncodingFormat);
   xml += buf;
 
   if (!m_nSize) {

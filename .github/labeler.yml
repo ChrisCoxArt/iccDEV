@@ -1,71 +1,229 @@
 ###############################################################
 #
-## Copyright (©) 2025 International Color Consortium. 
-##                 All rights reserved. 
+## Copyright (c) 2025-2026 International Color Consortium.
+##                 All rights reserved.
 ##                 https://color.org
 #
-#
-## Intent: iccDEV labeler.yml
-#
-## Last Updated: 28-NOV-2025 2300Z by David Hoyt 
-##               Added user-controllable input (uci) checks
-## TODO: Push binary releases, tags etc.. 
-#
-## Comment: Known good and working from PatchIccMax
-#
-#
-#
-#
+## Intent: iccDEV PR labeler configuration
 #
 ###############################################################
 
+# Avoid noisy path labels on tree-wide mechanical refactors. Maintainers can
+# add labels manually when a large change intentionally spans many components.
+max-files-changed: 350
+changed-files-labels-limit: 14
+
 Source:
-  - any:
-      - 'IccProfLib/**/*.cpp'
-      - 'IccProfLib/**/*.h'
-      - 'IccProfLib/**/*.hpp'
-      - 'IccXML/**/*.cpp'
-      - 'IccXML/**/*.h'
-      - 'IccXML/**/*.hpp'
-      - 'Tools/**/**/*.cpp'
-      - 'Tools/**/**/*.h'
-      - 'Tools/**/**/*.hpp'
-      - 'Tools/wxWidget/wxProfileDump/*.cpp'
-      - 'Tools/wxWidget/wxProfileDump/*.h'
-      - 'Tools/wxWidget/wxProfileDump/*.hpp'
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'IccProfLib/**/*'
+          - 'IccXML/**/*'
+          - 'IccJSON/**/*'
+          - 'Tools/**/*.{c,cc,cpp,cxx,h,hh,hpp}'
 
 Documentation:
-  - any:
-      - 'docs/*.md'
-      - '*.md'
-      - 'LICENSE*'
-      - 'SECURITY*'
-      - 'README*'
-      - 'CHANGELOG*'
+  - changed-files:
+      - any-glob-to-any-file:
+          - '*.md'
+          - 'docs/**/*.md'
+          - 'README*'
+          - 'CHANGELOG*'
+          - 'CONTRIBUTING*'
+          - 'SECURITY*'
 
 Configuration:
-  - any:
-      - '**/**/*.json'
-      - '**/*.yaml'
-      - '**/*.yml'
-      - '**/*.cmake'
-      - 'Build/Cmake/*.txt'
-      - 'Build/Cmake/**/**/*.txt'
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.cmake'
+          - '**/CMakeLists.txt'
+          - '**/*.json'
+          - '**/*.yml'
+          - '**/*.yaml'
 
 CI:
-  - any:
-      - '.github/workflows/*.yml'
-      - '.github/workflows/*.yaml'
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/actions/**'
 
-Licenses:
-  - any:
-      - 'LICENSE*'
-      - 'COPYING*'
+Governance:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/CODEOWNERS'
+          - '.github/instructions/**'
+          - '.github/prompts/**'
+          - '.github/skills/**'
+          - '.github/pull_request_template.md'
+          - '.github/ISSUE_TEMPLATE/**'
 
-Profiles:
-  - any:
-      - 'Testing/**/**/**'
+github-actions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/actions/**'
+
+Scripts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/scripts/**'
+          - 'scripts/**'
+          - '**/*.sh'
+          - '**/*.ps1'
+
+CodeQL:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/codeql-config.yml'
+          - '.github/codeql-queries/**'
+          - '.github/scripts/codeql-report.sh'
+          - '.github/scripts/run-codeql-local.sh'
+          - '.github/workflows/ci-codeql-security.yml'
+
+SAST:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/codeql-config.yml'
+          - '.github/codeql-queries/**'
+          - '.github/workflows/ci-codeql-security.yml'
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'SECURITY.md'
+          - '.github/codeql-config.yml'
+          - '.github/codeql-queries/**'
+          - '.github/workflows/ci-pr-risk-security-analysis.yml'
+          - '.github/workflows/ci-codeql-security.yml'
+          - '.github/scripts/audit-workflow-permissions.py'
+          - '.github/scripts/sanitize-sed.sh'
+          - '.github/scripts/sanitize.ps1'
+
+Sanitizers:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/ci/ubsan-ignorelist.txt'
+          - '.github/tests/test_sanitization.*'
+          - '.github/workflows/ci-sanitizer-tests.yml'
+          - '.github/scripts/*sanitizer*'
+          - '.github/scripts/sanitize-*'
 
 Build:
-  - any:
-      - 'Build/Cmake/**/**'
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Build/Cmake/**'
+          - 'Build/Cmake/**/CMakeLists.txt'
+
+Testing:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Testing/**'
+          - 'Build/Cmake/Testing/**'
+          - '.github/workflows/ci-*-tests.yml'
+          - '.github/ci/regression/**'
+          - '.github/scripts/*regression-tests.sh'
+
+Profiles:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Testing/**/*.icc'
+          - 'Testing/**/*.xml'
+          - 'Testing/**/*.json'
+          - 'contrib/BuildEnv/**'
+
+Tools:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Tools/**'
+
+Spec:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Spec/**'
+          - 'docs/**/*spec*.md'
+
+Docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Dockerfile'
+          - '**/*.dockerfile'
+          - '.dockerignore'
+
+WASM:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Build/Cmake/**/*wasm*'
+          - '.github/workflows/*wasm*.yml'
+          - '.github/scripts/*wasm*'
+
+Release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/ci-latest-release.yml'
+          - 'Build/Cmake/CPack*'
+          - 'Build/Cmake/**/*install*'
+          - 'Build/Cmake/**/*package*'
+
+JSON:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'IccJSON/**'
+          - '.github/scripts/*json*'
+          - '.github/workflows/ci-json-roundtrip.yml'
+
+Windows:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/*win*.yml'
+          - '**/*.ps1'
+          - 'Build/Cmake/**/*Win*'
+          - 'Build/Cmake/**/*MSVC*'
+
+Unix:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/*unix*.yml'
+          - '**/*.sh'
+
+macOS:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/*mac*.yml'
+          - 'Build/Cmake/**/*Mac*'
+          - 'Build/Cmake/**/*macos*'
+          - '**/*.plist'
+
+Labels:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/labels.yml'
+          - '.github/labeler.yml'
+          - '.github/workflows/label.yml'
+          - '.github/workflows/pr-labeler.yml'
+          - '.github/workflows/sync-labels.yml'
+          - '.github/workflows/update-labels.yml'
+          - '.github/scripts/sync-labels.sh'
+          - 'docs/label-system.md'
+          - '.github/skills/maintainer-label-system/**'
+          - '.github/prompts/maintainer-label-triage.prompt.md'
+
+vcpkg:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'ports/**'
+          - '**/vcpkg.json'
+          - '**/vcpkg-configuration.json'
+          - '.github/workflows/ci-vcpkg-ports.yml'
+
+BREW:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/brew*'
+          - '**/Homebrew*'
+
+NPM:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'package.json'
+          - 'package-lock.json'
+          - '**/package.json'
+          - '**/package-lock.json'

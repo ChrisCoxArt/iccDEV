@@ -71,12 +71,19 @@
 
 #include <cstdio>
 #include <string>
+#include <climits>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <cctype>
+#include <cfloat>
 #include "IccProfile.h"
 #include "IccTagBasic.h"
 #include "IccTagMPE.h"
 #include "IccMpeBasic.h"
 #include "IccProfLibVer.h"
 #include "IccUtil.h"
+#include "../IccCmdLineUtil.h"
 
 class CubeFile
 {
@@ -108,18 +115,25 @@ public:
     bool bAddBlankLine = false;
     while (!isEOF()) {
       long pos = ftell(m_f);
+      if (pos < 0) {
+        printf("header parsing error\n");
+        return false;
+      }
       std::string line = getNextLine();
 
-      if (line[0] == '-' || line[0] == '.' || (line[0] >= '0' && line[0] <= '9')) {
-        //undo getNextLine so it can be 3D table can be parsed
-        fseek(m_f, pos, SEEK_SET);
-        break;
-      }
-
-      if (!line.size()) {
+      if (line.empty()) {
         if (m_comments.size()) {
           bAddBlankLine = true;
         }
+      }
+      else if (line[0] == '-' || line[0] == '.' || (line[0] >= '0' && line[0] <= '9')) {
+        //undo getNextLine so it can be 3D table can be parsed
+        int result = fseek(m_f, pos, SEEK_SET);
+        if (result < 0) {
+          printf("header parsing error\n");
+          return false;
+        }
+        break;
       }
       else if (line.substr(0, 6) == "TITLE ") {
         if (m_title.size()) {
@@ -139,50 +153,73 @@ public:
 
         bAddBlankLine = false;
       }
-      else if (line.substr(0, 12) == "LUT_1D_SiZE ") {
+      else if (line.substr(0, 12) == "LUT_1D_SIZE ") {
         printf("1DLUTs are not supported\n");
         return false;
       }
       else if (line.substr(0, 12) == "LUT_3D_SIZE ") {
-        m_sizeLut3D = atoi(line.c_str() + 12);
+        int64_t temp;
+        if (!parseInteger(line.c_str() + 12, temp)) {
+          printf("Invalid LUT_3D_SIZE value\n");
+          return false;
+        }
+        if (temp < 2) {
+            printf("LUT too small to process\n");
+            return false;
+        }
+        if (temp > 255) {
+            printf("LUT too large to process\n");
+            return false;
+        }
+        m_sizeLut3D = (int)temp;
       }
       else if (line.substr(0, 19) == "LUT_3D_INPUT_RANGE ") {
-        m_fMinInput[0] = m_fMinInput[1] = m_fMinInput[2] = (icFloatNumber)atof(line.c_str() + 19);
-        const char* next = getNext(line.c_str() + 19);
-        if (next) {
-          m_fMaxInput[0] = m_fMaxInput[1] = m_fMaxInput[2] = (icFloatNumber)atof(next);
+        const char* cursor = line.c_str() + 19;
+        icFloatNumber minVal, maxVal;
+        if (!parseNextFloat(cursor, minVal)) {
+          printf("Invalid LUT_3D_INPUT_RANGE value\n");
+          return false;
+        }
+        m_fMinInput[0] = m_fMinInput[1] = m_fMinInput[2] = minVal;
+        if (parseNextFloat(cursor, maxVal))
+          m_fMaxInput[0] = m_fMaxInput[1] = m_fMaxInput[2] = maxVal;
+        if (hasTrailingData(cursor)) {
+          printf("Invalid LUT_3D_INPUT_RANGE value\n");
+          return false;
         }
       }
       else if (line.substr(0, 11) == "DOMAIN_MIN ") {
-        m_fMinInput[0] = (icFloatNumber)atof(line.c_str() + 11);
-        const char* next = getNext(line.c_str());
-        if (next) {
-          m_fMinInput[1] = (icFloatNumber)atof(next);
-          next = getNext(next);
-          if (next) {
-            m_fMinInput[2] = (icFloatNumber)atof(next);
-          }
-          else
-            m_fMinInput[2] = m_fMinInput[1];
+        const char* cursor = line.c_str() + 11;
+        if (!parseNextFloat(cursor, m_fMinInput[0])) {
+          printf("Invalid DOMAIN_MIN value\n");
+          return false;
         }
-        else {
+        if (!parseNextFloat(cursor, m_fMinInput[1])) {
           m_fMinInput[1] = m_fMinInput[2] = m_fMinInput[0];
+        }
+        else if (!parseNextFloat(cursor, m_fMinInput[2])) {
+          m_fMinInput[2] = m_fMinInput[1];
+        }
+        if (hasTrailingData(cursor)) {
+          printf("Invalid DOMAIN_MIN value\n");
+          return false;
         }
       }
       else if (line.substr(0, 11) == "DOMAIN_MAX ") {
-        m_fMaxInput[0] = (icFloatNumber)atof(line.c_str() + 11);
-        const char* next = getNext(line.c_str());
-        if (next) {
-          m_fMaxInput[1] = (icFloatNumber)atof(next);
-          next = getNext(next);
-          if (next) {
-            m_fMaxInput[2] = (icFloatNumber)atof(next);
-          }
-          else
-            m_fMaxInput[2] = m_fMaxInput[1];
+        const char* cursor = line.c_str() + 11;
+        if (!parseNextFloat(cursor, m_fMaxInput[0])) {
+          printf("Invalid DOMAIN_MAX value\n");
+          return false;
         }
-        else {
+        if (!parseNextFloat(cursor, m_fMaxInput[1])) {
           m_fMaxInput[1] = m_fMaxInput[2] = m_fMaxInput[0];
+        }
+        else if (!parseNextFloat(cursor, m_fMaxInput[2])) {
+          m_fMaxInput[2] = m_fMaxInput[1];
+        }
+        if (hasTrailingData(cursor)) {
+          printf("Invalid DOMAIN_MAX value\n");
+          return false;
         }
       }
       else if (line.substr(0, 18) == "LUT_IN_VIDEO_RANGE")
@@ -215,40 +252,124 @@ public:
   int sizeLut3D() { return m_sizeLut3D; }
   bool parse3DTable(icFloatNumber* toLut, icUInt32Number nSizeLut)
   {
-    icUInt32Number num = m_sizeLut3D * m_sizeLut3D * m_sizeLut3D;
+    if (m_sizeLut3D < 2 || nSizeLut <= 0)
+        return false;
+    
+    if (m_sizeLut3D > 255)
+        return false;
+    
+    uint64_t temp = (uint64_t)m_sizeLut3D * (uint64_t)m_sizeLut3D * (uint64_t)m_sizeLut3D;
+    if (temp > UINT_MAX)
+        return false;
+    icUInt32Number num = (icUInt32Number)temp;
 
-    //
-    if (!m_sizeLut3D || nSizeLut != num*3)
+    if ((uint64_t)nSizeLut != temp*3)
       return false;
 
-    const char* next;
-    for (auto n = 0u; n < num && !isEOF();) {
+    icUInt32Number n = 0;
+    for (; n < num && !isEOF();) {
       std::string line = getNextLine();
 
       //Skip empty and commented lines
-      if (line[0] == '#' || line.size() == 0)
+      if (line.empty() || line[0] == '#')
         continue;
-      *toLut++ = (icFloatNumber)atof(line.c_str());
-      next = getNext(line.c_str());
-      if (!next) {
+      const char* cursor = line.c_str();
+      if (!parseNextFloat(cursor, *toLut++)) {
         printf("Invalid 3DLUT entry\n");
         return false;
       }
-      *toLut++ = (icFloatNumber)atof(next);
-      next = getNext(next);
-      if (!next) {
+      if (!parseNextFloat(cursor, *toLut++)) {
         printf("Invalid 3DLUT entry\n");
         return false;
       }
-      *toLut++ = (icFloatNumber)atof(next);
+      if (!parseNextFloat(cursor, *toLut++)) {
+        printf("Invalid 3DLUT entry\n");
+        return false;
+      }
+      if (hasTrailingData(cursor)) {
+        printf("Invalid 3DLUT entry\n");
+        return false;
+      }
 
       n++;
     }
+    if (n != num) {
+      printf("Incomplete 3DLUT table\n");
+      return false;
+    }
+
+    while (!isEOF()) {
+      std::string line = getNextLine();
+      if (!line.empty() && line[0] != '#') {
+        printf("Too many 3DLUT entries\n");
+        return false;
+      }
+    }
+
     return true;
   }
 
 protected:
   std::string m_sFilename;
+
+  static bool isSpace(char c)
+  {
+    return std::isspace(static_cast<unsigned char>(c)) != 0;
+  }
+
+  bool parseNextFloat(const char*& str, icFloatNumber& value)
+  {
+    while (*str && isSpace(*str))
+      str++;
+
+    if (!*str || *str == '#')
+      return false;
+
+    errno = 0;
+    char* end = nullptr;
+    double temp = std::strtod(str, &end);
+    if (end == str || errno == ERANGE || !std::isfinite(temp) || temp < -FLT_MAX || temp > FLT_MAX)
+      return false;
+
+    const char* tokenEnd = end;
+    if (*tokenEnd && !isSpace(*tokenEnd) && *tokenEnd != '#')
+      return false;
+
+    value = (icFloatNumber)temp;
+    str = end;
+    return true;
+  }
+
+  bool parseInteger(const char* str, int64_t& value)
+  {
+    while (*str && isSpace(*str))
+      str++;
+
+    if (!*str || *str == '#')
+      return false;
+
+    errno = 0;
+    char* end = nullptr;
+    long long temp = std::strtoll(str, &end, 10);
+    if (end == str || errno == ERANGE)
+      return false;
+
+    if (*end && !isSpace(*end) && *end != '#')
+      return false;
+    if (hasTrailingData(end))
+      return false;
+
+    value = (int64_t)temp;
+    return true;
+  }
+
+  bool hasTrailingData(const char* str)
+  {
+    while (*str && isSpace(*str))
+      str++;
+
+    return *str && *str != '#';
+  }
   
   bool open()
   {
@@ -256,7 +377,9 @@ protected:
       m_f = fopen(m_sFilename.c_str(), "rb");
     }
     else {
-      fseek(m_f, 0, SEEK_SET);
+      int result = fseek(m_f, 0, SEEK_SET);
+      if (result < 0)
+        return false;
     }
     return m_f != nullptr;
   }
@@ -282,7 +405,7 @@ protected:
     while (*str && *str != ' ') str++;
     while (*str && *str == ' ') str++;
 
-    return str;
+    return *str ? str : nullptr;
   }
 
   std::string toEnd(const char* str)
@@ -303,15 +426,15 @@ protected:
   {
     std::string rv;
     for (int n=0; n<MAX_LINE_LEN && !isEOF(); n++) {
-      char c = fgetc(m_f);
+      int c = fgetc(m_f);
 
-      if ((c < 0 && feof(m_f)) || c == '\n')
+      if (c == EOF || c == '\n')
         break;
 
       if (c == '\r') //skip unsupported carriage returns
         continue;
 
-      rv += (unsigned char)c;
+      rv += static_cast<char>(static_cast<unsigned char>(c));
     }
 
     return rv;
@@ -332,11 +455,11 @@ protected:
 
 int main(int argc, char* argv[])
 {
-  if (argc <= 2) {
+  if (argc != 3) {
     printf("Usage: iccFromCube cube_file output_icc_file\n");
     printf("Built with IccProfLib version " ICCPROFLIBVER "\n");
 
-    return 0;
+    return argc <= 2 ? 0 : 1;
   }
 
   CubeFile cube(argv[1]);
@@ -406,8 +529,23 @@ int main(int argc, char* argv[])
 
   CIccMpeCLUT* pMpeCLUT = new CIccMpeCLUT();
   CIccCLUT* pCLUT = new CIccCLUT(3, 3);
-  pCLUT->Init(cube.sizeLut3D());
+  
+  if (!pCLUT->Init(cube.sizeLut3D()) ) {
+    printf("Unable to create LUT from '%s'\n", argv[1]);
+    delete pCLUT;
+    delete pMpeCLUT;
+    delete pTag;
+    return -4;
+  }
+
   bool bSuccess = cube.parse3DTable(pCLUT->GetData(0), pCLUT->NumPoints()*3);
+  if (!bSuccess) {
+    printf("Unable to parse LUT from '%s'\n", argv[1]);
+    delete pCLUT;
+    delete pMpeCLUT;
+    delete pTag;
+    return (-4);
+  }
 
   pMpeCLUT->SetCLUT(pCLUT);
   pTag->Attach(pMpeCLUT);
@@ -416,16 +554,13 @@ int main(int argc, char* argv[])
 
   cube.close();
 
-  if (!bSuccess) {
-    printf("Unable to parse LUT from '%s'\n", argv[1]);
-    return (-4);
-  }
-
   //Add description Tag
   CIccTagMultiLocalizedUnicode* pTextTag = new CIccTagMultiLocalizedUnicode();
   std::string desc = cube.getDescription();
   if (desc.size()) {
-    pTextTag->SetText(desc.c_str());
+    // remove escape sequences and malicious commands
+    std::string cleanText = icSanitizeTagText(desc);
+    pTextTag->SetText(cleanText.c_str());
   }
   else {
     pTextTag->SetText((std::string("Device link created from ") + argv[1]).c_str());
@@ -433,21 +568,44 @@ int main(int argc, char* argv[])
   profile.AttachTag(icSigProfileDescriptionTag, pTextTag);
 
 
-  //Add copyright Tag
-  if (cube.getCopyright().size()) {
-    pTextTag = new CIccTagMultiLocalizedUnicode();
-    pTextTag->SetText(cube.getCopyright().c_str());
-    profile.AttachTag(icSigCopyrightTag, pTextTag);
+  //Add copyright Tag -- required in every profile (ICC.2).  Emit it
+  //unconditionally, using the cube comments when present and a default otherwise,
+  //so the output is not missing a required tag when the cube had no comments (#1379).
+  pTextTag = new CIccTagMultiLocalizedUnicode();
+  std::string copyright = cube.getCopyright();
+  if (copyright.size()) {
+    // remove escape sequences and malicious commands
+    std::string cleanText = icSanitizeTagText(copyright);
+    pTextTag->SetText(cleanText.c_str());
   }
+  else
+    pTextTag->SetText("Copyright ICC");
+  profile.AttachTag(icSigCopyrightTag, pTextTag);
+
+  //Add profileSequenceDescTag -- required in a DeviceLink profile (ICC.2).  It
+  //was omitted entirely, leaving the link non-conformant (#1379).  Describe the
+  //single cube-derived stage of the link.
+  CIccTagProfileSeqDesc* pSeqTag = new CIccTagProfileSeqDesc();
+  CIccProfileDescStruct seqDesc;
+  seqDesc.m_deviceMfg = 0;
+  seqDesc.m_deviceModel = 0;
+  seqDesc.m_attributes = 0;
+  seqDesc.m_technology = (icTechnologySignature)0;
+  seqDesc.m_deviceMfgDesc.SetType(icSigMultiLocalizedUnicodeType);
+  ((CIccTagMultiLocalizedUnicode*)seqDesc.m_deviceMfgDesc.GetTag())->SetText("International Color Consortium");
+  seqDesc.m_deviceModelDesc.SetType(icSigMultiLocalizedUnicodeType);
+  ((CIccTagMultiLocalizedUnicode*)seqDesc.m_deviceModelDesc.GetTag())->SetText(
+    (std::string("Device link created from ") + argv[1]).c_str());
+  pSeqTag->m_Descriptions->push_back(seqDesc);
+  profile.AttachTag(icSigProfileSequenceDescTag, pSeqTag);
 
   if (SaveIccProfile(argv[2], &profile)) {
     printf("'%s' successfully created\n", argv[2]);
   }
   else {
     printf("Unable to save profile '%s'\n", argv[2]);
-    return -5;
+    return 5;
   }
 
   return 0;
 }
-

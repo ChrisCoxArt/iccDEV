@@ -74,6 +74,24 @@
 #include <memory.h>
 #include <cstring>
 #include <cmath>
+#include <limits>
+
+#if !defined(_WIN32) && !defined(WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+#if defined(_WIN32) || defined(WIN32)
+#define ICC_FILEIO_WINDOWS_SEEK
+#endif
+
+#ifdef ICC_FILEIO_WINDOWS_SEEK
+#define icFileSeek64 _fseeki64
+#define icFileTell64 _ftelli64
+#else
+#define icFileSeek64 fseeko
+#define icFileTell64 ftello
+#endif
 
 
 #ifndef __max
@@ -87,10 +105,77 @@
 namespace iccDEV {
 #endif
 
+#if !defined(_WIN32) && !defined(WIN32)
+static bool icFileModeCanWrite(const icChar *szAttr)
+{
+  return szAttr && (strchr(szAttr, 'w') || strchr(szAttr, 'a') || strchr(szAttr, '+'));
+}
+
+static bool icFileIsRegular(FILE *f)
+{
+  if (!f)
+    return false;
+
+  struct stat st;
+  return fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode);
+}
+#endif
+
+static bool icGetSeekOrigin(icSeekVal pos, int &origin)
+{
+  switch (pos) {
+  case icSeekSet:
+    origin = SEEK_SET;
+    return true;
+  case icSeekCur:
+    origin = SEEK_CUR;
+    return true;
+  case icSeekEnd:
+    origin = SEEK_END;
+    return true;
+  default:
+    origin = SEEK_SET;
+    return false;
+  }
+}
+
+static int icFileSeek(FILE *f, int64_t nOffset, icSeekVal pos)
+{
+  int origin;
+  if (!icGetSeekOrigin(pos, origin))
+    return -1;
+
+#ifdef ICC_FILEIO_WINDOWS_SEEK
+  return icFileSeek64(f, nOffset, origin);
+#else
+  return icFileSeek64(f, (off_t)nOffset, origin);
+#endif
+}
+
+static int64_t icFileTell(FILE *f)
+{
+  if (!f)
+    return -1;
+
+  int64_t pos = (int64_t)icFileTell64(f);
+  return pos >= 0 ? pos : -1;
+}
+
 //////////////////////////////////////////////////////////////////////
 // Class CIccIO
 //////////////////////////////////////////////////////////////////////
 
+static size_t icReadFixedWidth(CIccIO *pIO, void *pBuf, size_t nNum, size_t nBytes)
+{
+  if (!pIO || !pBuf || !nBytes)
+    return 0;
+
+  if (nNum > std::numeric_limits<size_t>::max() / nBytes)
+    return 0;
+
+  size_t nRead = pIO->Read8(pBuf, nNum * nBytes) / nBytes;
+  return nRead > nNum ? nNum : nRead;
+}
 
 size_t CIccIO::ReadLine(void *pBuf8, size_t nNum/*=256*/)
 {
@@ -121,7 +206,7 @@ size_t CIccIO::Read16(void *pBuf16, size_t nNum)
   if (!pBuf16)
     return 0;
 
-  nNum = Read8(pBuf16, nNum<<1)>>1;
+  nNum = icReadFixedWidth(this, pBuf16, nNum, 2);
 #ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab16Array(pBuf16, nNum);
 #endif
@@ -158,7 +243,7 @@ size_t CIccIO::Read32(void *pBuf32, size_t nNum)
   if (!pBuf32)
     return 0;
 
-  nNum = Read8(pBuf32, nNum<<2)>>2;
+  nNum = icReadFixedWidth(this, pBuf32, nNum, 4);
 #ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab32Array(pBuf32, nNum);
 #endif
@@ -196,7 +281,7 @@ size_t CIccIO::Read64(void *pBuf64, size_t nNum)
   if (!pBuf64)
     return 0;
 
-  nNum = Read8(pBuf64, nNum<<3)>>3;
+  nNum = icReadFixedWidth(this, pBuf64, nNum, 8);
 #ifdef ICC_BYTE_ORDER_LITTLE_ENDIAN
   icSwab64Array(pBuf64, nNum);
 #endif
@@ -454,7 +539,22 @@ bool CIccFileIO::Open(const icChar *szFilename, const icChar *szAttr)
   if (m_fFile)
     fclose(m_fFile);
 
+#if !defined(_WIN32) && !defined(WIN32)
+  if (icFileModeCanWrite(szAttr)) {
+    struct stat st;
+    if (stat(szFilename, &st) == 0 && !S_ISREG(st.st_mode))
+      return false;
+  }
+#endif
+
   m_fFile = fopen(szFilename, szAttr);
+
+#if !defined(_WIN32) && !defined(WIN32)
+  if (m_fFile && icFileModeCanWrite(szAttr) && !icFileIsRegular(m_fFile)) {
+    fclose(m_fFile);
+    m_fFile = NULL;
+  }
+#endif
 
   return m_fFile != NULL;
 }
@@ -499,12 +599,34 @@ void CIccFileIO::Detach()
 }
 
 
-void CIccFileIO::Close()
+bool CIccFileIO::Flush()
 {
+  if (!m_fFile)
+    return true;
+
+  if (fflush(m_fFile))
+    return false;
+
+  return ferror(m_fFile) == 0;
+}
+
+
+bool CIccFileIO::CloseFile()
+{
+  bool rv = true;
+
   if (m_fFile) {
-    fclose(m_fFile);
+    rv = fclose(m_fFile) == 0;
     m_fFile = NULL;
   }
+
+  return rv;
+}
+
+
+void CIccFileIO::Close()
+{
+  CloseFile();
 }
 
 
@@ -531,12 +653,21 @@ size_t CIccFileIO::GetLength()
   if (!m_fFile)
     return 0;
 
-  fflush(m_fFile);
-  size_t current = ftell(m_fFile);
-  fseek (m_fFile, 0, SEEK_END);
-  size_t end = ftell(m_fFile);
-  fseek (m_fFile, current, SEEK_SET);
-  return end;
+  int64_t current = Tell();
+  if (current < 0)
+    return 0;
+
+  if (Seek(0, icSeekEnd) < 0)
+    return 0;
+
+  int64_t end = Tell();
+  if (Seek(current, icSeekSet) < 0 || end < 0)
+    return 0;
+
+  if ((uint64_t)end > (uint64_t)std::numeric_limits<size_t>::max())
+    return 0;
+
+  return (size_t)end;
 }
 
 
@@ -545,7 +676,7 @@ int64_t CIccFileIO::Seek(int64_t nOffset, icSeekVal pos)
   if (!m_fFile)
     return -1;
 
-  return !fseek(m_fFile, nOffset, pos) ? ftell(m_fFile) : -1;
+  return !icFileSeek(m_fFile, nOffset, pos) ? Tell() : -1;
 }
 
 
@@ -554,7 +685,7 @@ int64_t CIccFileIO::Tell()
   if (!m_fFile)
     return -1;
 
-  return ftell(m_fFile);
+  return icFileTell(m_fFile);
 }
 
 
@@ -566,7 +697,7 @@ CIccEmbedIO::CIccEmbedIO() : CIccIO()
 {
   m_pIO = NULL;
   m_nStartPos = 0;
-  m_nSize = -1;
+  m_nSize = (size_t)(-1);
   m_bOwnIO = false;
 }
 
@@ -609,10 +740,15 @@ size_t CIccEmbedIO::Read8(void *pBuf, size_t nNum)
     return 0;
 
   if (m_nSize > 0) {
-    size_t nPos = m_pIO->Tell();
-    size_t nOffset = nPos - m_nStartPos;
+    int64_t nPos = m_pIO->Tell();
+    if (nPos < m_nStartPos)
+      return 0;
 
-    if (nOffset + nNum > m_nSize)
+    size_t nOffset = (size_t)(nPos - m_nStartPos);
+    if (nOffset > m_nSize)
+      return 0;
+
+    if (nNum > m_nSize - nOffset)
       nNum = m_nSize - nOffset;
   }
 

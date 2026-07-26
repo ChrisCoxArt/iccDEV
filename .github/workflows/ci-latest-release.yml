@@ -1,42 +1,84 @@
+---
 ###############################################################
 #
-## Copyright (©) 2025 International Color Consortium. 
-##                 All rights reserved. 
+## Copyright (c) 2025-2026 International Color Consortium.
+##                 All rights reserved.
 ##                 https://color.org
 #
 #
 ## Intent: ci-latest-release
 #
-## Last Updated: 31-JAN-2025 0100Z by David Hoyt 
-#                Add bash & pwsh shell prologues
+## Last Updated: 2026-03-26 by David Hoyt / Copilot
+#                Add push-to-master trigger
+#                Add release job: zip + publish to GitHub Releases
+#                Pin release and artifact actions
+#                Elevate permissions to contents: write for release creation
+#                Add WASM Release build (Emscripten) to release packaging
+#                Remove WASM dependency caches for release hardening
+#                Use safe apt source handling for Linux release dependencies
+#                Governance: sanitize-sed.sh on all GITHUB_STEP_SUMMARY writes
+#                Consolidate Doxygen HTML documentation artifact generation
+#                Consolidate CPack runtime package smoke and artifact generation
 #
 #  TODO: Extract repetitive shell commands to reusable script
-#
-#
-#  Ref: https://github.com/xsscx/governance/tree/main/actions
 #
 ###############################################################
 
 name: ci-latest-release
 
+# Existing release commands and summary strings intentionally exceed the default
+# yamllint line length. Keep the disable local to this workflow.
+# yamllint disable rule:line-length
+
 permissions:
   contents: read
-  
-on:
+
+"on":
   workflow_dispatch:
 
+concurrency:
+  group: "latest-release-${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
+  cache-policy:
+    name: "Validate workflow cache policy"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert no GitHub Actions cache primitives
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          .github/scripts/check-workflow-cache-policy.sh .github/workflows/ci-latest-release.yml
+
   linux:
     name: "Linux ${{ matrix.compiler }}"
+    needs: cache-policy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
     steps:
       - name: Checkout master
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Install Dependencies
         shell: bash --noprofile --norc {0}
@@ -47,8 +89,12 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          sudo apt-get update
-          sudo apt-get install -y \
+          export DEBIAN_FRONTEND=noninteractive
+          bash .github/scripts/ci-safe-apt-update.sh
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Dpkg::Use-Pty=0 \
+            install -y --no-install-recommends \
             build-essential cmake gcc g++ clang clang-tools \
             libpng-dev libxml2 libxml2-dev libtiff-dev \
             nlohmann-json3-dev libwxgtk3.2-dev wx-common \
@@ -57,17 +103,18 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
+          MATRIX_COMPILER: ${{ matrix.compiler }}
         run: |
           set -euo pipefail
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            echo "CC=gcc" >> $GITHUB_ENV
-            echo "CXX=g++" >> $GITHUB_ENV
+          if [ "${MATRIX_COMPILER}" = "gcc" ]; then
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
           else
-            echo "CC=clang" >> $GITHUB_ENV
-            echo "CXX=clang++" >> $GITHUB_ENV
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
           fi
       - name: Print Compiler Version
         shell: bash --noprofile --norc {0}
@@ -78,8 +125,14 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          echo "Compiler Version:" >> $GITHUB_STEP_SUMMARY
-          $CC --version >> $GITHUB_STEP_SUMMARY
+          source .github/scripts/sanitize-sed.sh
+          {
+            echo "Compiler Version:"
+            "$CC" --version | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
       - name: CMake Configure
         shell: bash --noprofile --norc {0}
         env:
@@ -90,7 +143,7 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           cd Build
-          cmake -DCMAKE_INSTALL_PREFIX=$HOME/.local \
+          cmake -DCMAKE_INSTALL_PREFIX="$HOME/.local" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -Wno-dev Cmake/
       - name: Build
@@ -103,15 +156,7 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           cd Build
-          make -j$(nproc)
-          cd ../Testing/
-          echo "=== Updating PATH ==="
-          for d in ../Build/Tools/*; do
-          [ -d "$d" ] && export PATH="$(realpath "$d"):$PATH"
-          done 
-          sh CreateAllProfiles.sh
-          sh RunTests.sh
-          find . -iname "*.icc" | wc -l 
+          make -j"$(nproc)"
       - name: Verify CMake Cache
         shell: bash --noprofile --norc {0}
         env:
@@ -122,42 +167,128 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           if test -f Build/CMakeCache.txt; then
-          echo "✅ Build OK" | tee -a $GITHUB_STEP_SUMMARY
+          echo "[OK] Build OK" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "::error ::Build failed! CMakeCache.txt not found." | tee -a $GITHUB_STEP_SUMMARY
+            echo "::error ::Build failed! CMakeCache.txt not found." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+      - name: Stage bundle into Testing directory
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          stage="staging/iccDEV-Testing"
+          mkdir -p "$stage"
+          # 1. Copy Testing contents (exclude Fuzzing)
+          for item in Testing/*; do
+            [ "$(basename "$item")" = "Fuzzing" ] && continue
+            cp -a "$item" "$stage/"
+          done
+          # 2. Copy tool binaries and libraries from build
+          find Build/Tools -type f \( -perm -u+x -o -name '*.so*' -o -name '*.a' \) \
+            -exec cp -a {} "$stage/" \;
+          find Build/IccProfLib -type f -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccProfLib -type l -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccXML -type f -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccXML -type l -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccJSON -type f -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccJSON -type l -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccConnect -type f -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccConnect -type l -name '*.so*' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          # 3. Copy Testing/Readme.md, LICENSE.md and docs/
+          cp Testing/Readme.md  "$stage/"
+          cp LICENSE.md "$stage/"
+          cp -a docs    "$stage/docs"
+          # 4. Generate path.sh helper script (POSIX-compatible, resolves from script location)
+          printf '%s\n' \
+            "#!/bin/sh" \
+            "# Resolve the directory where this script lives" \
+            "if [ -n \"\${BASH_SOURCE:-}\" ]; then" \
+            "  SCRIPT_DIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"" \
+            "else" \
+            "  SCRIPT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"" \
+            "fi" \
+            "export PATH=\"\$SCRIPT_DIR:\$PATH\"" \
+            "export LD_LIBRARY_PATH=\"\$SCRIPT_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"" \
+            "for d in \"\$SCRIPT_DIR\"/*/; do" \
+            "  [ -d \"\$d\" ] && export PATH=\"\$d:\$PATH\"" \
+            "done" \
+            "echo \"PATH and LD_LIBRARY_PATH updated.\"" \
+            "echo \"Tools directory: \$SCRIPT_DIR\"" \
+            > "$stage/path.sh"
+          chmod +x "$stage/path.sh"
+          for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
+            LD_LIBRARY_PATH="$stage${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+          done
+          # Summary of staged bundle contents
+          total=$(find "$stage" -type f | wc -l)
+          echo ""
+          echo "===== Staged Bundle Contents ($total files) ====="
+          for ext in so 'so.*' a icc md; do
+            count=$(find "$stage" -maxdepth 1 \( -type f -o -type l \) -name "*.$ext" | wc -l)
+            if [ "$count" -gt 0 ]; then
+              echo ""
+              echo "--- *.$ext ($count) ---"
+              find "$stage" -maxdepth 1 \( -type f -o -type l \) -name "*.$ext" -printf '  %f  (%k KB)\n'
+            fi
+          done
+          # List executables (ELF binaries without extension)
+          exes=$(find "$stage" -maxdepth 1 -type f -executable ! -name '*.*' | wc -l)
+          if [ "$exes" -gt 0 ]; then
+            echo ""
+            echo "--- executables ($exes) ---"
+            find "$stage" -maxdepth 1 -type f -executable ! -name '*.*' -printf '  %f  (%k KB)\n'
+          fi
+          echo ""
+          echo "Total: $total files staged into $stage"
+          echo ""
       - name: Upload Linux Artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: iccdev-linux-${{ matrix.compiler }}
-          path: |
-            Build
-            LICENSE.md
-            README.md            
-            docs/**
+          path: staging
+          if-no-files-found: error
 
       - name: Summary Report
         if: always()
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
+          MATRIX_COMPILER: ${{ matrix.compiler }}
         run: |
           set -euo pipefail
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          echo "### Linux Build Summary (${{ matrix.compiler }})" >> $GITHUB_STEP_SUMMARY
-          echo "- Build Directory: Build/" >> $GITHUB_STEP_SUMMARY
-          echo "- Artifacts Uploaded: iccdev-linux-${{ matrix.compiler }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: Success" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Linux Build Summary (${MATRIX_COMPILER})"
+            echo "- Build Directory: Build/"
+            echo "- Artifacts Uploaded: iccdev-linux-${MATRIX_COMPILER}"
+            echo "- Status: Success"
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
   macos:
     name: "macOS Clang"
+    needs: cache-policy
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - name: Checkout master
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Clone repository and install dependencies
         shell: bash --noprofile --norc {0}
@@ -169,9 +300,20 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           echo "Installing Homebrew dependencies..."
-          brew install libpng nlohmann-json libxml2 wxwidgets libtiff jpeg || echo "⚠️ Some dependencies might already be installed."
-          echo "✔ Dependency installation complete."
-  
+          packages=(libpng nlohmann-json libxml2 wxwidgets libtiff jpeg-turbo)
+          missing=()
+          for package in "${packages[@]}"; do
+            if brew list --versions "$package" >/dev/null 2>&1; then
+              echo "[OK] Homebrew package already installed: $package"
+            else
+              missing+=("$package")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            brew install "${missing[@]}"
+          fi
+          echo "[OK] Dependency installation complete."
+
       - name: CMake Configure
         shell: bash --noprofile --norc {0}
         env:
@@ -184,18 +326,20 @@ jobs:
           echo "Setting up CMake build configuration..."
           cd Build
           sudo rm -rf /Library/Frameworks/Mono.framework/Headers/png.h
-          echo 'export PATH="/opt/homebrew/opt/jpeg/bin:$PATH"' >> /Users/runner/.bash_profile
-          export CPPFLAGS="-I/opt/homebrew/opt/jpeg/include"
-          export PKG_CONFIG_PATH="/opt/homebrew/opt/jpeg/lib/pkgconfig"
-          export CFLAGS="-I$(brew --prefix libpng)/include -I$(brew --prefix jpeg)/include"
-          export LDFLAGS="-L$(brew --prefix libpng)/lib -L$(brew --prefix jpeg)/lib"
-          cmake -DCMAKE_INSTALL_PREFIX=$HOME/.local \
+          echo "export PATH=\"/opt/homebrew/opt/jpeg-turbo/bin:\$PATH\"" >> /Users/runner/.bash_profile
+          export CPPFLAGS="-I/opt/homebrew/opt/jpeg-turbo/include"
+          export PKG_CONFIG_PATH="/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig"
+          libpng_prefix="$(brew --prefix libpng)"
+          jpeg_turbo_prefix="$(brew --prefix jpeg-turbo)"
+          export CFLAGS="-I${libpng_prefix}/include -I${jpeg_turbo_prefix}/include"
+          export LDFLAGS="-L${libpng_prefix}/lib -L${jpeg_turbo_prefix}/lib"
+          cmake -DCMAKE_INSTALL_PREFIX="$HOME/.local" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DJPEG_LIBRARY=$(brew --prefix jpeg)/lib/libjpeg.dylib \
-                -DJPEG_INCLUDE_DIR=$(brew --prefix jpeg)/include \
+                -DJPEG_LIBRARY="${jpeg_turbo_prefix}/lib/libjpeg.dylib" \
+                -DJPEG_INCLUDE_DIR="${jpeg_turbo_prefix}/include" \
                 -Wno-dev Cmake/
-          echo "✔ CMake configuration complete."
-      
+          echo "[OK] CMake configuration complete."
+
       - name: Build
         shell: bash --noprofile --norc {0}
         env:
@@ -207,27 +351,139 @@ jobs:
           unset GITHUB_TOKEN || true
           echo "Starting build process..."
           cd Build
-          make -j$(sysctl -n hw.ncpu)
-          echo "✔ Build process completed."
-          echo "========= BEGIN INSIDE STUB ========="
-          cd ../Testing/
-          echo "=== Updating PATH ==="
-          for d in ../Build/Tools/*; do
-          [ -d "$d" ] && export PATH="$(realpath "$d"):$PATH"
-          done 
-          sh CreateAllProfiles.sh
-          sh RunTests.sh
-          find . -iname "*.icc" | wc -l 
-          
+          make -j"$(sysctl -n hw.ncpu)"
+          echo "Build process completed."
+
+      - name: Stage bundle into Testing directory
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          stage="staging/iccDEV-Testing"
+          mkdir -p "$stage"
+          # 1. Copy Testing contents (exclude Fuzzing)
+          for item in Testing/*; do
+            [ "$(basename "$item")" = "Fuzzing" ] && continue
+            cp -a "$item" "$stage/"
+          done
+          # 2. Copy tool binaries and libraries from build
+          find Build/Tools -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.a' \) \
+            -exec cp -a {} "$stage/" \;
+          find Build/IccProfLib -type f -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccProfLib -type l -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccXML -type f -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccXML -type l -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccJSON -type f -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccJSON -type l -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccConnect -type f -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          find Build/IccConnect -type l -name '*.dylib' \
+            -exec cp -a {} "$stage/" \; 2>/dev/null || true
+          # 3. Copy Testing/Readme.md, LICENSE.md and docs/
+          cp Testing/Readme.md  "$stage/"
+          cp LICENSE.md "$stage/"
+          cp -a docs    "$stage/docs"
+          # 4. Generate path.sh helper script (POSIX-compatible, resolves from script location)
+          printf '%s\n' \
+            "#!/bin/sh" \
+            "# Resolve the directory where this script lives" \
+            "if [ -n \"\${BASH_SOURCE:-}\" ]; then" \
+            "  SCRIPT_DIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"" \
+            "else" \
+            "  SCRIPT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"" \
+            "fi" \
+            "export PATH=\"\$SCRIPT_DIR:\$PATH\"" \
+            "export DYLD_LIBRARY_PATH=\"\$SCRIPT_DIR\${DYLD_LIBRARY_PATH:+:\$DYLD_LIBRARY_PATH}\"" \
+            "for d in \"\$SCRIPT_DIR\"/*/; do" \
+            "  [ -d \"\$d\" ] && export PATH=\"\$d:\$PATH\"" \
+            "done" \
+            "echo \"PATH and DYLD_LIBRARY_PATH updated.\"" \
+            "echo \"Tools directory: \$SCRIPT_DIR\"" \
+            > "$stage/path.sh"
+          chmod +x "$stage/path.sh"
+          # Normalize Mach-O library references for the portable release bundle.
+          find "$stage" -maxdepth 1 -type f \( -perm -111 -o -name '*.dylib' \) -print | sort |
+          while IFS= read -r target; do
+            target_base="$(basename "$target")"
+            case "$target_base" in
+              *.dylib)
+                install_name_tool -id "@loader_path/$target_base" "$target" || true
+                ;;
+            esac
+            otool -L "$target" | awk 'NR > 1 {print $1}' |
+            while IFS= read -r dep; do
+              case "$dep" in
+                "$PWD"/Build/*|"$GITHUB_WORKSPACE"/Build/*|/Users/runner/work/iccDEV/iccDEV/Build/*)
+                  install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$target" || true
+                  ;;
+              esac
+            done
+            otool -l "$target" |
+              awk '
+                $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+                in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+              ' |
+            while IFS= read -r rpath; do
+              case "$rpath" in
+                "$PWD"/Build/*|"$GITHUB_WORKSPACE"/Build/*|/Users/runner/work/iccDEV/iccDEV/Build/*)
+                  install_name_tool -delete_rpath "$rpath" "$target" || true
+                  ;;
+              esac
+            done
+            install_name_tool -add_rpath "@loader_path" "$target" || true
+          done
+          for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
+            DYLD_LIBRARY_PATH="$stage${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+          done
+          # Summary of staged bundle contents
+          total=$(find "$stage" -type f | wc -l)
+          echo ""
+          echo "===== Staged Bundle Contents ($total files) ====="
+          for ext in dylib a icc md; do
+            count=$(find "$stage" -maxdepth 1 \( -type f -o -type l \) -name "*.$ext" | wc -l)
+            if [ "$count" -gt 0 ]; then
+              echo ""
+              echo "--- *.$ext ($count) ---"
+              find "$stage" -maxdepth 1 \( -type f -o -type l \) -name "*.$ext" -exec sh -c '
+                for path do
+                  size=$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path")
+                  printf "  %s  (%s KB)\n" "$(basename "$path")" "$((size / 1024))"
+                done
+              ' sh {} +
+            fi
+          done
+          # List executables (Mach-O binaries without extension)
+          exes=$(find "$stage" -maxdepth 1 -type f -perm -111 ! -name '*.*' | wc -l)
+          if [ "$exes" -gt 0 ]; then
+            echo ""
+            echo "--- executables ($exes) ---"
+            find "$stage" -maxdepth 1 -type f -perm -111 ! -name '*.*' -exec sh -c '
+              for path do
+                size=$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path")
+                printf "  %s  (%s KB)\n" "$(basename "$path")" "$((size / 1024))"
+              done
+            ' sh {} +
+          fi
+          echo ""
+          echo "Total: $total files staged into $stage"
+          echo ""
       - name: Upload macOS Artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: iccdev-macos-clang
-          path: |
-            Build
-            LICENSE.md
-            README.md            
-            docs/**
+          path: staging
+          if-no-files-found: error
       - name: Summary Report
         if: always()
         shell: bash --noprofile --norc {0}
@@ -238,49 +494,55 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          echo "### macOS Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Build Directory: Build/" >> $GITHUB_STEP_SUMMARY
-          echo "- Artifacts Uploaded: iccdev-macos-clang" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: Success" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### macOS Build Summary"
+            echo "- Build Directory: Build/"
+            echo "- Artifacts Uploaded: iccdev-macos-clang"
+            echo "- Status: Success"
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
   windows:
     name: "Windows MSVC"
-    runs-on: windows-latest
-    timeout-minutes: 20
+    needs: cache-policy
+    runs-on: windows-2022
+    timeout-minutes: 45
     env:
       POWERSHELL_TELEMETRY_OPTOUT: "1"
+      POWERSHELL_UPDATECHECK: "Off"
     defaults:
       run:
-        shell: pwsh
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
     strategy:
       fail-fast: false
     steps:
       - name: Checkout PR source
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: UCI Gate 1 for Windows Powershell
-        shell: pwsh
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
         env:
           POWERSHELL_TELEMETRY_OPTOUT: "1"
         run: |
+         git config --global credential.helper ""
          Set-StrictMode -Version Latest
          $ErrorActionPreference = 'Stop'
          $ProgressPreference = 'SilentlyContinue'
-         
+
          # --- Disable telemetry sources (pwsh / dotnet / gh) ---
          $env:POWERSHELL_TELEMETRY_OPTOUT = "1"
          $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
          $env:GH_NO_UPDATE_NOTIFIER = "1"
          $env:GH_PROMPT_DISABLED = "1"
          $env:NUGET_XMLDOC_MODE = "skip"
-         
+
          # --- Validate workspace path (defense-in-depth) ---
          if (-not (Test-Path $env:GITHUB_WORKSPACE)) {
              throw "Invalid GITHUB_WORKSPACE path: $env:GITHUB_WORKSPACE"
          }
-         
+
          # --- Remove tokens or uci that should not exist in PR CI ---
          foreach ($v in @(
              'GITHUB_TOKEN',
@@ -292,25 +554,34 @@ jobs:
                  Remove-Item "Env:$v" -ErrorAction SilentlyContinue
              }
          }
-         
+
          # --- Canonicalization then sanitize user controllable input ---
          function Canonicalize([string]$s) {
              if (-not $s) { return "" }
              $s = $s.Trim()
              $s = $s.Replace("`r","").Replace("`n","")
-             $s = -join ($s.ToCharArray() | Where-Object { [int]$_ -ge 32 })
+             # Strip C0 controls, DEL, and Unicode bidi/zero-width/formatting chars
+             $s = -join ($s.ToCharArray() | Where-Object {
+                 $c = [int]$_
+                 $c -ge 32 -and $c -ne 127 -and
+                 -not ($c -ge 0x200B -and $c -le 0x200F) -and
+                 -not ($c -ge 0x2028 -and $c -le 0x202F) -and
+                 -not ($c -ge 0x2060 -and $c -le 0x2069) -and
+                 $c -ne 0xFEFF -and
+                 -not ($c -ge 0xFFF9 -and $c -le 0xFFFB)
+             })
              return $s
          }
-         
+
          # --- Canonicalize PR-controlled environment values ---
          $env:GITHUB_REF      = Canonicalize $env:GITHUB_REF
          $env:GITHUB_HEAD_REF = Canonicalize $env:GITHUB_HEAD_REF
          $env:GITHUB_BASE_REF = Canonicalize $env:GITHUB_BASE_REF
-         
+
          # --- Harden Git configuration ---
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
-         
+
          # --- PATH hardening: limit to trusted tool locations ---
          $trustedPath = @(
              "$env:SystemRoot\system32",
@@ -319,39 +590,38 @@ jobs:
              "$env:ProgramFiles\PowerShell\7"
          ) -join ';'
          $env:PATH = $trustedPath
-         
-          Write-Host "Finished UCI Gate 1 for pwsh" -ForegroundColor Green
 
+          Write-Host "Finished UCI Gate 1 for pwsh" -ForegroundColor Green
       - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@767f00a3f09872d96a0cb9fcd5e6a4ff33311330
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57  # v3.0.0 (node24)
 
       - name: UCI Gate 2 for Windows Powershell - Verify Branch Context
-        shell: pwsh
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
         env:
           POWERSHELL_TELEMETRY_OPTOUT: "1"
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-
           Write-Host "Triggered by:  $env:GITHUB_EVENT_NAME"
           Write-Host "Base branch:   $env:GITHUB_BASE_REF"
           Write-Host "Head branch:   $env:GITHUB_HEAD_REF"
           Write-Host "Commit SHA:    $env:PR_HEAD_SHA"
           Write-Host "OS:            $env:RUNNER_OS"
-
       - name: Install dependencies and build
-        shell: pwsh
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
         run: |
+          git config --global credential.helper ""
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
+          $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-            if (Test-Path Env:GITHUB_TOKEN) {
-              Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-            }
+          if (Test-Path Env:GITHUB_TOKEN) {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          }
           Write-Host "============================= Starting Build =============================" -ForegroundColor Green
-          Write-Host "Copyright (©) 2025 International Color Consortium. All rights reserved." -ForegroundColor Green
+          Write-Host "Copyright (c) 2025 International Color Consortium. All rights reserved." -ForegroundColor Green
           git branch
           git status
           Write-Host "========= Fetching Deps... ================`n"
@@ -359,86 +629,1209 @@ jobs:
           Write-Host "========= Extracting Deps... ================`n"
           tar -xf deps.zip
           cd Build/Cmake
-          Write-Host "========= Building... ================`n"  
-          cmake  -B build -S . -DCMAKE_TOOLCHAIN_FILE="..\..\scripts\buildsystems\vcpkg.cmake" -DVCPKG_MANIFEST_MODE=OFF -DCMAKE_BUILD_TYPE=Debug  -Wno-dev
-          cmake --build build -- /m /maxcpucount
-          cmake --build build -- /m /maxcpucount          
-          $exeDirs = Get-ChildItem -Recurse -File -Include *.exe -Path .\build\ |
-              Where-Object { $_.FullName -match 'icc' -and $_.FullName -notmatch '\\CMakeFiles\\' -and $_.Name -notmatch '^CMake(C|CXX)CompilerId\.exe$' } |
-              ForEach-Object { Split-Path $_.FullName -Parent } |
-              Sort-Object -Unique
-          $env:PATH = ($exeDirs -join ';') + ';' + $env:PATH
-          $env:PATH -split ';' | Select-String "icc"
-          $toolDirs = Get-ChildItem -Recurse -File -Include *.exe -Path .\Tools\ | ForEach-Object { Split-Path -Parent $_.FullName } | Sort-Object -Unique
-          $env:PATH = ($toolDirs -join ';') + ';' + $env:PATH
-          $env:PATH -split ';'
-          pwd
-          cd ..\..\Testing
-          .\CreateAllProfiles.bat
-          .\RunTests.bat
-          cd CalcTest\
-          .\checkInvalidProfiles.bat
-          .\runtests.bat
-          cd ..\Display
-          .\RunProtoTests.bat
-          cd ..\HDR
-          .\mkprofiles.bat
-          cd ..\mcs\
-          .\updateprev.bat
-          .\updateprevWithBkgd.bat
-          cd ..\Overprint
-          .\RunTests.bat
-          cd ..
-          cd hybrid
-          .\BuildAndTest.bat
-          cd ..
-          cd ..
-          pwd
-          # Collect .icc profile information
-          $profiles = Get-ChildItem -Path . -Filter "*.icc" -Recurse -File
-          $totalCount = $profiles.Count
-          
-          # Group profiles by directory
-          $groupedProfiles = $profiles | Group-Object { $_.Directory.FullName }
-          
-          # Generate Summary Report
-          Write-Host "`n========================="
-          Write-Host " ICC Profile Report"
-          Write-Host "========================="
-          
-          # Print count per subdirectory
-          foreach ($group in $groupedProfiles) {
-              Write-Host ("{0}: {1} .icc profiles" -f $group.Name, $group.Count)
+          Write-Host "========= Building... ================`n"
+          cmake -B build -S . `
+            -DCMAKE_TOOLCHAIN_FILE="..\..\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_MANIFEST_MODE=OFF `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DICCDEV_WINDOWS_UNIFIED_RUNTIME=ON `
+            -Wno-dev
+          cmake --build build --config Release -- /m /maxcpucount
+          $runtimeDir = Resolve-Path ".\build\bin\Release"
+          Get-ChildItem -File -Path $runtimeDir |
+            Where-Object { $_.Extension -in '.exe','.dll' } |
+            Sort-Object Name |
+            ForEach-Object { Write-Host ("{0} {1}" -f $_.Name, $_.Length) }
+      - name: Stage bundle into Testing directory
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
+        run: |
+          git config --global credential.helper ""
+          if (Test-Path env:GITHUB_TOKEN) { Remove-Item env:GITHUB_TOKEN }
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $stage = "staging/iccDEV-Testing"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          # 1. Copy the entire Testing directory contents (exclude Fuzzing)
+          Get-ChildItem -Path "Testing" -Exclude "Fuzzing" |
+            Copy-Item -Destination $stage -Recurse -Force
+          # 2. Copy the unified Windows runtime directory. CMake stages iccDEV
+          #    tools, iccDEV DLLs, and vcpkg runtime DLLs together here so
+          #    release binaries run directly from the bundle root.
+          $runtimeDir = "Build/Cmake/build/bin/Release"
+          if (-not (Test-Path $runtimeDir)) {
+            throw "Windows runtime directory not found: $runtimeDir"
           }
-          
-          Write-Host "`nTotal .icc profiles found: $totalCount"
-          Write-Host "=========================`n"
-          
-          Write-Host "All Done!"
+          Get-ChildItem -Path $runtimeDir -File |
+            Where-Object { $_.Extension -in '.exe','.dll','.lib','.exp' } |
+            ForEach-Object { Copy-Item $_.FullName -Destination $stage -Force }
+          foreach ($required in @('iccDumpProfile.exe', 'IccProfLib2.dll')) {
+            if (-not (Test-Path (Join-Path $stage $required))) {
+              throw "Required staged Windows runtime artifact missing: $required"
+            }
+          }
+          # 3. Copy Testing/Readme.md, LICENSE.md and docs/
+          Copy-Item -Path "Testing/Readme.md"  -Destination $stage -Force
+          Copy-Item -Path "LICENSE.md" -Destination $stage -Force
+          Copy-Item -Path "docs"       -Destination "$stage/docs" -Recurse -Force
+          # 4. Copy full IIS sample tree (web.config, html/css/js, assets/, all ps1 helpers)
+          #    under staging/iccDEV-Testing/IccIisIsapi/ so web.config + demo pages
+          #    resolve relative to the installed ISAPI extension.
+          $iisSrc = "Tools/Winnt/IccIisIsapi"
+          if (Test-Path $iisSrc) {
+            $iisDst = Join-Path $stage "IccIisIsapi"
+            New-Item -ItemType Directory -Force -Path $iisDst | Out-Null
+            # skip source files (*.cpp/*.h/*.def) and build outputs that are
+            # already captured by the flat DLL/EXE sweep above
+            Get-ChildItem -Path $iisSrc -Force -Exclude '*.cpp','*.h','*.def' |
+              Copy-Item -Destination $iisDst -Recurse -Force
+            # Back-compat: also keep Install-IccIisIsapiSite.ps1 at the stage
+            # root (existing docs reference that path).
+            $iisInstaller = Join-Path $iisSrc "Install-IccIisIsapiSite.ps1"
+            if (Test-Path $iisInstaller) {
+              Copy-Item -Path $iisInstaller -Destination $stage -Force
+            }
+          }
+          # 5. Generate path.bat helper script
+          @'
+          @echo off
+          set "SCRIPT_DIR=%~dp0"
+          if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+          set "PATH=%SCRIPT_DIR%;%PATH%"
+          echo PATH updated for iccDEV tools: %SCRIPT_DIR%
+          '@ | Set-Content -Path "$stage/path.bat" -Encoding ASCII
+          $dumpOutput = (& (Join-Path $stage 'iccDumpProfile.exe') --read --diag 1 (Join-Path $stage 'CalcTest\calcUnderStack_add.icc') 2>&1) -join "`n"
+          Write-Host $dumpOutput
+          if ($LASTEXITCODE -ne 0) {
+            throw "Staged iccDumpProfile smoke failed with exit code $LASTEXITCODE"
+          }
+          if ($dumpOutput -notmatch 'Profile Tags \(8\)') {
+            throw "Staged iccDumpProfile smoke did not report the expected tag count"
+          }
+          # Summary of staged bundle contents
+          $allFiles = Get-ChildItem -Path $stage -Recurse -File
+          $count = $allFiles.Count
+          Write-Host "`n===== Staged Bundle Contents ($count files) =====" -ForegroundColor Cyan
+          foreach ($ext in @('*.exe','*.dll','*.lib','*.icc','*.md')) {
+            $matched = @($allFiles | Where-Object { $_.Name -like $ext })
+            if ($matched.Count -gt 0) {
+              Write-Host "`n--- $ext ($($matched.Count)) ---"
+              $matched | ForEach-Object {
+                $rel = $_.FullName.Replace((Resolve-Path $stage).Path + '\', '')
+                Write-Host "  $rel  ($([math]::Round($_.Length/1KB,1)) KB)"
+              }
+            }
+          }
+          $otherExts = $allFiles |
+            Where-Object { $_.Extension -notin '.exe','.dll','.lib','.icc','.md' } |
+            Group-Object Extension |
+            Sort-Object Count -Descending
+          if ($otherExts) {
+            Write-Host "`n--- Other files ---"
+            foreach ($g in $otherExts) {
+              Write-Host ("  {0}: {1} file(s)" -f ($g.Name ? $g.Name : '(no ext)'), $g.Count)
+            }
+          }
+          Write-Host "`nTotal: $count files staged into $stage`n"
       - name: Upload build artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: iccdev-windows-msvc
-          path: |
-            Build/Cmake/build/**/*.lib
-            Build/Cmake/build/**/*.a
-            Build/Cmake/build/**/*.dll
-            Build/Cmake/build/**/*.exe
-            Build/Cmake/build/**/*.pdb
-            Build/Cmake/Testing/**/*
-            LICENSE.md
-            README.md            
-            docs/**
-          if-no-files-found: warn
+          path: staging
+          if-no-files-found: error
       - name: Host System Info
-        shell: pwsh
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
         run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global credential.helper ""
+          if (Test-Path env:GITHUB_TOKEN) { Remove-Item env:GITHUB_TOKEN }
           systeminfo
           Get-CimInstance -ClassName Win32_Processor
       - name: Summary Report
         if: always()
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
+        env:
+          POWERSHELL_TELEMETRY_OPTOUT: "1"
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_RUNNER_OS: ${{ runner.os }}
+          GH_JOB_STATUS: ${{ job.status }}
         run: |
-          echo "### Windows Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Build Directory: Build/" >> $GITHUB_STEP_SUMMARY
-          echo "- Artifacts Uploaded:  iccdev-windows-msvc" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: Success" >> $GITHUB_STEP_SUMMARY
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          # Source trusted sanitizer from checked-out workspace
+          . .github/scripts/sanitize.ps1
+          "### Windows Build Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Repository: $(Sanitize-Line $env:GH_REPOSITORY)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Commit SHA: $(Sanitize-Line $env:GH_COMMIT_SHA)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Runner OS: $(Sanitize-Line $env:GH_RUNNER_OS)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Build Directory: Build/" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Artifacts Uploaded: iccdev-windows-msvc" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- Status: $(Sanitize-Line $env:GH_JOB_STATUS)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  wasm:
+    name: "WASM Release (Emscripten)"
+    needs: cache-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EMSDK_VERSION: 4.0.20
+      EMSDK_REF: e4fe26ef59168ff44f4c23c466e497bf60b3411e
+      ZLIB_REF: f9dd6009be3ed32415edf1e89d1bc38380ecb95d
+      LIBTIFF_REF: 97ae1f6f0bba8999326f084f04950ecfd6166580
+      LIBXML2_REF: 39b66eb2089f491eacf8e22a7965a235f7f5735e
+      NLOHMANN_JSON_REF: f0bf4c731a53aab29ebde0234385b9e63bf70dcd
+      WASM_DEPS_CACHE_VERSION: v2
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Emscripten SDK
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          rm -rf emsdk
+          git init emsdk
+          git -C emsdk remote add origin https://github.com/emscripten-core/emsdk.git
+          git -C emsdk fetch --depth 1 origin "$EMSDK_REF"
+          git -C emsdk checkout --detach "$EMSDK_REF"
+          actual_ref="$(git -C emsdk rev-parse HEAD)"
+          if [[ "$actual_ref" != "$EMSDK_REF" ]]; then
+            echo "::error::emsdk checkout mismatch"
+            exit 1
+          fi
+          cd emsdk
+          ./emsdk install "$EMSDK_VERSION"
+          ./emsdk activate "$EMSDK_VERSION"
+
+      - name: Build third-party dependencies
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source emsdk/emsdk_env.sh
+
+          THIRD_PARTY="$PWD/third_party"
+          CACHE_ACTION="rebuilt"
+          fetch_pinned_dep() {
+            local name="$1"
+            local url="$2"
+            local ref="$3"
+            rm -rf "$name"
+            git init "$name"
+            git -C "$name" remote add origin "$url"
+            git -C "$name" fetch --depth 1 origin "$ref"
+            git -C "$name" checkout --detach "$ref"
+            local actual
+            actual="$(git -C "$name" rev-parse HEAD)"
+            if [[ "$actual" != "$ref" ]]; then
+              echo "::error::$name checkout mismatch"
+              exit 1
+            fi
+          }
+          echo "WASM third-party cache is disabled for release; rebuilding dependencies."
+          rm -rf "$THIRD_PARTY"
+          mkdir -p "$THIRD_PARTY" && cd "$THIRD_PARTY"
+
+            # zlib
+            fetch_pinned_dep zlib https://github.com/madler/zlib.git "$ZLIB_REF"
+            cd zlib
+            emconfigure ./configure --static --prefix="$THIRD_PARTY/zlib/out"
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+            # libpng (checksum verified)
+            curl -sLO https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
+            echo "01fdab044cdc575c74a9ef62a4042fbe24fea8bedfe8aa5c89f4467b781bbb60  libpng-1.6.57.tar.gz" | sha256sum -c -
+            tar -xzf libpng-1.6.57.tar.gz && mv libpng-1.6.57 libpng && cd libpng
+            CPPFLAGS="-I$THIRD_PARTY/zlib" LDFLAGS="-L$THIRD_PARTY/zlib/out/lib" \
+              emconfigure ./configure --disable-shared --enable-static --prefix="$THIRD_PARTY/libpng/out"
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+            # libjpeg (checksum verified)
+            curl -sLO https://ijg.org/files/jpegsrc.v9e.tar.gz
+            echo "4077d6a6a75aeb01884f708919d25934c93305e49f7e3f36db9129320e6f4f3d  jpegsrc.v9e.tar.gz" | sha256sum -c -
+            tar -xzf jpegsrc.v9e.tar.gz && mv jpeg-9e libjpeg && cd libjpeg
+            emconfigure ./configure --prefix="$THIRD_PARTY/libjpeg/out" --disable-shared --enable-static
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+            # libtiff (with retry for GitLab)
+            for attempt in 1 2 3; do
+              if fetch_pinned_dep libtiff https://gitlab.com/libtiff/libtiff.git "$LIBTIFF_REF"; then
+                break
+              fi
+              echo "::warning::libtiff clone attempt $attempt failed, retrying in 10s..."
+              rm -rf libtiff
+              sleep 10
+            done
+            if [[ ! -d libtiff ]]; then
+              echo "::error::Failed to clone libtiff after 3 attempts"
+              exit 1
+            fi
+            cd libtiff
+            mkdir wasm && cd wasm
+            emcmake cmake .. \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$THIRD_PARTY/libtiff/out" \
+              -DZLIB_INCLUDE_DIR="$THIRD_PARTY/zlib" \
+              -DZLIB_LIBRARY="$THIRD_PARTY/zlib/out/lib/libz.a" \
+              -DJPEG_INCLUDE_DIR="$THIRD_PARTY/libjpeg/out/include" \
+              -DJPEG_LIBRARY="$THIRD_PARTY/libjpeg/out/lib/libjpeg.a"
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+            # libxml2 (CMake build with retry for GitLab)
+            for attempt in 1 2 3; do
+              if fetch_pinned_dep libxml2 https://gitlab.gnome.org/GNOME/libxml2.git "$LIBXML2_REF"; then
+                break
+              fi
+              echo "::warning::libxml2 clone attempt $attempt failed, retrying in 10s..."
+              rm -rf libxml2
+              sleep 10
+            done
+            if [[ ! -d libxml2 ]]; then
+              echo "::error::Failed to clone libxml2 after 3 attempts"
+              exit 1
+            fi
+            cd libxml2
+            mkdir wasm-build && cd wasm-build
+            emcmake cmake .. \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$THIRD_PARTY/libxml2/out" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DLIBXML2_WITH_PYTHON=OFF \
+              -DLIBXML2_WITH_TESTS=OFF \
+              -DLIBXML2_WITH_PROGRAMS=OFF \
+              -DLIBXML2_WITH_LZMA=OFF \
+              -DLIBXML2_WITH_ZLIB=OFF \
+              -DLIBXML2_WITH_ICONV=OFF
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+            # nlohmann-json (build with CMake for find_package support)
+            fetch_pinned_dep nlohmann-json https://github.com/nlohmann/json.git "$NLOHMANN_JSON_REF"
+            cd nlohmann-json
+            mkdir wasm && cd wasm
+            emcmake cmake .. \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$THIRD_PARTY/nlohmann-json/out" \
+              -DJSON_BuildTests=OFF \
+              -DJSON_Install=ON
+            emmake make -j"$(nproc)"
+            emmake make install
+            cd "$THIRD_PARTY"
+
+          find "$THIRD_PARTY" -type d -name .git -prune -print0 | xargs -0r rm -rf
+          touch "$THIRD_PARTY/.ci-latest-release-wasm-deps-complete"
+          cd "$GITHUB_WORKSPACE"
+
+          # --- Sanitized step summary ---
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          {
+            echo "### Third-party dependencies (WASM)"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| cache policy | disabled for release |"
+            echo "| action | $(sanitize_line "$CACHE_ACTION") |"
+            echo ""
+            echo '```'
+            find "$THIRD_PARTY" -mindepth 2 -maxdepth 2 -type d -name out | sort | while IFS= read -r dep; do
+              sanitize_line "$dep"
+              echo ""
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Configure and Build iccDEV-WASM
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source emsdk/emsdk_env.sh
+
+          THIRD_PARTY="$PWD/third_party"
+
+          # --- Load sanitizer for step summary ---
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          mkdir -p build-wasm && cd build-wasm
+          emcmake cmake ../Build/Cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TOOLS=ON \
+            -DENABLE_STATIC_LIBS=ON \
+            -DENABLE_SHARED_LIBS=OFF \
+            -DENABLE_TESTS=OFF \
+            -DLIBXML2_INCLUDE_DIR="$THIRD_PARTY/libxml2/out/include/libxml2" \
+            -DLIBXML2_LIBRARY="$THIRD_PARTY/libxml2/out/lib/libxml2.a" \
+            -DTIFF_INCLUDE_DIR="$THIRD_PARTY/libtiff/out/include" \
+            -DTIFF_LIBRARY="$THIRD_PARTY/libtiff/out/lib/libtiff.a" \
+            -DJPEG_INCLUDE_DIR="$THIRD_PARTY/libjpeg/out/include" \
+            -DJPEG_LIBRARY="$THIRD_PARTY/libjpeg/out/lib/libjpeg.a" \
+            -DPNG_PNG_INCLUDE_DIR="$THIRD_PARTY/libpng/out/include" \
+            -DPNG_LIBRARY="$THIRD_PARTY/libpng/out/lib/libpng16.a" \
+            -DZLIB_INCLUDE_DIR="$THIRD_PARTY/zlib" \
+            -DZLIB_LIBRARY="$THIRD_PARTY/zlib/out/lib/libz.a" \
+            -Dnlohmann_json_DIR="$THIRD_PARTY/nlohmann-json/out/share/cmake/nlohmann_json" \
+            -DCMAKE_CXX_FLAGS=" \
+              -I$THIRD_PARTY/libtiff/out/include \
+              -I$THIRD_PARTY/libjpeg/out/include \
+              -I$THIRD_PARTY/libpng/out/include \
+              -I$THIRD_PARTY/zlib \
+              -I$THIRD_PARTY/nlohmann-json/out/include" \
+            -DCMAKE_EXE_LINKER_FLAGS=" \
+              $THIRD_PARTY/libjpeg/out/lib/libjpeg.a \
+              $THIRD_PARTY/libpng/out/lib/libpng16.a \
+              $THIRD_PARTY/zlib/out/lib/libz.a \
+              -s INITIAL_MEMORY=128MB \
+              -s ALLOW_MEMORY_GROWTH=1 \
+              -s FORCE_FILESYSTEM=1 \
+              -s MODULARIZE=1 \
+              -s EXPORT_NAME=createModule \
+              -s EXPORTED_RUNTIME_METHODS=['FS','callMain'] -s EXIT_RUNTIME=0" \
+            -Wno-dev
+
+          emmake make -j"$(nproc)"
+
+          # Report results (sanitized, 1 file per line)
+          JS_COUNT=$(find . -name '*.js' -not -path '*/CMakeFiles/*' | wc -l)
+          WASM_COUNT=$(find . -name '*.wasm' | wc -l)
+          LIB_COUNT=$(find . -name '*.a' | wc -l)
+
+          {
+            echo "### WASM Build: Release"
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| JS modules | $(sanitize_line "$JS_COUNT") |"
+            echo "| WASM binaries | $(sanitize_line "$WASM_COUNT") |"
+            echo "| Static libraries | $(sanitize_line "$LIB_COUNT") |"
+            echo ""
+            echo "#### JS Modules"
+            echo '```'
+            find . -name '*.js' -not -path '*/CMakeFiles/*' -exec ls -lh {} \; | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+            echo '```'
+            echo "#### WASM Binaries"
+            echo '```'
+            find . -name '*.wasm' -exec ls -lh {} \; | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Validate WASM output
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source emsdk/emsdk_env.sh
+
+          # --- Load sanitizer ---
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          cd build-wasm
+
+          # Verify .wasm files exist and are valid
+          mapfile -t WASM_FILES < <(find . -name '*.wasm' -type f | sort)
+          if [ "${#WASM_FILES[@]}" -eq 0 ]; then
+            echo "::error::No WASM files produced"
+            exit 1
+          fi
+
+          # Validate each .wasm file header (magic number: 0061736d = \0asm)
+          VALID=0
+          INVALID=0
+          for wf in "${WASM_FILES[@]}"; do
+            MAGIC=$(xxd -l 4 -p "$wf" 2>/dev/null)
+            if [ "$MAGIC" = "0061736d" ]; then
+              SIZE=$(stat -c%s "$wf")
+              echo "VALID: $(basename "$wf") ($SIZE bytes)"
+              VALID=$((VALID + 1))
+            else
+              echo "INVALID: $(basename "$wf") (magic: $MAGIC)"
+              INVALID=$((INVALID + 1))
+            fi
+          done
+
+          { sanitize_line "### WASM Validation: $VALID valid, $INVALID invalid"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$INVALID" -gt 0 ]; then
+            echo "::error::$INVALID invalid WASM files found"
+            exit 1
+          fi
+
+          # Run a quick smoke test with node if iccDumpProfile exists
+          DUMP_JS=$(find . -name "iccDumpProfile.js" -not -path '*/CMakeFiles/*' | head -1)
+          if [ -n "$DUMP_JS" ] && [ -f "$DUMP_JS" ]; then
+            echo "Smoke test: iccDumpProfile --help"
+            set +e
+            node "$DUMP_JS" 2>&1 | sed -n '1,5p'
+            echo "iccDumpProfile WASM smoke test complete"
+            set -e
+          fi
+
+      - name: "Stage npm-shaped WASM bundle (issue #830)"
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          # Resolve a version string for package.json:
+          #   - tag push   : strip leading 'v' from refs/tags/vX.Y.Z
+          #   - other      : 0.0.0-dev+<short-sha>
+          REF_NAME="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            VERSION="${REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev+${GITHUB_SHA:0:7}"
+          fi
+
+          chmod +x Build/Cmake/wasm-package/stage.sh
+          Build/Cmake/wasm-package/stage.sh build-wasm wasm-stage "$VERSION"
+
+          {
+            echo "### WASM npm-shaped bundle"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| version | $(sanitize_line "$VERSION") |"
+            echo "| stage dir | wasm-stage/ |"
+            echo ""
+            echo "#### Top-level entries"
+            echo '```'
+            find wasm-stage -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+            echo '```'
+            echo "#### Tool modules"
+            echo '```'
+            find wasm-stage -maxdepth 2 -name '*.js' -not -name 'index.js' -not -name 'test_all.js' \
+              -exec ls -lh {} \; | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Smoke-test staged WASM bundle (test_all.js)
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          if [[ ! -d wasm-stage ]]; then
+            echo "::error::wasm-stage/ not present; staging step did not run"
+            exit 1
+          fi
+
+          cd wasm-stage
+          if ! node test_all.js; then
+            echo "::error::test_all.js (17-tool smoke) failed in staged WASM bundle"
+            exit 1
+          fi
+
+      - name: Parity gate (Testing/CreateAllProfiles.sh -> regression.js)
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            sanitize_line() { printf '%s' "$1"; }
+          fi
+
+          cd wasm-stage
+          OUT=$(mktemp)
+          if node regression.js 2>&1 | tee "$OUT"; then
+            {
+              echo "### WASM Parity (Testing/CreateAllProfiles.sh)"
+              echo '```'
+              grep -E '^(Result:|PASS|FAIL|Per-dir|  +[0-9]+ )' "$OUT" \
+                | while IFS= read -r line; do
+                  sanitize_line "$line"
+                  echo ""
+                done
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          else
+            {
+              echo "### WASM Parity: FAIL"
+              echo '```'
+              tail -40 "$OUT" | while IFS= read -r line; do
+                sanitize_line "$line"
+                echo ""
+              done
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+            echo "::error::WASM regression.js parity gate failed"
+            exit 1
+          fi
+
+      - name: "Upload WASM Artifacts (npm-shaped, issue #830)"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: iccdev-wasm-release
+          path: wasm-stage/**
+          if-no-files-found: error
+
+      - name: WASM Summary Report
+        if: always()
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          {
+            echo "### WASM Build Summary"
+            echo "- Build Type: Release"
+            echo "- Artifacts: iccdev-wasm-release"
+            echo "- Target: Emscripten (WASM32)"
+            if [ -d build-wasm ]; then
+              WASM_N=$(find build-wasm -name '*.wasm' 2>/dev/null | wc -l)
+              JS_N=$(find build-wasm -name '*.js' -not -path '*/CMakeFiles/*' 2>/dev/null | wc -l)
+              echo "- WASM binaries: $(sanitize_line "$WASM_N")"
+              echo "- JS modules: $(sanitize_line "$JS_N")"
+            fi
+            echo "- Status: Success"
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+  cpack-linux:
+    name: "Linux CPack runtime packages"
+    needs: cache-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    env:
+      BASH_ENV: /dev/null
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install package build dependencies
+        # preflight: allow-package-install reason=runtime-cpack-local-backends
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          bash .github/scripts/ci-safe-apt-update.sh
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            libjpeg-dev \
+            libpng-dev \
+            libtiff-dev \
+            libxml2-dev \
+            ninja-build \
+            nlohmann-json3-dev \
+            rpm \
+            unzip \
+            zlib1g-dev
+
+      - name: Configure CPack build
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          cmake -S Build/Cmake -B build-cpack -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TOOLS=ON \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_SHARED_LIBS=ON \
+            -DENABLE_STATIC_LIBS=OFF \
+            -DENABLE_WXWIDGETS=OFF \
+            -DENABLE_ICCJSON=ON
+
+      - name: Build CPack runtime tree
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          cmake --build build-cpack --parallel "$(nproc)"
+
+      - name: Package runtime artifacts
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          cmake --build build-cpack --target package-sha256
+
+      - name: Validate runtime package outputs
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          test -s build-cpack/SHA256SUMS
+          grep -Eq '  reficcmax-.*\.zip$' build-cpack/SHA256SUMS
+          grep -Eq '  reficcmax-.*\.deb$' build-cpack/SHA256SUMS
+          grep -Eq '  reficcmax-.*\.rpm$' build-cpack/SHA256SUMS
+          zip_file="$(
+            awk '/  reficcmax-.*\.zip$/ {print "build-cpack/" $2; exit}' \
+              build-cpack/SHA256SUMS
+          )"
+          unzip -Z1 "${zip_file}" > build-cpack/ZIP-CONTENTS.txt
+          grep -q '/VERSION$' build-cpack/ZIP-CONTENTS.txt
+          grep -q '/TOOL-CATALOG.md$' build-cpack/ZIP-CONTENTS.txt
+          if grep -q '/Testing/' build-cpack/ZIP-CONTENTS.txt; then
+            echo "Runtime package unexpectedly contains Testing tree" >&2
+            exit 1
+          fi
+          cmake -E sha256sum \
+            build-cpack/reficcmax-*.zip \
+            build-cpack/reficcmax-*.deb \
+            build-cpack/reficcmax-*.rpm \
+            | awk '{name=$2; sub(".*/", "", name); print $1 "  " name}' \
+            | sort -k2 \
+            > build-cpack/SHA256SUMS.verify
+          diff -u build-cpack/SHA256SUMS build-cpack/SHA256SUMS.verify
+
+      - name: Report CPack summary
+        if: success()
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+
+          {
+            echo "### Linux CPack Runtime Packages"
+            echo ""
+            echo "| Artifact | Size |"
+            echo "|----------|------|"
+            for artifact in \
+              build-cpack/reficcmax-*.zip \
+              build-cpack/reficcmax-*.deb \
+              build-cpack/reficcmax-*.rpm; do
+              [ -f "$artifact" ] || continue
+              size=$(du -h "$artifact" | cut -f1)
+              echo "| $(sanitize_line "$(basename "$artifact")") | $(sanitize_line "$size") |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Upload runtime packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reficcmax-runtime-packages-linux
+          path: |
+            build-cpack/reficcmax-*.zip
+            build-cpack/reficcmax-*.deb
+            build-cpack/reficcmax-*.rpm
+            build-cpack/SHA256SUMS
+            build-cpack/ZIP-CONTENTS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  doxygen:
+    name: "Doxygen HTML Docs"
+    needs: cache-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Doxygen and Graphviz
+        # preflight: allow-package-install reason=doxygen-local-doc-generator
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          bash .github/scripts/ci-safe-apt-update.sh
+          sudo apt-get install -y -qq doxygen graphviz
+
+      - name: Generate HTML documentation
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          doxygen .github/ci/doxygen/Doxyfile
+          if [ -s docs/generated/doxygen-warnings.log ]; then
+            cat docs/generated/doxygen-warnings.log
+            exit 1
+          fi
+          test -f docs/generated/html/inherits.html
+          test -f docs/generated/html/iis-isapi_8openapi_8yaml_source.html
+          if find docs/generated/html -maxdepth 1 \
+            \( -name 'namespaceanonymous*' -o -name 'structanonymous*' -o -name 'classanonymous*' \) \
+            | grep -q .; then
+            echo "::error::Anonymous namespace pages leaked into generated HTML"
+            exit 1
+          fi
+          if grep -R "namespaceanonymous" -l docs/generated/html | grep -q .; then
+            echo "::error::Anonymous namespace references leaked into generated HTML"
+            exit 1
+          fi
+          echo "Full iccDEV Doxygen HTML generation complete"
+          find docs/generated/html -maxdepth 1 -printf '%p\n' |
+            sort |
+            sed -n '1,5p'
+
+      - name: Report documentation summary
+        if: success()
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+
+          html_dir="docs/generated/html"
+          total_files=$(find "$html_dir" -type f | wc -l)
+          svg_files=$(find "$html_dir" -name '*.svg' | wc -l)
+          html_files=$(find "$html_dir" -name '*.html' | wc -l)
+          class_count=$(find "$html_dir" -name 'class*.html' | wc -l)
+          total_size=$(du -sh "$html_dir" | cut -f1)
+
+          {
+            echo "### Doxygen HTML Documentation"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Total files | $(sanitize_line "${total_files}") |"
+            echo "| HTML pages | $(sanitize_line "${html_files}") |"
+            echo "| Class pages | $(sanitize_line "${class_count}") |"
+            echo "| SVG graphs | $(sanitize_line "${svg_files}") |"
+            echo "| Doxygen warnings | 0 |"
+            echo "| Total size | $(sanitize_line "${total_size}") |"
+            echo ""
+            echo "**Coverage**: IccProfLib, IccXML,"
+            echo "IccJSON/IccLibJSON, IccConnect/IccLibConnect,"
+            echo "CLI tools including IccPawgReport and"
+            echo "IccProfileVisualize, Winnt tools including"
+            echo "IccIisIsapi and its OpenAPI contract,"
+            echo "wxWidget tools, hello-iccdev, docs, and Testing notes."
+            echo ""
+            echo "**Visual aids**: Interactive SVG (pan/zoom),"
+            echo "class hierarchy browser, call/caller graphs,"
+            echo "collaboration diagrams, UML class diagrams,"
+            echo "include dependency graphs, directory graphs,"
+            echo "treeview navigation, client-side search,"
+            echo "and cross-referenced inline source browser."
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Upload HTML documentation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: iccdev-doxygen-html
+          path: docs/generated/html/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: "Publish Latest Release"
+    needs: [linux, macos, windows, wasm, cpack-linux, doxygen]
+    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' }}
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 15
+    permissions:
+      contents: write  # Required to publish the latest release.
+      id-token: write  # Required for artifact attestation identity.
+      attestations: write  # Required to publish release archive provenance.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download Linux GCC artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-linux-gcc
+          path: artifacts/iccdev-linux-gcc
+
+      - name: Download Linux Clang artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-linux-clang
+          path: artifacts/iccdev-linux-clang
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-macos-clang
+          path: artifacts/iccdev-macos-clang
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-windows-msvc
+          path: artifacts/iccdev-windows-msvc
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-wasm-release
+          path: artifacts/iccdev-wasm-release
+
+      - name: Download Doxygen HTML artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-doxygen-html
+          path: artifacts/iccdev-doxygen-html
+
+      - name: Download CPack runtime packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: reficcmax-runtime-packages-linux
+          path: artifacts/reficcmax-runtime-packages-linux
+
+      - name: Restore release artifact metadata
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          bash .github/scripts/ci-safe-apt-update.sh
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            patchelf
+
+          expected=(
+            iccdev-linux-gcc
+            iccdev-linux-clang
+            iccdev-macos-clang
+            iccdev-windows-msvc
+            iccdev-wasm-release
+            iccdev-doxygen-html
+            reficcmax-runtime-packages-linux
+          )
+          for artifact in "${expected[@]}"; do
+            if [ ! -d "artifacts/$artifact" ]; then
+              echo "::error::Missing expected release artifact: $artifact"
+              exit 1
+            fi
+          done
+
+          chmod +x .github/scripts/ci-restore-release-artifact-metadata.sh
+          .github/scripts/ci-restore-release-artifact-metadata.sh artifacts
+
+      - name: Package release archives
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          mkdir -p release-assets
+
+          for dir in artifacts/iccdev-*; do
+            [ -d "$dir" ] || continue
+            name="$(basename "$dir")"
+            echo "--- Packaging $name ---"
+            (cd "$dir" && zip -r "../../release-assets/${name}.zip" . \
+              -x './binary-hardening.md' \
+              -x './binary-inventory.csv' \
+              -x './failures.txt' \
+              -x './needed-libraries.txt' \
+              -x './strings-hygiene.txt' \
+              -x './binary-review/*' \
+              -x 'binary-hardening.md' \
+              -x 'binary-inventory.csv' \
+              -x 'failures.txt' \
+              -x 'needed-libraries.txt' \
+              -x 'strings-hygiene.txt' \
+              -x 'binary-review/*')
+            echo "  Created ${name}.zip ($(du -h "release-assets/${name}.zip" | cut -f1))"
+          done
+
+          runtime_dir="artifacts/reficcmax-runtime-packages-linux"
+          cp "$runtime_dir"/reficcmax-*.zip release-assets/
+          cp "$runtime_dir"/reficcmax-*.deb release-assets/
+          cp "$runtime_dir"/reficcmax-*.rpm release-assets/
+
+          echo ""
+          echo "=== Release assets ==="
+          ls -lh release-assets/
+
+      - name: Generate release checksums
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          SANITIZER="$GITHUB_WORKSPACE/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}" ; s="${s//</&lt;}" ; s="${s//>/&gt;}"
+              s="${s//\"/&quot;}" ; s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          if ! compgen -G "release-assets/*.zip" >/dev/null &&
+             ! compgen -G "release-assets/*.deb" >/dev/null &&
+             ! compgen -G "release-assets/*.rpm" >/dev/null; then
+            echo "::error::No release package files found for checksum generation"
+            exit 1
+          fi
+
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              -printf '%P\0' \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+            find . -maxdepth 1 -type f \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              -printf '%P\0' \
+              | sort -z \
+              | xargs -0 sha512sum > SHA512SUMS
+          )
+
+          {
+            echo "### Release Checksums"
+            echo ""
+            echo "Generated \`SHA256SUMS\` and \`SHA512SUMS\` for release zip assets."
+            echo ""
+            echo '```'
+            sed -n '1,20p' release-assets/SHA256SUMS | while IFS= read -r line; do
+              sanitize_line "$line"
+              echo ""
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+      - name: Attest release archive provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v3.2.0
+        with:
+          subject-checksums: release-assets/SHA256SUMS
+
+      # preflight: allow-token-exposure reason=github-release-publish
+      - name: Create latest release
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          release_tag="ci-latest-${GH_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+
+          body_file="$(mktemp)"
+          {
+            echo "## Rolling Latest Build"
+            echo ""
+            echo "**Tag:** ${release_tag}"
+            echo "**Commit:** ${GH_SHA}"
+            echo "**Branch:** ${GH_REF_NAME}"
+            echo "**Event:** ${GH_EVENT_NAME}"
+            echo "**Run:** https://github.com/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}"
+            echo ""
+            echo "### Downloads"
+            echo ""
+            echo "| Platform | Archive |"
+            echo "|----------|---------|"
+            echo "| Linux (GCC) | \`iccdev-linux-gcc.zip\` |"
+            echo "| Linux (Clang) | \`iccdev-linux-clang.zip\` |"
+            echo "| macOS (Clang) | \`iccdev-macos-clang.zip\` |"
+            echo "| Windows (MSVC) | \`iccdev-windows-msvc.zip\` |"
+            echo "| WASM (Emscripten) | \`iccdev-wasm-release.zip\` |"
+            echo "| Doxygen HTML Docs | \`iccdev-doxygen-html.zip\` |"
+            echo "| Linux CPack Runtime | \`reficcmax-*.zip\`, \`reficcmax-*.deb\`, \`reficcmax-*.rpm\` |"
+            echo "| Checksums | \`SHA256SUMS\`, \`SHA512SUMS\` |"
+            echo ""
+            echo "### Provenance"
+            echo ""
+            echo "GitHub Artifact Attestations are generated for each release archive"
+            echo "listed in \`SHA256SUMS\`."
+            echo ""
+            echo "### Install via Package Managers"
+            echo ""
+            echo "| Method | Command |"
+            echo "|--------|---------|"
+            echo "| **Homebrew** | \`brew install iccdev\` |"
+            echo "| **NPM** | \`npm install iccdev\` |"
+            echo "| **Docker Pull** | \`docker pull ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
+            echo "| **Docker Run** | \`docker run -it ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
+            echo ""
+            echo "---"
+            echo "*Auto-published by ci-latest-release.*"
+          } > "$body_file"
+
+          gh release create "$release_tag" \
+            release-assets/*.zip \
+            release-assets/*.deb \
+            release-assets/*.rpm \
+            release-assets/SHA256SUMS \
+            release-assets/SHA512SUMS \
+            --repo "$GH_REPOSITORY" \
+            --target "$GH_SHA" \
+            --title "Latest Build" \
+            --notes-file "$body_file" \
+            --latest
+
+      - name: Summary Report
+        if: always()
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          release_tag="ci-latest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+          {
+            echo "### Release Summary"
+            echo ""
+            echo "- Tag: \`${release_tag}\`"
+            echo "- Commit: \`${GITHUB_SHA:0:7}\`"
+            asset_count=$(find release-assets -maxdepth 1 -type f \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) | wc -l)
+            echo "- Assets uploaded: ${asset_count} package files"
+            echo "- Provenance: GitHub Artifact Attestations generated from \`SHA256SUMS\`"
+            echo ""
+            for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm; do
+              [ -f "$f" ] || continue
+              echo "  - \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

@@ -68,8 +68,9 @@ Copyright:  (c) see Software License
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 #include <map>
+#include <string>
 
-class CIccMpeXml : public IIccExtensionMpe
+class ICCPROFLIB_API CIccMpeXml : public IIccExtensionMpe
 {
 public:
   virtual ~CIccMpeXml(void) {}
@@ -80,7 +81,7 @@ public:
   virtual const char *GetExtClassName() { return "CIccMpeXml"; }
 };
 
-class CIccMpeXmlUnknown : public CIccMpeUnknown, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlUnknown : public CIccMpeUnknown, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlUnknown() {}
@@ -94,7 +95,7 @@ public:
 };
 
 
-class CIccSegmentedCurveXml : public CIccSegmentedCurve
+class ICCPROFLIB_API CIccSegmentedCurveXml : public CIccSegmentedCurve
 {
 public:
   CIccSegmentedCurveXml() : CIccSegmentedCurve() {}
@@ -107,7 +108,7 @@ public:
 };
 
 
-class CIccMpeXmlCurveSet : public CIccMpeCurveSet, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlCurveSet : public CIccMpeCurveSet, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlCurveSet() {}
@@ -123,7 +124,7 @@ protected:
   //virtual CIccCurveSetCurve* CreateCurve(icCurveElemSignature sig);
 };
 
-class CIccMpeXmlTintArray : public CIccMpeTintArray, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlTintArray : public CIccMpeTintArray, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlTintArray() {}
@@ -136,7 +137,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccXmlToneMapFunc : public CIccToneMapFunc
+class ICCPROFLIB_API CIccXmlToneMapFunc : public CIccToneMapFunc
 {
 public:
   virtual ~CIccXmlToneMapFunc() {}
@@ -149,7 +150,7 @@ public:
   virtual bool ParseXml(xmlNode* pNode, std::string& parseStr);
 };
 
-class CIccMpeXmlToneMap : public CIccMpeToneMap, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlToneMap : public CIccMpeToneMap, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlToneMap() {}
@@ -164,7 +165,7 @@ public:
   virtual bool ParseXml(xmlNode* pNode, std::string& parseStr);
 };
 
-class CIccMpeXmlMatrix : public CIccMpeMatrix, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlMatrix : public CIccMpeMatrix, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlMatrix() {}
@@ -177,7 +178,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlCLUT : public CIccMpeCLUT, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlCLUT : public CIccMpeCLUT, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlCLUT() {}
@@ -190,7 +191,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlExtCLUT : public CIccMpeExtCLUT, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlExtCLUT : public CIccMpeExtCLUT, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlExtCLUT() {}
@@ -203,7 +204,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlBAcs : public CIccMpeBAcs, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlBAcs : public CIccMpeBAcs, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlBAcs() {}
@@ -216,7 +217,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlEAcs : public CIccMpeEAcs, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlEAcs : public CIccMpeEAcs, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlEAcs() {}
@@ -229,7 +230,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlJabToXYZ : public CIccMpeJabToXYZ, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlJabToXYZ : public CIccMpeJabToXYZ, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlJabToXYZ() {}
@@ -242,7 +243,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlXYZToJab : public CIccMpeXYZToJab, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlXYZToJab : public CIccMpeXYZToJab, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlXYZToJab() {}
@@ -264,7 +265,24 @@ public:
   int m_nIndex;
 };
 
-typedef std::map<std::string, CIccMpePtr> MpePtrMap;
+struct CIccXmlStringLess {
+  bool operator()(const std::string &a, const std::string &b) const
+  {
+    std::string::const_iterator ai = a.begin();
+    std::string::const_iterator bi = b.begin();
+
+    for (; ai != a.end() && bi != b.end(); ++ai, ++bi) {
+      if (std::char_traits<char>::lt(*ai, *bi))
+        return true;
+      if (std::char_traits<char>::lt(*bi, *ai))
+        return false;
+    }
+
+    return ai == a.end() && bi != b.end();
+  }
+};
+
+typedef std::map<std::string, CIccMpePtr, CIccXmlStringLess> MpePtrMap;
 typedef std::list<CIccMpePtr> MpePtrList;
 
 class CIccTempVar
@@ -276,10 +294,10 @@ public:
   icUInt16Number m_size;
 };
 
-typedef std::map<std::string, CIccTempVar> TempVarMap;
+typedef std::map<std::string, CIccTempVar, CIccXmlStringLess> TempVarMap;
 typedef std::list<CIccTempVar> TempVarList;
 typedef std::pair<int, int> IndexSizePair;
-typedef std::map<std::string, IndexSizePair> ChanVarMap;
+typedef std::map<std::string, IndexSizePair, CIccXmlStringLess> ChanVarMap;
 
 class CIccTempDeclVar
 {
@@ -293,11 +311,11 @@ public:
   TempVarList m_members;
 };
 
-typedef std::map<std::string, CIccTempDeclVar> TempDeclVarMap;
+typedef std::map<std::string, CIccTempDeclVar, CIccXmlStringLess> TempDeclVarMap;
 
-typedef std::map<std::string, std::string> MacroMap;
+typedef std::map<std::string, std::string, CIccXmlStringLess> MacroMap;
 
-class CIccMpeXmlCalculator : public CIccMpeCalculator, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlCalculator : public CIccMpeCalculator, public CIccMpeXml
 {
 public:
   CIccMpeXmlCalculator() : CIccMpeCalculator() { m_sImport = "*"; }
@@ -320,7 +338,12 @@ protected:
   static bool validName(const char *saName);
   bool ValidMacroCalls(const char *szMacroText, std::string macroStack, std::string &parseStr) const;
   bool ValidateMacroCalls(std::string &parseStr) const;
-  bool Flatten(std::string &flatStr, std::string macroName, const char *szFunc, std::string &parseStr, icUInt32Number nLocalsOffset=0);
+  // CWE-674: nDepth caps macro-call recursion as a defense-in-depth net.
+  // ValidateMacroCalls catches direct cycles via macroStack; nDepth bounds
+  // attacker-crafted long non-cyclic chains and any bypass of validation.
+  // See codeql recursive-parse-no-depth-limit.ql.
+  static const icUInt32Number kMaxFlattenDepth = 256;
+  bool Flatten(std::string &flatStr, std::string macroName, const char *szFunc, std::string &parseStr, icUInt32Number nLocalsOffset=0, icUInt32Number nDepth=0);
   bool UpdateLocals(std::string &func, std::string szFunc, std::string &parseStr, int nLocalsOffset);
   bool ParseChanMap(ChanVarMap& chanMap, const char *szNames, int nChannels);
 
@@ -341,7 +364,7 @@ protected:
   TempDeclVarMap m_macroLocalMap;
 };
 
-class CIccMpeXmlEmissionMatrix : public CIccMpeEmissionMatrix, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlEmissionMatrix : public CIccMpeEmissionMatrix, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlEmissionMatrix() {}
@@ -354,7 +377,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlInvEmissionMatrix : public CIccMpeInvEmissionMatrix, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlInvEmissionMatrix : public CIccMpeInvEmissionMatrix, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlInvEmissionMatrix() {}
@@ -367,7 +390,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlEmissionCLUT : public CIccMpeEmissionCLUT, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlEmissionCLUT : public CIccMpeEmissionCLUT, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlEmissionCLUT() {}
@@ -380,7 +403,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlReflectanceCLUT : public CIccMpeReflectanceCLUT, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlReflectanceCLUT : public CIccMpeReflectanceCLUT, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlReflectanceCLUT() {}
@@ -393,7 +416,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlEmissionObserver : public CIccMpeEmissionObserver, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlEmissionObserver : public CIccMpeEmissionObserver, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlEmissionObserver() {}
@@ -406,7 +429,7 @@ public:
   virtual bool ParseXml(xmlNode *pNode, std::string &parseStr);
 };
 
-class CIccMpeXmlReflectanceObserver : public CIccMpeReflectanceObserver, public CIccMpeXml
+class ICCPROFLIB_API CIccMpeXmlReflectanceObserver : public CIccMpeReflectanceObserver, public CIccMpeXml
 {
 public:
   virtual ~CIccMpeXmlReflectanceObserver() {}

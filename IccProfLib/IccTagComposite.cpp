@@ -76,12 +76,39 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <new>
+#include <map>
 #include "IccTagComposite.h"
 #include "IccStructBasic.h"
 #include "IccUtil.h"
 #include "IccIO.h"
 #include "IccStructFactory.h"
 #include "IccArrayFactory.h"
+
+// Guard against attacker-crafted profiles that nest composite tags
+// (tagArrayType / tagStructType) arbitrarily deep. CIccTagArray::Read and
+// CIccTagStruct::Read each create their element tags (CIccTagCreator::CreateTag
+// / CIccTag::Create) and call pTag->Read() on them; an element may itself be a
+// composite tag, so the two functions mutually recurse (an array of structs of
+// arrays of ...) with one native C++ stack frame per nesting level and only
+// ~24 attacker bytes needed per level. With no depth cap this exhausts the call
+// stack and crashes the process (SIGSEGV) before any validation/describe runs.
+// The existing per-level caps (kMaxArrayEntries, the struct dir-size check)
+// bound the WIDTH of a single level, NOT the nesting DEPTH. A single shared
+// thread_local counter caps both entry points because they recurse into each
+// other. This mirrors the embedded-profile depth guard in IccTagEmbedIcc.cpp
+// (kMaxEmbeddedProfileDepth=8); 30 levels is far beyond any legitimate profile
+// while staying well clear of the smallest (~1 MB Emscripten/wasm) stack.
+namespace {
+  static thread_local int s_compositeTagDepth = 0;
+  static const int kMaxCompositeTagDepth = 30;
+
+  struct CompositeDepthGuard {
+    CompositeDepthGuard()  { ++s_compositeTagDepth; }
+    ~CompositeDepthGuard() { --s_compositeTagDepth; }
+    bool TooDeep() const { return s_compositeTagDepth > kMaxCompositeTagDepth; }
+  };
+}
 
 void IIccStruct::Describe(std::string &sDescription, int nVerboseness) const
 {
@@ -150,30 +177,70 @@ CIccTagStruct::CIccTagStruct(const CIccTagStruct &subTags)
   m_ElemEntries = new(TagEntryList);
   m_ElemVals = new(TagPtrList);
 
-  if (!subTags.m_ElemEntries->empty()) {
-    TagEntryList::const_iterator i;
-    IccTagEntry entry;
-    for (i=subTags.m_ElemEntries->begin(); i!=subTags.m_ElemEntries->end(); i++) {
-      entry.pTag = i->pTag->NewCopy();
-      memcpy(&entry.TagInfo, &i->TagInfo, sizeof(icTag));
-      m_ElemEntries->push_back(entry);
-    }
-  }
-
-  if (!subTags.m_ElemVals->empty()) {
-    TagPtrList::const_iterator i;
-    IccTagPtr tagptr;
-    for (i=subTags.m_ElemVals->begin(); i!=subTags.m_ElemVals->end(); i++) {
-      tagptr.ptr = i->ptr->NewCopy();
-      m_ElemVals->push_back(tagptr);
-    }
-  }
+  CopyElems(subTags);
 
   if (subTags.m_pStruct) {
     m_pStruct = subTags.m_pStruct->NewCopy(this);
   }
   else {
     m_pStruct = NULL;
+  }
+}
+
+/**
+ ******************************************************************************
+ * Name: CIccTagStruct::CopyElems
+ *
+ * Purpose: Deep-copy the element entry and value lists from another struct,
+ *  preserving the ownership invariant that an entry's pTag aliases the
+ *  matching (owned) m_ElemVals pointer.  m_ElemVals owns the tag objects;
+ *  copying each list independently would create a second set of objects
+ *  that Cleanup() never frees.
+ *
+ * Args:
+ *  subTags - source struct to copy elements from
+ ******************************************************************************/
+void CIccTagStruct::CopyElems(const CIccTagStruct &subTags)
+{
+  // Map each source value pointer to its owned copy so the entry list can
+  // alias the same copies instead of allocating leaked duplicates.
+  std::map<CIccTag*, CIccTag*> copyMap;
+
+  if (!subTags.m_ElemVals->empty()) {
+    TagPtrList::const_iterator i;
+    for (i=subTags.m_ElemVals->begin(); i!=subTags.m_ElemVals->end(); i++) {
+      IccTagPtr tagptr;
+      tagptr.ptr = i->ptr ? i->ptr->NewCopy() : NULL;
+      m_ElemVals->push_back(tagptr);
+      copyMap[i->ptr] = tagptr.ptr;
+      if (tagptr.ptr)
+        tagptr.ptr->SetParentObject(this);
+    }
+  }
+
+  if (!subTags.m_ElemEntries->empty()) {
+    TagEntryList::const_iterator i;
+    for (i=subTags.m_ElemEntries->begin(); i!=subTags.m_ElemEntries->end(); i++) {
+      IccTagEntry entry;
+      std::map<CIccTag*, CIccTag*>::iterator f = copyMap.find(i->pTag);
+      if (f != copyMap.end()) {
+        entry.pTag = f->second;   // alias the already-copied (owned) object
+      }
+      else {
+        // Entry not present in the value list; make an owned copy and
+        // register it so Cleanup() frees it.
+        entry.pTag = i->pTag ? i->pTag->NewCopy() : NULL;
+        if (entry.pTag) {
+          IccTagPtr tagptr;
+          tagptr.ptr = entry.pTag;
+          m_ElemVals->push_back(tagptr);
+          copyMap[i->pTag] = entry.pTag;
+          entry.pTag->SetParentObject(this);
+        }
+      }
+      memcpy(&entry.TagInfo, &i->TagInfo, sizeof(icTag));
+      m_ElemEntries->push_back(entry);
+    }
   }
 }
 
@@ -196,26 +263,7 @@ CIccTagStruct &CIccTagStruct::operator=(const CIccTagStruct &subTags)
 
   m_sigStructType = subTags.m_sigStructType;
 
-  if (!subTags.m_ElemEntries->empty()) {
-    m_ElemEntries->clear();
-    TagEntryList::const_iterator i;
-    IccTagEntry entry;
-    for (i=subTags.m_ElemEntries->begin(); i!=subTags.m_ElemEntries->end(); i++) {
-      entry.pTag = i->pTag->NewCopy();
-      memcpy(&entry.TagInfo, &i->TagInfo, sizeof(icTag));
-      m_ElemEntries->push_back(entry);
-    }
-  }
-
-  if (!subTags.m_ElemVals->empty()) {
-    m_ElemVals->clear();
-    TagPtrList::const_iterator i;
-    IccTagPtr tagptr;
-    for (i=subTags.m_ElemVals->begin(); i!=subTags.m_ElemVals->end(); i++) {
-      tagptr.ptr = i->ptr->NewCopy();
-      m_ElemVals->push_back(tagptr);
-    }
-  }
+  CopyElems(subTags);
 
   if (subTags.m_pStruct)
     m_pStruct = subTags.m_pStruct->NewCopy(this);
@@ -241,9 +289,7 @@ CIccTagStruct::~CIccTagStruct()
 
   delete m_ElemEntries;
   delete m_ElemVals;
-
-  if (m_pStruct)
-    delete m_pStruct;
+  delete m_pStruct;
 }
 
 
@@ -259,8 +305,7 @@ CIccTagStruct::~CIccTagStruct()
  ******************************************************************************/
 bool CIccTagStruct::SetTagStructType(icStructSignature sig)
 {
-  if (m_pStruct)
-    delete m_pStruct;
+  delete m_pStruct;
 
   m_sigStructType = sig;
   m_pStruct = CIccStructCreator::CreateStruct(m_sigStructType, this);
@@ -285,7 +330,9 @@ CIccTagStruct* CIccTagStruct::ParseMem(icUInt8Number *pMem, icUInt32Number size)
   if (!IO.Attach(pMem, size))
     return NULL;
 
-  CIccTagStruct *pTags = new CIccTagStruct;
+  CIccTagStruct *pTags = new (std::nothrow) CIccTagStruct;
+  if (!pTags)
+    return NULL;
 
   if (!pTags->Read(size, &IO)) {
     delete pTags;
@@ -346,6 +393,13 @@ void CIccTagStruct::Describe(std::string &sDescription, int nVerboseness)
  ******************************************************************************/
 bool CIccTagStruct::Read(icUInt32Number size, CIccIO *pIO)
 {
+  // Bound recursion depth across the array<->struct composite Read paths
+  // (see CompositeDepthGuard above): a struct element may be another struct
+  // or array, so LoadElem -> pTag->Read can re-enter here unboundedly.
+  CompositeDepthGuard depthGuard;
+  if (depthGuard.TooDeep())
+    return false;
+
   icTagTypeSignature sig;
 
   m_tagSize = size;
@@ -358,13 +412,17 @@ bool CIccTagStruct::Read(icUInt32Number size, CIccIO *pIO)
   if (headerSize > size)
     return false;
 
-  if (!pIO) {
+  if (!pIO)
     return false;
-  }
 
   Cleanup();
 
   m_tagStart = (icUInt32Number) pIO->Tell();
+  
+  // Make sure the tag size is somewhat reasonable
+  // NOTE - ccox - it would be nice to cache the file length instead of calculating it per tag
+  if (size > pIO->GetLength())
+    return false;
 
   if (!pIO->Read32(&sig))
     return false;
@@ -400,15 +458,12 @@ bool CIccTagStruct::Read(icUInt32Number size, CIccIO *pIO)
     m_ElemEntries->push_back(TagEntry);
   }
 
-  TagEntryList::iterator entry;
-
-  for (entry=m_ElemEntries->begin(); entry!=m_ElemEntries->end(); entry++) {
-    if (!LoadElem((IccTagEntry*)&(entry->TagInfo), pIO)) {
+  for (auto entry : *m_ElemEntries ) {
+    if (!LoadElem(&entry, pIO)) {
       Cleanup();
       return false;
     }
   }
-
 
   return true;
 }
@@ -562,14 +617,15 @@ void CIccTagStruct::Cleanup()
   TagPtrList::iterator i;
 
   for (i=m_ElemVals->begin(); i!=m_ElemVals->end(); i++) {
-    if (i->ptr)
+    if (i->ptr) {
+      i->ptr->SetParentObject(nullptr);
       delete i->ptr;
+    }
   }
   m_ElemEntries->clear();
   m_ElemVals->clear();
 
-  if (m_pStruct)
-    delete m_pStruct;
+  delete m_pStruct;
   m_pStruct = NULL;
   m_sigStructType = icSigUndefinedStruct;
 }
@@ -784,6 +840,7 @@ bool CIccTagStruct::AttachElem(icSignature sig, CIccTag *pTag)
     IccTagPtr TagPtr;
     TagPtr.ptr = pTag;
     m_ElemVals->push_back(TagPtr);
+    pTag->SetParentObject(this);
   }
 
   return true;
@@ -857,9 +914,11 @@ bool CIccTagStruct::LoadElem(IccTagEntry *pTagEntry, CIccIO *pIO)
     sizeof(icUInt32Number) + 
     sizeof(icUInt32Number);
 
-  if (pTagEntry->TagInfo.offset<headerSize ||
+  // make sure we avoid 32 bit overflow when calculating the size to be read
+  size_t temp = pTagEntry->TagInfo.offset + (size_t)pTagEntry->TagInfo.size;
+  if (pTagEntry->TagInfo.offset < headerSize ||
       !pTagEntry->TagInfo.size ||
-      pTagEntry->TagInfo.offset+pTagEntry->TagInfo.size > m_tagSize) {
+      temp > (size_t)m_tagSize) {
     return false;
   }
 
@@ -899,6 +958,7 @@ bool CIccTagStruct::LoadElem(IccTagEntry *pTagEntry, CIccIO *pIO)
   TagPtr.ptr = pTag;
 
   m_ElemVals->push_back(TagPtr);
+  pTag->SetParentObject(this);
 
   TagEntryList::iterator i;
 
@@ -1030,17 +1090,27 @@ CIccTagArray::CIccTagArray(icArraySignature sigArrayType/* =icSigUndefinedArray 
 ******************************************************************************/
 CIccTagArray::CIccTagArray(const CIccTagArray &tagAry)
 {
-  if (tagAry.m_nSize) {
-    m_TagVals = new IccTagPtr[tagAry.m_nSize];
+  m_TagVals = NULL;
+  m_nSize = 0;
+  // CWE-400/CWE-834: a well-formed source satisfies m_nSize == allocated
+  // (m_TagVals), with m_nSize bounded by Read()'s 2^20 entry cap and matched
+  // by SetSize(). Clamp the copy to the same explicit upper limit Describe()
+  // and Cleanup() use, and walk the clamped local rather than the field, so a
+  // corrupted source count can't drive an unbounded allocation/copy here. Real
+  // arrays (<= 2^20 from Read) are always below this bound and never clamped.
+  const icUInt32Number nMaxArrayEntries = 0xffffff;
+  icUInt32Number nCopy = (tagAry.m_nSize > nMaxArrayEntries) ? nMaxArrayEntries : tagAry.m_nSize;
+  if (nCopy) {
+    m_TagVals = new IccTagPtr[nCopy];
 
     icUInt32Number i;
-    for (i=0; i<tagAry.m_nSize; i++) {
+    for (i=0; i<nCopy; i++) {
       if (tagAry.m_TagVals[i].ptr)
         m_TagVals[i].ptr = tagAry.m_TagVals[i].ptr->NewCopy();
       else
         m_TagVals[i].ptr = NULL;
     }
-    m_nSize = tagAry.m_nSize;
+    m_nSize = nCopy;
   }
   m_sigArrayType = tagAry.m_sigArrayType;
 
@@ -1067,17 +1137,26 @@ CIccTagArray &CIccTagArray::operator=(const CIccTagArray &tagAry)
 
   Cleanup();
 
-  if (tagAry.m_nSize) {
-    m_TagVals = new IccTagPtr[tagAry.m_nSize];
+  m_TagVals = NULL;
+  m_nSize = 0;
+  // CWE-400/CWE-834: mirror the copy-constructor guard above - clamp the copy
+  // to the same explicit upper limit Describe()/Cleanup() use and walk the
+  // clamped local rather than the field, so a corrupted source count can't
+  // drive an unbounded allocation/copy. Real arrays (<= 2^20 from Read) never
+  // reach this bound.
+  const icUInt32Number nMaxArrayEntries = 0xffffff;
+  icUInt32Number nCopy = (tagAry.m_nSize > nMaxArrayEntries) ? nMaxArrayEntries : tagAry.m_nSize;
+  if (nCopy) {
+    m_TagVals = new IccTagPtr[nCopy];
 
     icUInt32Number i;
-    for (i=0; i<m_nSize; i++) {
+    for (i=0; i<nCopy; i++) {
       if (tagAry.m_TagVals[i].ptr)
         m_TagVals[i].ptr = tagAry.m_TagVals[i].ptr->NewCopy();
       else
         m_TagVals[i].ptr = NULL;
     }
-    m_nSize = tagAry.m_nSize;
+    m_nSize = nCopy;
   }
 
   m_sigArrayType = tagAry.m_sigArrayType;
@@ -1122,8 +1201,7 @@ CIccTagArray::~CIccTagArray()
 ******************************************************************************/
 bool CIccTagArray::SetTagArrayType(icArraySignature sig)
 {
-  if (m_pArray)
-    delete m_pArray;
+  delete m_pArray;
 
   m_sigArrayType = sig;
   m_pArray = CIccArrayCreator::CreateArray(m_sigArrayType, this);
@@ -1182,16 +1260,23 @@ void CIccTagArray::Describe(std::string &sDescription, int nVerboseness)
 
   icUInt32Number i;
 
+  // CWE-400/CWE-834: Read() bounds m_nSize by the tag byte size (count*sizeof
+  // (icPositionNumber) <= size) and SetSize() allocates m_TagVals to match; assert
+  // an explicit upper limit so the describe walk can't run unbounded.
+  const icUInt32Number nMaxArrayEntries = 0xffffff;
+  if (m_nSize > nMaxArrayEntries)
+    return;
+
   for (i=0; i<m_nSize; i++) {
     if (i)
       sDescription += "\n";
-    snprintf(buf, bufSize, "BEGIN INDEX[%d]\n", i);
+    snprintf(buf, bufSize, "BEGIN INDEX[%u]\n", (unsigned int) i);
     sDescription +=  buf;
     
     if (m_TagVals[i].ptr) {
       m_TagVals[i].ptr->Describe(sDescription, nVerboseness);
     }
-    snprintf(buf, bufSize, "END INDEX[%d]\n", i);
+    snprintf(buf, bufSize, "END INDEX[%u]\n", (unsigned int) i);
     sDescription += buf;
   }
 
@@ -1214,9 +1299,17 @@ void CIccTagArray::Describe(std::string &sDescription, int nVerboseness)
 ******************************************************************************/
 bool CIccTagArray::Read(icUInt32Number size, CIccIO *pIO)
 {
+  // Bound recursion depth across the array<->struct composite Read paths
+  // (see CompositeDepthGuard above): an array element may be another array
+  // or struct, so the CreateTag + pTag->Read loop below can re-enter here
+  // unboundedly on a deeply-nested tagArrayType chain.
+  CompositeDepthGuard depthGuard;
+  if (depthGuard.TooDeep())
+    return false;
+
   icTagTypeSignature sig;
 
-  icUInt32Number headerSize = sizeof(icTagTypeSignature) + 
+  icUInt32Number headerSize = sizeof(icTagTypeSignature) +
     sizeof(icUInt32Number) +
     sizeof(icTagTypeSignature) +
     sizeof(icStructSignature) +
@@ -1249,11 +1342,22 @@ bool CIccTagArray::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read32(&count))
     return false;
 
-  if (headerSize + count*sizeof(icPositionNumber) > size)
+  // 64-bit widened bounds check so attacker-controlled `count` can't
+  // wrap the multiplication on wasm32 (size_t == u32) and bypass the
+  // guard before `new icPositionNumber[count]` is attempted. Mirror
+  // the u64 pattern already in CIccTagStruct::Read above.
+  static const icUInt32Number kMaxArrayEntries = 0x100000;  // 2^20
+  if (count > kMaxArrayEntries)
+    return false;
+  icUInt64Number tableBytes =
+      static_cast<icUInt64Number>(count) * sizeof(icPositionNumber);
+  if (static_cast<icUInt64Number>(headerSize) + tableBytes > size)
     return false;
 
   if (count) {
-    icPositionNumber *tagPos = new icPositionNumber[count];
+    icPositionNumber *tagPos = new (std::nothrow) icPositionNumber[count];
+    if (!tagPos)
+      return false;
 
     if (!SetSize(count)) {
       delete[] tagPos;
@@ -1283,19 +1387,23 @@ bool CIccTagArray::Read(icUInt32Number size, CIccIO *pIO)
         m_TagVals[i].ptr = m_TagVals[j].ptr;
       }
       else {
-        if (tagPos[i].offset + tagPos[i].size > size) {
+        if (tagPos[i].size > size || tagPos[i].offset > size - tagPos[i].size) {
           delete [] tagPos;
           return false;
         }
         pIO->Seek(nTagStart + tagPos[i].offset, icSeekSet);
 
         icTagTypeSignature tagSig;
-        pIO->Read32(&tagSig);
+        if (!pIO->Read32(&tagSig)) {
+          delete [] tagPos;
+          return false;
+        }
         pIO->Seek(nTagStart + tagPos[i].offset, icSeekSet);
 
         CIccTag *pTag = CIccTagCreator::CreateTag(tagSig);
         if (pTag) {
           if (!pTag->Read(tagPos[i].size, pIO)) {
+            delete pTag;
             delete [] tagPos;
             return false;
           }
@@ -1356,7 +1464,7 @@ bool CIccTagArray::Write(CIccIO *pIO)
       if (!pIO->Write32(&zero) || !pIO->Write32(&zero))
         return false;
     }
-    icPositionNumber *tagPos = new icPositionNumber[m_nSize];
+    icPositionNumber *tagPos = new (std::nothrow) icPositionNumber[m_nSize];
     if (!tagPos)
       return false;
 
@@ -1370,7 +1478,7 @@ bool CIccTagArray::Write(CIccIO *pIO)
 
         if (j<i) {
           tagPos[i].offset = tagPos[j].offset;
-          tagPos[i].size = tagPos[j].offset;
+          tagPos[i].size = tagPos[j].size;
         }
         else {
           tagPos[i].offset = (icUInt32Number)(pIO->Tell() - nTagStart);
@@ -1419,22 +1527,32 @@ bool CIccTagArray::Write(CIccIO *pIO)
 bool CIccTagArray::SetSize(icUInt32Number nSize)
 {
   if (!m_nSize) {
-    m_TagVals = (IccTagPtr*)calloc(nSize, sizeof(IccTagPtr));
-    if (!m_TagVals) {
-      m_nSize =0;
-      return false;
-    }
-  }
-  else {
-    if (nSize<=m_nSize)
-      return true;
-
-    m_TagVals = (IccTagPtr*)icRealloc(m_TagVals, nSize*sizeof(IccTagPtr));
+    m_TagVals = new (std::nothrow) IccTagPtr[nSize];
     if (!m_TagVals) {
       m_nSize = 0;
       return false;
     }
-    memset(&m_TagVals[m_nSize], 0, (nSize-m_nSize)*sizeof(IccTagPtr));
+    memset(m_TagVals, 0, nSize*sizeof(IccTagPtr));
+  }
+  else {
+    if (nSize<=m_nSize)
+      return true;
+      
+    // We need to grow the array, and keep the existing values.
+    // This would be much easier with a std::vector
+    auto oldArray = m_TagVals;
+    m_TagVals = new (std::nothrow) IccTagPtr[nSize];
+    if (!m_TagVals) {
+      delete[] oldArray;
+      m_nSize = 0;
+      return false;
+    }
+    // copy old values
+    memcpy( m_TagVals, oldArray, m_nSize*sizeof(IccTagPtr) );
+    // zero newly added values
+    memset( &m_TagVals[m_nSize], 0, (nSize-m_nSize)*sizeof(IccTagPtr) );
+    // delete old array (does NOT delete values)
+    delete[] oldArray;
   }
   m_nSize = nSize;
   return true;
@@ -1459,33 +1577,73 @@ icValidateStatus CIccTagArray::Validate(std::string sigPath, std::string &sRepor
   CIccInfo Info;
   std::string sigAryPath = sigPath + icGetSigPath(m_sigArrayType);
 
-  if (m_pArray) {  //Should call GetArrayHandler before validate to get 
+  // CWE-400/CWE-834: m_nSize is bounded by Read()'s 2^20 entry cap and matched
+  // by SetSize(), but assert the same explicit upper limit Describe()/Cleanup()
+  // use before the element-validation walks below, so a corrupted count can't
+  // drive them unbounded. A count this large only arises from corruption (Read
+  // caps well below it), so report it as a critical error rather than walking.
+  const icUInt32Number nMaxArrayEntries = 0xffffff;
+  if (m_nSize > nMaxArrayEntries) {
+    sReport += icMsgValidateCriticalError;
+    sReport += Info.GetSigPathName(sigPath);
+    sReport += " - Tag array entry count exceeds sane maximum.\n";
+    return icMaxStatus(rv, icValidateCriticalError);
+  }
+
+  if (m_pArray) {  //Should call GetArrayHandler before validate to get
     rv = icMaxStatus(rv, m_pArray->Validate(sigPath, sReport, pProfile));
   }
   else if (m_sigArrayType==icSigUtf8TextTypeArray) { //UTF8 text arrays are known
     //Check # of channels 
-    if (icGetFirstSigPathSig(sigPath) == icSigMaterialTypeArrayTag && 
+    if (icGetFirstSigPathSig(sigPath) == icSigMultiplexTypeArrayTag && 
         pProfile &&
-        m_nSize != icGetMaterialColorSpaceSamples(pProfile->m_Header.mcs)) {
+        m_nSize != icGetMultiplexColorSpaceSamples(pProfile->m_Header.mcs)) {
       std::string sSigPathName = Info.GetSigPathName(sigPath);
 
       sReport += icMsgValidateCriticalError;
       sReport += sSigPathName;
-      sReport += " - Number of material channel names does not match MCS in header.\n";
+      sReport += " - Number of multiplex channel names does not match MCS in header.\n";
       rv = icMaxStatus(rv, icValidateCriticalError);
     }
     icUInt32Number i;
     for (i=0; i<m_nSize; i++) {
-      rv = icMaxStatus(rv, m_TagVals[i].ptr->Validate(sigAryPath, sReport, pProfile));
+      // m_TagVals[i].ptr is NULL for sparse array slots - Read() stores NULL
+      // for entries with zero offset/size (a spec-legal empty slot) - so guard
+      // the deref as Describe()/Write()/Cleanup() already do; without it,
+      // validating a sparse or malformed array crashes on a NULL deref.
+      if (m_TagVals[i].ptr) {
+        // #1726: every element of a utf8TextTypeArray must itself be a utf8Type
+        // text tag. This is kept strict (utf8Type only, not the zip-compressed
+        // zut8Type) to agree with the MCS runtime: CIccPcsXform::Connect requires
+        // AreAllOfType(icSigUtf8TextType) and casts each entry to CIccTagUtf8Text
+        // (IccCmm.cpp), so an array we declared conformant while carrying a zut8Type
+        // element could never actually form an MCS link. Flag a wrong element type,
+        // reporting the offending index, before recursing into its own Validate.
+        icTagTypeSignature elemType = m_TagVals[i].ptr->GetType();
+        if (elemType != icSigUtf8TextType) {
+          char buf[128];
+          snprintf(buf, sizeof(buf),
+                   " - UTF-8 text array element at index %u is not a utf8Type text tag.\n",
+                   (unsigned int)i);
+          sReport += icMsgValidateCriticalError;
+          sReport += Info.GetSigPathName(sigPath);
+          sReport += buf;
+          rv = icMaxStatus(rv, icValidateCriticalError);
+        }
+        rv = icMaxStatus(rv, m_TagVals[i].ptr->Validate(sigAryPath, sReport, pProfile));
+      }
     }
   }
-  else { 
+  else {
     icUInt32Number i;
     sReport += "Unknown tag array type - Validating array sub-tags\n";
     rv = icMaxStatus(rv, icValidateWarning);
 
     for (i=0; i<m_nSize; i++) {
-      rv = icMaxStatus(rv, m_TagVals[i].ptr->Validate(sigAryPath, sReport, pProfile));
+      // Same sparse-slot guard as the UTF8 branch above: a NULL element is a
+      // legal empty slot from Read(), not a deref target.
+      if (m_TagVals[i].ptr)
+        rv = icMaxStatus(rv, m_TagVals[i].ptr->Validate(sigAryPath, sReport, pProfile));
     }
   }
 
@@ -1504,25 +1662,31 @@ void CIccTagArray::Cleanup()
   icUInt32Number i, j;
   CIccTag* pTag;
 
-  for (i=0; i<m_nSize; i++) {
+  // CWE-400/CWE-834: m_TagVals is allocated to m_nSize by SetSize() (count bounded
+  // by the tag byte size in Read); clamp the cleanup walks to that bound so a
+  // corrupted count can't drive an unbounded or out-of-range walk.
+  const icUInt32Number nMaxArrayEntries = 0xffffff;
+  icUInt32Number nSize = (m_nSize > nMaxArrayEntries) ? nMaxArrayEntries : m_nSize;
+
+  for (i=0; i<nSize; i++) {
     pTag = m_TagVals[i].ptr;
     if (pTag) {
-      for (j=i+1; j<m_nSize; j++) {
+      for (j=i+1; j<nSize; j++) {
         if (m_TagVals[j].ptr == pTag)
           m_TagVals[j].ptr = NULL;
       }
+      pTag->SetParentObject(nullptr);
       delete pTag;
       m_TagVals[i].ptr = NULL;
     }
   }
 
-  if (m_TagVals)
-    free(m_TagVals);
+  delete[] m_TagVals;
   m_TagVals = nullptr;
 
-  if (m_pArray)
-    delete m_pArray;
+  m_nSize = 0;
 
+  delete m_pArray;
   m_pArray = NULL;
   m_sigArrayType = icSigUndefinedArray;
 }
@@ -1542,7 +1706,13 @@ void CIccTagArray::Cleanup()
 */
 CIccTag* CIccTagArray::GetIndex(icUInt32Number nIndex) const
 {
-  if (nIndex>m_nSize)
+  // Two bugs: `>` should be `>=` (reads one past array), and m_TagVals
+  // can be NULL when SetSize(0) was never called (Read guards SetSize
+  // behind `if (count)` at ~line 1262; zero-length array leaves the
+  // pointer at its default NULL). CIccArrayNamedColor::Begin /
+  // FindColor call GetIndex(0) unconditionally, so this is reachable
+  // from CMM apply time.
+  if (!m_TagVals || nIndex>=m_nSize)
     return NULL;
 
   return m_TagVals[nIndex].ptr;
@@ -1573,6 +1743,7 @@ bool CIccTagArray::AttachTag(icUInt32Number nIndex, CIccTag *pTag)
   }
 
   m_TagVals[nIndex].ptr = pTag;
+  pTag->SetParentObject(this);
   return true;
 }
 
@@ -1598,6 +1769,9 @@ CIccTag * CIccTagArray::DetachTag(icUInt32Number nIndex, bool bDeleteFlag)
 
    CIccTag *rv = m_TagVals[nIndex].ptr;
    m_TagVals[nIndex].ptr = NULL;
+
+   if (rv)
+     rv->SetParentObject(nullptr);
 
    if (bDeleteFlag) {
      delete rv;
@@ -1644,6 +1818,9 @@ IIccStruct *icGetTagStructHandler(CIccTag *pTag)
 
 IIccStruct *icGetTagStructHandlerOfType(CIccTag* pTag, icStructSignature sig)
 {
+  if (!pTag)
+    return NULL;
+
   if (pTag->GetTagStructType()==sig)
     return icGetTagStructHandler(pTag);
 
@@ -1664,9 +1841,11 @@ IIccArray *icGetTagArrayHandler(CIccTag *pTag)
 
 IIccArray *icGetTagArrayHandlerOfType(CIccTag* pTag, icArraySignature sig)
 {
+  if (!pTag)
+    return NULL;
+
   if (pTag->GetTagArrayType()==sig)
     return icGetTagArrayHandler(pTag);
 
   return NULL;
 }
-

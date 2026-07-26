@@ -70,6 +70,8 @@
 
 #include "IccCmmSearch.h"
 
+#include <cmath>
+
 
 CIccApplyCmmSearch::CIccApplyCmmSearch(CIccCmm* pBaseCmm) : CIccApplyCmm(pBaseCmm)
 {
@@ -78,12 +80,20 @@ CIccApplyCmmSearch::CIccApplyCmmSearch(CIccCmm* pBaseCmm) : CIccApplyCmm(pBaseCm
   m_nApply = pCmm->m_pcc.size();
   if (!m_nApply)
     m_nApply = 1;
+  if (m_nApply > pCmm->m_dst_to_mid.size())
+    m_nApply = (size_t)pCmm->m_dst_to_mid.size();
 
   m_nSamples = pCmm->m_dst_to_mid[0]->GetDestSamples();
   icUInt16Number nSrcSamples = pCmm->m_dst_to_mid[0]->GetSourceSamples();
 
   m_mid_data.resize(m_nApply);
-  for (size_t i = 0; i < m_nApply; i++) {
+  // CWE-400/CWE-834: m_nApply is derived from the host-attached PCC container
+  // sizes (m_pcc/m_dst_to_mid), not a profile field, and is already bounded to
+  // m_dst_to_mid.size() above; clamp the per-entry allocation walk to the actual
+  // m_mid_data allocation as well so a corrupted count can never run out of
+  // range -- mirrors the defensive clamps on the Apply() walks below.
+  size_t nApply = (m_nApply < m_mid_data.size()) ? m_nApply : m_mid_data.size();
+  for (size_t i = 0; i < nApply; i++) {
     m_mid_data[i].resize(m_nSamples);
   }
   m_pixel.resize(m_nSamples);
@@ -108,7 +118,19 @@ icFloatNumber CIccApplyCmmSearch::costFunc(CIccSearchVec& point)
 {
   CIccCmmSearch* pCmm = (CIccCmmSearch*)m_pCmm;
   icFloatNumber sum = 0.0;
-  for (size_t i = 0; i < m_nApply; i++) {
+  icFloatNumber div = 0.0;
+  // CWE-400/CWE-834: the cost walk indexes three parallel containers
+  // (m_dst_to_mid, m_mid_data, m_weight) by i; by construction all are
+  // >= m_nApply, but clamp to the smallest so a corrupted m_nApply can never
+  // index any of them out of range -- same guard form as Apply() above.
+  size_t nApply = m_nApply;
+  if (nApply > pCmm->m_dst_to_mid.size())
+    nApply = pCmm->m_dst_to_mid.size();
+  if (nApply > m_mid_data.size())
+    nApply = m_mid_data.size();
+  if (nApply > pCmm->m_weight.size())
+    nApply = pCmm->m_weight.size();
+  for (size_t i = 0; i < nApply; i++) {
     pCmm->m_dst_to_mid[i]->Apply(&m_pixel[0], &point.vec()[0]);
 
     if (m_bNeedPcsToLab) {
@@ -120,8 +142,9 @@ icFloatNumber CIccApplyCmmSearch::costFunc(CIccSearchVec& point)
       difSum += sq(m_pixel[j] - m_mid_data[i][j]);
     }
     sum += sqrt(difSum) * pCmm->m_weight[i];
+    div += pCmm->m_weight[i];
   }
-  return sum;
+  return sum / div;
 }
 
 bool CIccApplyCmmSearch::boundsCheck(const CIccSearchVec& point, icFloatNumber& boundsCost) const
@@ -150,7 +173,7 @@ bool CIccApplyCmmSearch::boundsCheck(const CIccSearchVec& point, icFloatNumber& 
       }
       else if (v > m_maxBounds[i]) {
         rv = true;
-        boundsCost += sq(m_maxBounds[i] - 1.0f);
+        boundsCost += sq(v - m_maxBounds[i]);
       }
     }
   }
@@ -164,13 +187,22 @@ icStatusCMM CIccApplyCmmSearch::Apply(icFloatNumber* DstPixel, const icFloatNumb
 {
   CIccCmmSearch* pCmm = (CIccCmmSearch*)m_pCmm;
 
-    if (!pCmm->m_src_to_mid.size()) { //src == mid so copy pixel data into mid search pixels
-    for (size_t i = 0; i < m_nApply; i++) {
+  if (!pCmm->m_src_to_mid.size()) { //src == mid so copy pixel data into mid search pixels
+    // CWE-400/CWE-834: m_nApply is set from container sizes at Begin() and bounds
+    // the m_mid_data walk; clamp to the actual allocation so a corrupted count
+    // can't drive an unbounded or out-of-range walk.
+    size_t nApply = (m_nApply < m_mid_data.size()) ? m_nApply : m_mid_data.size();
+    for (size_t i = 0; i < nApply; i++) {
       memcpy(&m_mid_data[i][0], SrcPixel, m_nSamples*sizeof(icFloatNumber));
     }
   }
   else {
-    for (size_t i = 0; i < m_nApply; i++) {
+    // CWE-400/CWE-834: clamp to the smaller of m_nApply and the indexed containers
+    // so neither the m_mid_data nor the m_src_to_mid walk can run out of range.
+    size_t nApply = (m_nApply < m_mid_data.size()) ? m_nApply : m_mid_data.size();
+    if (nApply > pCmm->m_src_to_mid.size())
+      nApply = pCmm->m_src_to_mid.size();
+    for (size_t i = 0; i < nApply; i++) {
       pCmm->m_src_to_mid[i]->Apply(&m_mid_data[i][0], SrcPixel);
     }
   }
@@ -179,7 +211,10 @@ icStatusCMM CIccApplyCmmSearch::Apply(icFloatNumber* DstPixel, const icFloatNumb
 
   //Cost function needs delteEab so convert from PCS encoding to Lab for comparisons
   if (m_bNeedPcsToLab) {
-    for (size_t i = 0; i < m_nApply; i++) {
+    // CWE-400/CWE-834: same clamp as the m_mid_data walks above -- bound the
+    // Lab conversion to the actual allocation rather than the raw m_nApply.
+    size_t nApply = (m_nApply < m_mid_data.size()) ? m_nApply : m_mid_data.size();
+    for (size_t i = 0; i < nApply; i++) {
       icLabFromPcs(&m_mid_data[i][0]);
     }
   }
@@ -206,6 +241,23 @@ icStatusCMM CIccApplyCmmSearch::Apply(icFloatNumber* DstPixel, const icFloatNumb
   return icCmmStatOk;
 }
 
+icStatusCMM CIccApplyCmmSearch::GetApplyCost(icFloatNumber& dCost, const icFloatNumber* SrcPixel)
+{
+  CIccCmmSearch* pCmm = (CIccCmmSearch*)m_pCmm;
+  icUInt32Number nDstSamples = pCmm->GetDestSamples();
+
+  // Find device values that best match the SrcPixel
+  std::vector<icFloatNumber> dstPixel(nDstSamples, 0);
+  icStatusCMM rv = Apply(&dstPixel[0], SrcPixel);
+  if (rv != icCmmStatOk) 
+    return rv;
+
+  // costFunc reads m_pixel/m_mid_data/etc. set up by the preceding Apply().
+  // Evaluate it at the found device-value point and return that cost.
+  CIccSearchVec point(dstPixel);
+  dCost = costFunc(point);
+  return icCmmStatOk;
+}
 
 CIccCmmSearch::CIccCmmSearch(bool bUsesBounds, icFloatNumber overBoundsCost, const icFloatVector &minBounds, const icFloatVector &maxBounds)
 {
@@ -217,14 +269,14 @@ CIccCmmSearch::CIccCmmSearch(bool bUsesBounds, icFloatNumber overBoundsCost, con
 
 CIccCmmSearch::~CIccCmmSearch()
 {
-  if (m_pSrcProfile)
-    delete m_pSrcProfile;
+  delete m_pSrcProfile;
+  delete m_pMidProfile;
+  delete m_pDstProfile;
+  delete m_pDstInitProfile;
 
-  if (m_pMidProfile)
-    delete m_pMidProfile;
-
-  if (m_pDstProfile)
-    delete m_pDstProfile;
+  for (auto pPcc : m_pcc) {
+    delete pPcc;
+  }
 }
 
 //virtual CIccPCS *GetPCS() { return new CIccPCS(); }
@@ -238,8 +290,16 @@ icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
   bool bUseD2BxB2DxTags,
   CIccCreateXformHintManager* /* pHintManager */)
 {
-  if (pProfile->m_Header.deviceClass == icSigNamedColorClass)
+  // This override owns pProfile on every path, matching the base
+  // CIccCmm::AddXform contract (#1327): the successful cases below store it and
+  // ~CIccCmmSearch frees it, while every rejection deletes it here.  Callers
+  // (the filename and reference AddXform overloads) therefore never free it
+  // themselves.  A NamedColor profile has no search LUT, so reject it -- and
+  // free it, as the default case below already does (#1332).
+  if (pProfile->m_Header.deviceClass == icSigNamedColorClass) {
+    delete pProfile;
     return icCmmStatInvalidLut;
+  }
 
   switch (m_nAttached) {
   case 0:
@@ -297,6 +357,9 @@ void CIccCmmSearch::SetDstInitProfile(CIccProfile* pProfile,
 
 icStatusCMM CIccCmmSearch::AttachPCC(IIccProfileConnectionConditions* pPCC, icFloatNumber dWeight)
 {
+  if (!pPCC || !std::isfinite(dWeight) || dWeight <= 0.0f)
+    return icCmmStatBadXform;
+
   m_pcc.push_back(pPCC);
   m_weight.push_back(dWeight);
 
@@ -335,7 +398,7 @@ icStatusCMM CIccCmmSearch::Begin(bool /* bAllocNewApply */, bool /* bUsePcsConve
 
     //dst_to_mid
     cmm = CIccCmmPtr(new CIccCmm);
-    rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nSrcInterp, m_pcc.size() ? m_pcc[0] : m_pDstPcc, m_nSrcLutType, m_bDstUseD2BxB2DxTags);
+    rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nDstInterp, m_pcc.size() ? m_pcc[0] : m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags);
     checkCmmStatus(rv);
 
     rv = cmm->AddXform(*m_pSrcProfile, m_nSrcIntent, m_nSrcInterp, m_pcc.size() ? m_pcc[0] : m_pSrcPcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags);
@@ -450,3 +513,13 @@ icStatusCMM CIccCmmSearch::RemoveAllIO()
   return icCmmStatOk;
 }
 
+icStatusCMM CIccCmmSearch::GetApplyCost(icFloatNumber& dCost, const icFloatNumber* SrcPixel)
+{
+  dCost = -1;
+  if (!m_bValid || !m_pApply)
+    return icCmmStatBad;
+
+  CIccApplyCmmSearch* pApply = static_cast<CIccApplyCmmSearch*>(m_pApply);
+
+  return pApply->GetApplyCost(dCost, SrcPixel);
+}

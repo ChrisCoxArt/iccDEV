@@ -85,13 +85,17 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
   const size_t bufSize = 256;
   char line[bufSize];
   char buf[bufSize];
-  char fix[bufSize];
+  std::string fix;
   size_t n;
   bool nonzero;
 
   xml += blanks + "<IccProfile>\n";
   xml += blanks + "  <Header>\n";
-  snprintf(line, bufSize, "    <PreferredCMMType>%s</PreferredCMMType>\n", icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.cmmId)));
+  // Guard every zero header signature the same way as the data colour space /
+  // PCS below (and the JSON serializer): icGetSig*(0) emits the literal "NULL",
+  // which icGetSigVal("NULL") reparses to 0x4E554C4C, corrupting a legitimately
+  // zero PreferredCMMType on round-trip. Emit an empty element for zero instead.
+  snprintf(line, bufSize, "    <PreferredCMMType>%s</PreferredCMMType>\n", m_Header.cmmId ? icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.cmmId)) : "");
   xml += blanks + line;
   snprintf(line, bufSize, "    <ProfileVersion>%s</ProfileVersion>\n", info.GetVersionName(m_Header.version));
   xml += blanks + line;
@@ -99,7 +103,9 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
     snprintf(line, bufSize,"    <ProfileSubClassVersion>%s</ProfileSubClassVersion>\n", info.GetSubClassVersionName(m_Header.version));
     xml += blanks + line;
   }
-  snprintf(line, bufSize, "    <ProfileDeviceClass>%s</ProfileDeviceClass>\n", icFixXml(fix, icGetSigStr(buf, bufSize, m_Header.deviceClass)));
+  // Guard the zero case as above so a zero device class round-trips as 0 rather
+  // than being corrupted to 0x4E554C4C via the "NULL" text encoding.
+  snprintf(line, bufSize, "    <ProfileDeviceClass>%s</ProfileDeviceClass>\n", m_Header.deviceClass ? icFixXml(fix, icGetSigStr(buf, bufSize, m_Header.deviceClass)) : "");
   xml += blanks + line;
 
   if (m_Header.deviceSubClass) {
@@ -107,9 +113,20 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
     xml += blanks + line;
   }
 
-  snprintf(line, bufSize, "    <DataColourSpace>%s</DataColourSpace>\n", icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.colorSpace)));
+  // Header colour-space signatures are serialized as four-character text. A zero
+  // signature (0x00000000) must round-trip back to zero, but icGetColorSigStr(0)
+  // returns the literal "NULL"; the inverse icGetSigVal("NULL") then packs the
+  // ASCII bytes 'N','U','L','L' into 0x4E554C4C, corrupting the value on reparse
+  // (see iccFromXml turning a NoData header into "Unknown 'NULL' = 4E554C4C").
+  // Emit an empty element for a zero signature instead -- icXmlGetChildSigVal()
+  // returns 0 for an empty element, restoring the original value. This mirrors the
+  // JSON serializer (IccProfileJson.cpp), which already guards these fields the
+  // same way. Note: per ICC.1 (v4.4.0.0) 7.2.6 / Table 19 a zero data colour
+  // space is itself invalid for a v2/v4 profile; faithfully preserving the bytes
+  // is a serialization concern, leaving the validator to flag the malformance.
+  snprintf(line, bufSize, "    <DataColourSpace>%s</DataColourSpace>\n", m_Header.colorSpace ? icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.colorSpace)) : "");
   xml += blanks + line;
-  snprintf(line, bufSize, "    <PCS>%s</PCS>\n",  icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.pcs)));
+  snprintf(line, bufSize, "    <PCS>%s</PCS>\n",  m_Header.pcs ? icFixXml(fix, icGetColorSigStr(buf, bufSize, m_Header.pcs)) : "");
   xml += blanks + line;
 
   snprintf(line, bufSize, "    <CreationDateTime>%d-%02d-%02dT%02d:%02d:%02d</CreationDateTime>\n",
@@ -157,7 +174,9 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
 
   xml += blanks + line;
   
-  snprintf(line, bufSize, "    <ProfileCreator>%s</ProfileCreator>\n", icFixXml(fix, icGetSigStr(buf, bufSize, m_Header.creator)));
+  // Guard the zero case as above so a zero creator round-trips as 0 rather than
+  // being corrupted to 0x4E554C4C via the "NULL" text encoding.
+  snprintf(line, bufSize, "    <ProfileCreator>%s</ProfileCreator>\n", m_Header.creator ? icFixXml(fix, icGetSigStr(buf, bufSize, m_Header.creator)) : "");
   xml += blanks + line;
 
   if (m_Header.profileID.ID32[0] || m_Header.profileID.ID32[1] || 
@@ -240,9 +259,9 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
             // PrivateType - a type that does not belong to the list in the icc specs - custom for vendor.
             if (pTag->m_nReserved) {
               if (!strcmp("PrivateType", tagSig))
-                snprintf(line, bufSize, "<PrivateType type=\"%s\" reserved=\"%08x\">\n", icFixXml(fix, icGetSigStr(buf, bufSize, pTag->GetType())), pTag->m_nReserved);
+                snprintf(line, bufSize, "<PrivateType type=\"%s\" reserved=\"%08x\">\n", icFixXml(fix, icGetSigStr(buf, bufSize, pTag->GetType())), (unsigned int) pTag->m_nReserved);
               else
-                snprintf(line, bufSize, "<%s reserved=\"%08x\">\n", tagSig, pTag->m_nReserved); //parent node is the tag type
+                snprintf(line, bufSize, "<%s reserved=\"%08x\">\n", tagSig, (unsigned int) pTag->m_nReserved); //parent node is the tag type
             }
             else {
               if (!strcmp("PrivateType", tagSig))
@@ -317,13 +336,34 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
   return true;
 }
 
-static unsigned char parseVersion(const char *szVer)
+// Convert one decimal version component (0-99) into the BCD byte the ICC header
+// stores.  Returns false for an empty component, a sign, a non-digit, or a value
+// too large to fit one BCD byte.
+//
+// This used to be atoi(), which accepts a leading '-'.  The #1845 PoC carries
+// <ProfileVersion>-12.</ProfileVersion>: atoi gave -12, ((val/10)%10)*16 +
+// (val%10) then evaluated to -18, and storing that in an unsigned char produced
+// 238 (0xEE) -- UBSan reports it as "implicit conversion from type 'int' of
+// value -18 ... changed the value to 238".  0xE is not a valid BCD digit, so
+// CIccInfo::GetVersionName can only render the result back as "Invalid BCD
+// version", yet iccFromXml still wrote the profile out carrying that byte.
+// Values above 99 were silently truncated by the same expression ("100" became
+// 0x00), and atoi() is undefined outright on an input too large for an int.
+//
+// icXmlParseU32 is the existing strict attribute parser (IccUtilXml.h): it
+// rejects the sign, non-digits and trailing garbage, and its max_value argument
+// performs the range check.  This is the XML twin of the JSON defect fixed for
+// #1830, whose icJsonParseBCDByte in IccProfileJson.cpp now carries the same
+// contract.
+static bool parseVersion(const std::string &sPart, unsigned long &rv)
 {
-  unsigned char rv;
-  int val = atoi(szVer);
-  rv = ((val / 10) % 10) * 16 + (val % 10);
+  icUInt32Number v = 0;
 
-  return rv;
+  if (!icXmlParseU32(sPart.c_str(), v, 99))
+    return false;
+
+  rv = ((v / 10) % 10) * 16 + (v % 10);
+  return true;
 }
 
 /**
@@ -357,44 +397,58 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       const char *szVer = (const char*)pNode->children->content;
       std::string ver;
       unsigned long verMajor=0, verMinor=0, verClassMajor=0, verClassMinor=0;
+      // A malformed component now rejects the whole version rather than letting a
+      // wrapped or partly-parsed value reach the header, matching the policy
+      // icJsonParseBCDVersionStr applies on the JSON side (#1830).
+      bool bVerOk = false;
 
       for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
         ver += *szVer;
       }
-      verMajor = parseVersion(ver.c_str());
+      bVerOk = parseVersion(ver, verMajor);
       ver.clear();
       if (*szVer)
         szVer++;
 
-      if (*szVer) {
+      if (bVerOk && *szVer) {
         for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
           ver += *szVer;
         }
-        verMinor = parseVersion(ver.c_str());
+        bVerOk = parseVersion(ver, verMinor);
         ver.clear();
         if (*szVer)
           szVer++;
 
-        if (*szVer) {
+        if (bVerOk && *szVer) {
           for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
             ver = *szVer;
           }
-          verClassMajor = parseVersion(ver.c_str());
+          bVerOk = parseVersion(ver, verClassMajor);
           ver.clear();
           if (*szVer)
             szVer++;
 
-          if (*szVer) {
+          if (bVerOk && *szVer) {
             for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
               ver = *szVer;
             }
-            verClassMinor = parseVersion(ver.c_str());
+            bVerOk = parseVersion(ver, verClassMinor);
             ver.clear();
           }
         }
       }
 
-      m_Header.version = icUInt32Number( (verMajor << 24) | (verMinor << 16) | (verClassMajor << 8) | verClassMinor );
+      if (!bVerOk) {
+        // Leave the memset-zeroed header version in place.  0 is what
+        // GetVersionName renders as a plain "0.00", where the old wrapped byte
+        // rendered as "Invalid BCD version" -- and the profile was still saved.
+        parseStr += "Cannot parse ProfileVersion '";
+        parseStr += (const char*)pNode->children->content;
+        parseStr += "'\n";
+      }
+      else {
+        m_Header.version = icUInt32Number( (verMajor << 24) | (verMinor << 16) | (verClassMajor << 8) | verClassMinor );
+      }
     }
     else if (!icXmlStrCmp((const char*)pNode->name, "ProfileSubClassVersion")) {
       if (!pNode->children || !pNode->children->content) {
@@ -471,7 +525,7 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 
       attr = icXmlFindAttr(pNode, "VendorFlags");
       if (attr) {
-        icUInt32Number vendor;
+        icUInt32Number vendor = 0;
         sscanf(icXmlAttrValue(attr), "%x", &vendor);
         m_Header.flags |= vendor;
       }
@@ -551,7 +605,7 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       }
     }
     else if (!icXmlStrCmp(pNode->name, "MCS")) {
-      m_Header.mcs = (icMaterialColorSignature)icXmlGetChildSigVal(pNode);
+      m_Header.mcs = (icMultiplexColorSignature)icXmlGetChildSigVal(pNode);
     }
     else if (!icXmlStrCmp(pNode->name, "ProfileDeviceSubClass")) {
       m_Header.deviceSubClass = (icProfileClassSignature)icXmlGetChildSigVal(pNode);
@@ -675,8 +729,15 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
       icTagTypeSignature sigType = icGetTypeNameTagSig((const icChar*)pTypeNode->name);
 
       if (sigType == icSigUnknownType) {
-        xmlAttr *attr = icXmlFindAttr(pTypeNode, "type");
-        sigType = (icTagTypeSignature)icGetSigVal((icChar*)icXmlAttrValue(attr));
+        attr = icXmlFindAttr(pTypeNode, "type");
+        const char *typeSig = icXmlAttrValue(attr);
+        if (!typeSig[0]) {
+          parseStr += "Invalid private tag type attribute for ";
+          parseStr += nodeName;
+          parseStr += "\n";
+          return false;
+        }
+        sigType = (icTagTypeSignature)icGetSigVal(typeSig);
       }
 
       CIccInfo info;
@@ -698,7 +759,16 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
           if ((attr = icXmlFindAttr(pTypeNode, "reserved"))) {
             sscanf(icXmlAttrValue(attr), "%x", &pTag->m_nReserved);
           }
-          AttachTag(sigTag, pTag);
+          //AttachTag refuses (and does not take ownership) when a tag with this
+          //signature already exists; free pTag to avoid a leak on duplicates.
+          if (!AttachTag(sigTag, pTag)) {
+            parseStr += "Unable to attach duplicate tag \"";
+            parseStr += nodeName;
+            snprintf(str, strSize, "\" on line %d\n", pTypeNode->line);
+            parseStr += str;
+            delete pTag;
+            return false;
+          }
         }
         else {
           parseStr += "Unable to Parse \"";
@@ -712,7 +782,6 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
         }
       }
       else {
-        char str[100];
         parseStr += "Invalid tag extension for \"";
         parseStr += (const char*)pTypeNode->name;
         parseStr += "\" (";
@@ -729,8 +798,15 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
     icTagTypeSignature sigType = icGetTypeNameTagSig(nodeName.c_str());
 
     if (sigType == icSigUnknownType) {
-      xmlAttr *attr = icXmlFindAttr(pNode, "type");
-      sigType = (icTagTypeSignature)icGetSigVal((icChar*)icXmlAttrValue(attr));
+      attr = icXmlFindAttr(pNode, "type");
+      const char *typeSig = icXmlAttrValue(attr);
+      if (!typeSig[0]) {
+        parseStr += "Invalid private tag type attribute for ";
+        parseStr += nodeName;
+        parseStr += "\n";
+        return false;
+      }
+      sigType = (icTagTypeSignature)icGetSigVal(typeSig);
     }
 
     CIccInfo info;
@@ -753,13 +829,24 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
           sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
         }
 
+        bool bAttached = false;
         for (xmlNode *tagSigNode = pNode->children; tagSigNode; tagSigNode = tagSigNode->next) {
           if (tagSigNode->type == XML_ELEMENT_NODE && !icXmlStrCmp(tagSigNode->name, "TagSignature")) {
             if ((const icChar*)tagSigNode->children != NULL) {
               sigTag = (icTagSignature)icGetSigVal((const icChar*)tagSigNode->children->content);
-              AttachTag(sigTag, pTag);
+              //Only flag ownership transfer when AttachTag actually accepts pTag.
+              //It refuses duplicate signatures without taking ownership, so a
+              //blanket bAttached=true here would leak pTag on a duplicate tag.
+              if (AttachTag(sigTag, pTag))
+                bAttached = true;
             }
           }
+        }
+
+        //No TagSignature node claimed ownership of pTag; free it to avoid a leak
+        if (!bAttached) {
+          delete pTag;
+          return false;
         }
       }
       else {
@@ -831,6 +918,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
         }
       }
     }
+    break;
   default:
       break;
   }
@@ -873,8 +961,16 @@ bool CIccProfileXml::LoadXml(const char *szFilename, const char *szRelaxNGDir, s
   xmlDoc *doc = NULL;
   xmlNode *root_element = NULL;
 
-  /*parse the file and get the DOM */
-  doc = xmlReadFile(szFilename, NULL, 0);
+  /* Parse the file and get the DOM.
+   *
+   * Drop XML_PARSE_HUGE: it disables libxml2's depth cap, name-length
+   * cap, text-length cap, and the billion-laughs entity-expansion guard
+   * - all of which protect against crafted inputs. Keep XML_PARSE_NONET
+   * (no network), do not set XML_PARSE_NOENT (it substitutes entity
+   * references and may load local external entities), and do not set
+   * XML_PARSE_DTDLOAD. ICC profiles never use DTD entities legitimately.
+   */
+  doc = xmlReadFile(szFilename, NULL, XML_PARSE_NONET);
 
   if (doc == NULL) 
     return false;

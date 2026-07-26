@@ -73,6 +73,7 @@ Copyright:  (c) see Software License
 #define _ICCTAGMPE_H
 
 #include "IccProfLibConf.h"
+#include "IccObject.h"
 
 #include "IccTag.h"
 #include "IccTagFactory.h"
@@ -91,7 +92,7 @@ typedef enum {
   icElemInterpTetra,
 } icElemInterp;
 
-class CIccTagMultiProcessElement;
+class ICCPROFLIB_API CIccTagMultiProcessElement;
 class CIccMultiProcessElement;
 
 class CIccApplyTagMpe;
@@ -128,6 +129,7 @@ typedef CIccApplyMpeList::iterator CIccApplyMpeIter;
 class IIccExtensionMpe
 {
 public:
+  virtual ~IIccExtensionMpe() {}
   virtual const char *GetExtClassName()=0;
 };
 
@@ -138,7 +140,7 @@ public:
 * Purpose: Base Class for Multi Process Elements
 *****************************************************************************
 */
-class ICCPROFLIB_API CIccMultiProcessElement
+class ICCPROFLIB_API CIccMultiProcessElement : public IIccObject
 {
 public:
   CIccMultiProcessElement() { m_nReserved = 0; m_nInputChannels = 0; m_nOutputChannels = 0; }
@@ -151,6 +153,7 @@ public:
 
   virtual icElemTypeSignature GetType() const = 0;
   virtual const icChar *GetClassName() const = 0;
+  virtual const icChar *GetObjectType() const { return GetClassName(); }
 
   virtual icUInt16Number NumInputChannels() const { return m_nInputChannels; }
   virtual icUInt16Number NumOutputChannels() const { return m_nOutputChannels; }
@@ -222,7 +225,7 @@ protected:
 * Purpose: Base Class for Process Elements
 *****************************************************************************
 */
-class CIccMpeUnknown : public CIccMultiProcessElement
+class ICCPROFLIB_API CIccMpeUnknown : public CIccMultiProcessElement
 {
 public:
   CIccMpeUnknown();
@@ -350,7 +353,7 @@ class IIccProfileConnectionConditions;
 * Purpose: A general purpose processing tag 
 *****************************************************************************
 */
-class CIccTagMultiProcessElement : public CIccTag
+class ICCPROFLIB_API CIccTagMultiProcessElement : public CIccTag
 {
 public:
   CIccTagMultiProcessElement(icUInt16Number nInputChannels=0, icUInt16Number nOutputChannels=0);
@@ -391,7 +394,7 @@ public:
 
   void SetChannels(icUInt16Number nInputChannels, icUInt16Number nOutputChannels) {m_nInputChannels = nInputChannels; m_nOutputChannels = nOutputChannels;}
 
-  icUInt32Number NumElements() const { return m_list ? (icUInt32Number)(m_list->size()) : 0; }
+  icUInt32Number NumElements() const;
 
   bool IsLateBinding() const;
   bool IsLateBindingReflectance() const;

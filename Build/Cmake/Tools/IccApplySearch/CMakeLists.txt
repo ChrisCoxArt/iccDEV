@@ -1,19 +1,13 @@
-# 
+#
 # iccApplySearch CMakeLists.txt | IccDEV Project
-# Copyright (©) 2025 The International Color Consortium. All rights reserved.
-# 
+# Copyright (C) 2025 The International Color Consortium. All rights reserved.
+#
 #
 # Last Updated: 21-OCT-2025 at 0300Z by David Hoyt
 #
 # Changes: 	Asan ODR Bug for IccCmmSearch.cpp
-#						
-#						
-# TODO: Refactor Debug, Release, Asan 
-# 			Collapse 3-tier CMakeLists.txt, Housekeeping
-#				Refactor Base Configs & logging to .mk's 
-#
+#               Updated to link against IccConnect2 library
 
-# cmake_minimum_required(VERSION 3.2)
 project(iccApplySearch)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -27,8 +21,6 @@ find_package(nlohmann_json REQUIRED)
 # Sources
 set(SOURCES
   ${SRC_ROOT}/Tools/CmdLine/IccApplySearch/iccApplySearch.cpp
-  ${SRC_ROOT}/Tools/CmdLine/IccCommon/IccJsonUtil.cpp
-  ${SRC_ROOT}/Tools/CmdLine/IccCommon/IccCmmConfig.cpp
 )
 
 # Define the executable
@@ -36,10 +28,15 @@ add_executable(iccApplySearch ${SOURCES})
 
 # Link libraries
 target_link_libraries(iccApplySearch PRIVATE
-  IccProfLib2
-  IccXML2
+  ${TARGET_LIB_ICCPROFLIB}
+  ${TARGET_LIB_ICCCONNECT}
   nlohmann_json::nlohmann_json
 )
 
 # Compiler options
 target_compile_options(iccApplySearch PRIVATE)
+
+# Install
+IF(ENABLE_INSTALL_RIM)
+  INSTALL(TARGETS iccApplySearch DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT ${ICCDEV_RUNTIME_COMPONENT})
+ENDIF(ENABLE_INSTALL_RIM)

@@ -1,0 +1,82 @@
+# Copilot Setup Steps
+#
+# Copyright (c) 2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+# Intent: Prepare GitHub Copilot coding agent dependencies.
+
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/copilot-setup-steps.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/copilot-setup-steps.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout trusted workflow scripts
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || 'master' }}
+          path: .trusted-workflow-scripts
+          sparse-checkout: .github/scripts/sanitize-sed.sh
+          sparse-checkout-cone-mode: false
+
+      # preflight: allow-package-install reason=copilot-agent-bootstrap
+      - name: Install build and test prerequisites
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          SANITIZER="$GITHUB_WORKSPACE/.trusted-workflow-scripts/.github/scripts/sanitize-sed.sh"
+          # shellcheck source=/dev/null
+          source "$SANITIZER"
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            clang-tools \
+            cmake \
+            curl \
+            g++ \
+            gcc \
+            git-lfs \
+            jq \
+            libjpeg-dev \
+            libpng-dev \
+            libtiff-dev \
+            libxml2-dev \
+            make \
+            ninja-build \
+            nlohmann-json3-dev \
+            pkg-config \
+            python3-dev \
+            python3-pip \
+            python3-venv \
+            shellcheck \
+            zlib1g-dev
+
+          git lfs install --local

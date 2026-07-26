@@ -70,6 +70,7 @@ Copyright:  (c) see ICC Software License
 
 #include "IccApplyBPC.h"
 #include <cmath>
+#include <new>
 
 #define IsSpacePCS(x) ((x)==icSigXYZData || (x)==icSigLabData)
 
@@ -85,7 +86,7 @@ Copyright:  (c) see ICC Software License
 */
 IIccAdjustPCSXform* CIccApplyBPCHint::GetNewAdjustPCSXform() const
 {
-	return new CIccApplyBPC();
+	return new (std::nothrow) CIccApplyBPC();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -187,7 +188,14 @@ icFloatNumber CIccApplyBPC::calcQuadraticVertex(icFloatNumber* x, icFloatNumber*
 			icFloatNumber c = (s01*s20*s40 - s11*s10*s40 - s01*s30*s30 + s11*s20*s30 + s21*s10*s30 - s21*s20*s20)/denom;
 
 			// vertex is (-u + sqrt(u^2 - 4tc))/2t
-			vert = (icFloatNumber)((-1.0 * u + sqrt(u*u - 4*t*c)) / (2.0 * t));
+            if (t == 0.0f || !std::isfinite(t))
+              return 0.0f;
+            
+            float temp = u*u - 4*t*c;
+            if (temp < 0.0f || !std::isfinite(temp))
+              return 0.0f;
+            
+			vert = (icFloatNumber)((-1.0 * u + sqrt(temp)) / (2.0 * t));
 		}
 	}
 
@@ -419,6 +427,11 @@ bool CIccApplyBPC::calcDstBlackPoint(const CIccProfile* pProfile, const CIccXfor
 		}
 		pcs2lab(Pixel, pProfile);
 		icFloatNumber MaxL = Pixel[0];
+  
+        if (MaxL <= MinL) {
+			delete pCmm;
+			return false;
+        }
 
 		// check if quadratic estimation needs to be done
 		bool bStraightMidRange = false;
@@ -494,7 +507,12 @@ bool CIccApplyBPC::calcDstBlackPoint(const CIccProfile* pProfile, const CIccXfor
 				return false;
 			}
 			pcs2lab(Pixel, pProfile);
-			y[i] = (Pixel[0] - MinL)/(MaxL - MinL);
+            icFloatNumber range = MaxL - MinL;
+            if (fabsf(range) < 1e-8) {
+				delete pCmm;
+				return false;
+			}
+			y[i] = (Pixel[0] - MinL)/range;
 		}
 
 		// check for y values in the range and rearrange
@@ -546,12 +564,11 @@ bool CIccApplyBPC::pixelXfm(icFloatNumber *DstPixel, icFloatNumber *SrcPixel, ic
 	CIccCmm cmm(SrcSpace, icSigUnknownData, !IsSpacePCS(SrcSpace));
 
 	// first create a copy of the profile because the copy will be owned by the cmm
-	CIccProfile* pICC = new CIccProfile(*pProfile);
+	CIccProfile* pICC = new (std::nothrow) CIccProfile(*pProfile);
 	if (!pICC) return false;
 
 	// add the xform
 	if (cmm.AddXform(pICC, nIntent, icInterpTetrahedral, NULL, icXformLutColorimetric, pICC->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) {
-		delete pICC;
 		return false;
 	}
 
@@ -580,11 +597,11 @@ bool CIccApplyBPC::pixelXfm(icFloatNumber *DstPixel, icFloatNumber *SrcPixel, ic
 CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile *pProfile) const
 {
 	// create the cmm object
-	CIccCmm* pCmm = new CIccCmm(pProfile->m_Header.pcs, icSigUnknownData, false);
+	CIccCmm* pCmm = new (std::nothrow) CIccCmm(pProfile->m_Header.pcs, icSigUnknownData, false);
 	if (!pCmm) return NULL;
 
 	// first create a copy of the profile because the copy will be owned by the cmm
-	CIccProfile* pICC1 = new CIccProfile(*pProfile);
+	CIccProfile* pICC1 = new (std::nothrow) CIccProfile(*pProfile);
 	if (!pICC1) {
 		delete pCmm;
 		return NULL;
@@ -592,13 +609,12 @@ CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile 
 
 	// add the xform
 	if (pCmm->AddXform(pICC1, nIntent, icInterpTetrahedral, NULL, icXformLutColor, pICC1->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) {
-		delete pICC1;
 		delete pCmm;
 		return NULL;
 	}
 
 	// create another copy of the profile because the copy will be owned by the cmm
-	CIccProfile* pICC2 = new CIccProfile(*pProfile);
+	CIccProfile* pICC2 = new (std::nothrow) CIccProfile(*pProfile);
 	if (!pICC2) {
 		delete pCmm;
 		return NULL;
@@ -606,7 +622,6 @@ CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile 
 
 	// add the xform
 	if (pCmm->AddXform(pICC2, icRelativeColorimetric, icInterpTetrahedral, NULL, icXformLutColor, pICC2->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) { // uses the relative intent on the device to Lab side
-		delete pICC2;
 		delete pCmm;
 		return NULL;
 	}

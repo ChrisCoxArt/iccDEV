@@ -78,6 +78,7 @@
 #include "IccUtil.h"
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -130,6 +131,37 @@ CIccMatrixMath::CIccMatrixMath(const CIccMatrixMath &matrix)
 
 /**
 **************************************************************************
+* Name: CIccMatrixMath::operator=
+*
+* Purpose:
+*  Copy assignment (Rule of Two).  The copy constructor above deep-copies the
+*  owned m_vals buffer and the destructor frees it; without this matching
+*  operator the compiler-generated assignment would shallow-copy m_vals, so the
+*  source and target would share one buffer and double-free it on destruction.
+**************************************************************************
+*/
+CIccMatrixMath &CIccMatrixMath::operator=(const CIccMatrixMath &matrix)
+{
+  if (this == &matrix)
+    return *this;
+
+  int nTotal = matrix.m_nRows * matrix.m_nCols;
+  // Allocate the replacement before releasing the old buffer so a failed
+  // allocation leaves this object unchanged (strong exception guarantee).
+  icFloatNumber *vals = new icFloatNumber[nTotal];
+  memcpy(vals, matrix.m_vals, nTotal*sizeof(icFloatNumber));
+
+  delete[] m_vals;
+  m_vals = vals;
+  m_nRows = matrix.m_nRows;
+  m_nCols = matrix.m_nCols;
+
+  return *this;
+}
+
+
+/**
+**************************************************************************
 * Name: CIccMatrixMath::~CIccMatrixMath
 * 
 * Purpose: 
@@ -138,8 +170,7 @@ CIccMatrixMath::CIccMatrixMath(const CIccMatrixMath &matrix)
 */
 CIccMatrixMath::~CIccMatrixMath()
 {
-  if (m_vals)
-    delete[] m_vals;
+  delete[] m_vals;
 }
 
 
@@ -277,8 +308,7 @@ void CIccMatrixMath::Scale(icFloatNumber v)
 bool CIccMatrixMath::Invert()
 {
   if (m_nRows==3 && m_nCols==3) {
-    icMatrixInvert3x3(m_vals);
-    return true;
+    return icMatrixInvert3x3(m_vals);
   }
 
   return false;
@@ -356,6 +386,9 @@ bool CIccMatrixMath::SetRange(const icSpectralRange &srcRange, const icSpectralR
   if (m_nRows != dstRange.steps || m_nCols != srcRange.steps)
     return false;
 
+  if (srcRange.steps <= 1 || dstRange.steps <= 1)
+    return false;
+
   icUInt16Number d;
   icFloatNumber srcStart = icF16toF(srcRange.start);
   icFloatNumber srcEnd = icF16toF(srcRange.end);
@@ -363,29 +396,42 @@ bool CIccMatrixMath::SetRange(const icSpectralRange &srcRange, const icSpectralR
   icFloatNumber dstEnd = icF16toF(dstRange.end);
   //icFloatNumber srcDiff = srcEnd - srcStart;
   //icFloatNumber dstDiff = dstEnd - dstStart;
+
+  if (srcRange.steps <= 1 || dstRange.steps <= 1)
+    return false;
+
   icFloatNumber srcScale = (srcEnd - srcStart) / (srcRange.steps-1);
   icFloatNumber dstScale = (dstEnd - dstStart ) / (dstRange.steps - 1);
 
+  if (!std::isfinite(srcScale) || !std::isfinite(dstScale) || srcScale == 0.0f)
+    return false;
+
   icFloatNumber *data=entry(0);
-  memset(data, 0, dstRange.steps*srcRange.steps*sizeof(icFloatNumber));
+  size_t dataSize = (size_t)dstRange.steps * srcRange.steps * sizeof(icFloatNumber);
+  memset(data, 0, dataSize);
 
   for (d=0; d<dstRange.steps; d++) {
     icFloatNumber *r = entry(d);
     icFloatNumber w = dstStart + (icFloatNumber)d * dstScale;
     if (w<srcStart) {
-      r[0] = 1.0;
+      r[0] = 1.0f;
     }
     else if (w>=srcEnd) {
-      r[srcRange.steps-1] = 1.0;
+      r[srcRange.steps-1] = 1.0f;
     }
     else {
-      icUInt16Number p = (icUInt16Number)((w - srcStart) / srcScale);
+      icFloatNumber temp = (w - srcStart) / srcScale;
+      if (temp < 0.0f)
+        temp = 0.0f;
+      if (temp > 65535.0f)
+        temp = 65535.0f;
+      icUInt16Number p = (icUInt16Number)temp;
       icFloatNumber p2 = (w - (srcStart + p * srcScale)) / srcScale;
 
-      if (p2<0.00001) {
+      if (p2<0.00001f) {
         r[p] = 1.0f;
       }
-      else if (p2>0.99999) {
+      else if (p2>0.99999f) {
         r[p+1] = 1.0f;
       }
       else {

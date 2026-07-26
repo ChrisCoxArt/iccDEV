@@ -61,15 +61,26 @@
  * 
  */
 
+#include <cstdlib>  /* std::strtoul, std::strtoull */
+#include <cerrno>   /* errno, ERANGE */
 #include <time.h>
 #include "IccUtilXml.h"
 #include "IccConvertUTF.h"
 #include "IccTagFactory.h"
 
 #ifdef WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #ifdef GetClassName
 #undef GetClassName
+#endif
+#ifdef max
+#undef max
+#endif
+#ifdef min
+#undef min
 #endif
 #endif
 #include <cstring> /* C strings strcpy, memcpy ... */
@@ -79,201 +90,7 @@
 
 
 
-CIccUTF16String::CIccUTF16String()
-{
-  m_alloc=64;
-  m_len = 0;
-  m_str = (icUInt16Number*)calloc(m_alloc, sizeof(icUInt16Number));
-}
-
-CIccUTF16String::CIccUTF16String(const icUInt16Number *uzStr)
-{
-  m_len = WStrlen(uzStr);
-  m_alloc = AllocSize(m_len);
-
-  m_str = (icUInt16Number *)malloc(m_alloc*sizeof(icUInt16Number));
-  memcpy(m_str, uzStr, m_len+1*sizeof(icUInt16Number));
-}
-
-CIccUTF16String::CIccUTF16String(const char *szStr)
-{
-  size_t sizeSrc = strlen(szStr);
-
-  if (sizeSrc) {
-    m_alloc = AllocSize(sizeSrc*2);
-    m_str = (UTF16 *)calloc(m_alloc, sizeof(icUInt16Number)); //overallocate to allow for up to 4 bytes per character
-    UTF16 *szDest = m_str;
-    icConvertUTF8toUTF16((const UTF8 **)&szStr, (const UTF8 *)&szStr[sizeSrc], &szDest, &szDest[m_alloc], lenientConversion);
-    if (m_str[0]==0xfeff) {
-      size_t i;
-      for (i=1; m_str[i]; i++)
-        m_str[i-1] = m_str[i];
-      m_str[i-1] = 0;
-    }
-    m_len = WStrlen(m_str);
-  }
-  else {
-    m_alloc = 64;
-    m_len = 0;
-    m_str = (icUInt16Number*)calloc(m_alloc, sizeof(icUInt16Number));
-  }
-}
-
-CIccUTF16String::CIccUTF16String(const CIccUTF16String &str)
-{
-  m_alloc = str.m_alloc;
-  m_len = str.m_len;
-  m_str = (icUInt16Number*)malloc(m_alloc*sizeof(icUInt16Number));
-
-  memcpy(m_str, str.m_str, (m_alloc)*sizeof(icUInt16Number));
-}
-
-CIccUTF16String::~CIccUTF16String()
-{
-  free(m_str);
-}
-
-void CIccUTF16String::Clear()
-{
-  m_len = 0;
-  m_str[0] = 0;
-}
-
-bool CIccUTF16String::Resize(size_t len)
-{
-  if (len>m_alloc) {
-    size_t nAlloc = AllocSize(len);
-
-    m_str = (icUInt16Number*)icRealloc(m_str, nAlloc*sizeof(icUInt16Number));
-
-    if (!m_str) {
-      m_len = 0;
-      return false;
-    }
-    m_alloc = nAlloc;
-  }
-
-  if (len>m_len) {
-    memset(&m_str[m_len], 0x0020, (len-m_len)*sizeof(icUInt16Number));
-  }
-  m_len = len;
-  m_str[m_len] = 0;
-  return true;
-}
-
-size_t CIccUTF16String::WStrlen(const icUInt16Number *uzStr)
-{
-  size_t n=0;
-  while(uzStr[n]) n++;
-
-  return n;
-}
-
-CIccUTF16String& CIccUTF16String::operator=(const CIccUTF16String &wstr)
-{
-  if (m_alloc<=wstr.m_alloc) {
-    m_str = (icUInt16Number*)icRealloc(m_str, wstr.m_alloc *sizeof(icUInt16Number));
-    if (m_str)
-      m_alloc = wstr.m_alloc;
-    else
-      m_alloc = 0;
-  }
-  if (m_str) {
-    m_len = wstr.m_len;
-
-    memcpy(m_str, wstr.m_str, (m_len+1)*sizeof(icUInt16Number));
-  }
-  else {
-    m_len = 0;
-  }
-
-  return *this;
-}
-
-CIccUTF16String& CIccUTF16String::operator=(const char *szStr)
-{
-  FromUtf8(szStr, 0);
-
-  return *this;
-}
-
-CIccUTF16String& CIccUTF16String::operator=(const icUInt16Number *uzStr)
-{
-  size_t n = WStrlen(uzStr);
-  size_t nAlloc = AllocSize(n);
-
-  if (m_alloc<=nAlloc) {
-    m_str = (icUInt16Number*)icRealloc(m_str, nAlloc*sizeof(icUInt16Number));
-    if (m_str)
-      m_alloc = nAlloc;
-    else
-      m_alloc = 0;
-  }
-  if (m_str) {
-    m_len = n;
-
-    memcpy(m_str, uzStr, (m_len+1)*sizeof(icUInt16Number));
-  }
-  else {
-    m_len = 0;
-  }
-
-  return *this;
-}
-
-
-bool CIccUTF16String::FromUtf8(const char *szStr, size_t sizeSrc)
-{
-  if (!sizeSrc)
-    sizeSrc = strlen(szStr);
-
-  if (sizeSrc) {
-    size_t nAlloc = AllocSize(sizeSrc*2);
-    if (m_alloc<=nAlloc) {
-      m_str = (icUInt16Number*)icRealloc(m_str, nAlloc *sizeof(icUInt16Number));
-      m_alloc = nAlloc;
-    }
-    if (m_str) {
-      memset(m_str, 0, m_alloc * sizeof(icUInt16Number));
-      UTF16 *szDest = m_str;
-      icConvertUTF8toUTF16((const UTF8 **)&szStr, (const UTF8 *)&szStr[sizeSrc], &szDest, &szDest[m_alloc], lenientConversion);
-      if (m_str[0]==0xfeff) {
-        size_t i;
-        for (i=1; m_str[i]; i++)
-          m_str[i-1] = m_str[i];
-        m_str[i-1] = 0;
-      }
-      m_len = WStrlen(m_str);
-    }
-    else {
-      m_len =0;
-      return false;
-    }
-  }
-  else {
-    m_len = 0;
-    m_str[0] = 0;
-  }
-  return true;
-}
-
-const char *CIccUTF16String::ToUtf8(std::string &buf)
-{
-  return icUtf16ToUtf8(buf, m_str, (int)m_len);
-}
-
-const wchar_t *CIccUTF16String::ToWString(std::wstring &buf)
-{
-  size_t i;
-
-  buf.clear();
-
-  for (i=0; i<m_len; i++) {
-    buf += (wchar_t)m_str[i];
-  }
-
-  return buf.c_str();
-}
+// CIccUTF16String is now implemented in IccProfLib/IccUtil.cpp
 
 const char *icFixXml(std::string &buf, const char *szStr)
 {
@@ -340,36 +157,7 @@ const char *icFixXml(char *szDest, const char *szStr)
   return szDest;
 }
 
-const char *icUtf16ToUtf8(std::string &buf, const icUInt16Number *szSrc, int sizeSrc/*=0*/) 
-{
-  if (!sizeSrc) {
-    sizeSrc = (int)CIccUTF16String::WStrlen(szSrc);
-  }
-
-  int n = sizeSrc*4;
-
-  if (n) {
-    char *szBuf = (char *)malloc(n+1);
-    char *szDest = szBuf;
-    icConvertUTF16toUTF8(&szSrc, &szSrc[sizeSrc], (UTF8**)&szDest, (UTF8*)&szDest[n+1], lenientConversion);
-    *szDest= '\0';
-
-    buf = szBuf;
-    free(szBuf);
-  }
-  else {
-    buf.clear();
-  }
-
-  return buf.c_str();
-}
-
-const unsigned short *icUtf8ToUtf16(CIccUTF16String &buf, const char *szSrc, int sizeSrc/*=0*/) 
-{ 
-  buf.FromUtf8(szSrc, sizeSrc);
-
-  return buf.c_str();
-}
+// icUtf16ToUtf8 and icUtf8ToUtf16 are now implemented in IccProfLib/IccUtil.cpp
 
 const char *icAnsiToUtf8(std::string &buf, const char *szSrc)
 {
@@ -391,7 +179,13 @@ const char *icAnsiToUtf8(std::string &buf, const char *szSrc)
   free(szBuf);
   free(szUnicodeBuf);
 #else
-  buf = szSrc;
+  // CFL-001: Use bounded copy to prevent strlen overread (CWE-126)
+  if (szSrc) {
+    size_t srcLen = strnlen(szSrc, 256);
+    buf.assign(szSrc, srcLen);
+  } else {
+    buf.clear();
+  }
 #endif
   return buf.c_str();
 }
@@ -416,7 +210,13 @@ const char *icUtf8ToAnsi(std::string &buf, const char *szSrc)
   free(szBuf);
   free(szUnicodeBuf);
 #else
-  buf = szSrc;
+  // CFL-001: Use bounded copy to prevent strlen overread (CWE-126)
+  if (szSrc) {
+    size_t srcLen = strnlen(szSrc, 256);
+    buf.assign(szSrc, srcLen);
+  } else {
+    buf.clear();
+  }
 #endif
   return buf.c_str();
 }
@@ -446,13 +246,23 @@ public:
     switch(m_nType) {
       case icConvert8Bit:
         for (i=0; i<m_nSamples; i++) {
-          snprintf(buf, bufSize, " %3d", (icUInt8Number)(pData[i]*255.0 + 0.5));
+          // Clamp to [0,1] (the !(v>=0) test also catches NaN) before scaling:
+          // CLUT sample data from a malformed profile may fall outside the
+          // normalized range, and an out-of-range float->uint cast is UB. The
+          // sibling scalar serializer (icXmlDumpArrayValue) clamps the same way.
+          icFloatNumber v = pData[i];
+          if (!(v >= 0.0)) v = 0.0;
+          else if (v > 1.0) v = 1.0;
+          snprintf(buf, bufSize, " %3d", (icUInt8Number)(v*255.0 + 0.5));
           *m_xml += buf;
         }
         break;
       case icConvert16Bit:
         for (i=0; i<m_nSamples; i++) {
-          snprintf(buf, bufSize, " %5d", (icUInt16Number)(pData[i]*65535.0 + 0.5));
+          icFloatNumber v = pData[i];
+          if (!(v >= 0.0)) v = 0.0;
+          else if (v > 1.0) v = 1.0;
+          snprintf(buf, bufSize, " %5d", (icUInt16Number)(v*65535.0 + 0.5));
           *m_xml += buf;
         }
         break;
@@ -672,6 +482,19 @@ size_t icXmlDumpHexData(std::string &xml, std::string blanks, void *pBuf, size_t
   return i;
 }
 
+bool icXmlValidateFileCount(size_t value, icUInt32Number &count, std::string &parseStr, const char *filename)
+{
+  if (value > (size_t)std::numeric_limits<icUInt32Number>::max()) {
+    parseStr += "Error! - File '";
+    parseStr += filename;
+    parseStr += "' exceeds supported XML import size.\n";
+    return false;
+  }
+
+  count = (icUInt32Number)value;
+  return true;
+}
+
 xmlAttr *icXmlFindAttr(xmlNode *pNode, const char *szAttrName)
 {
   if (!pNode) return NULL;
@@ -752,9 +575,7 @@ CIccXmlArrayType<T, Tsig>::CIccXmlArrayType()
 template <class T, icTagTypeSignature Tsig>
 CIccXmlArrayType<T, Tsig>::~CIccXmlArrayType()
 {
-  if (m_pBuf) {
-    free(m_pBuf);
-  }
+  free(m_pBuf);
 }
 
 template <class T, icTagTypeSignature Tsig>
@@ -839,44 +660,63 @@ bool CIccXmlArrayType<T, Tsig>::DumpArray(std::string &xml, std::string blanks, 
     else {
       xml += " ";
     }
+    
+    T value = buf[i];
+    if constexpr (std::is_floating_point<T>::value) {
+        if (!std::isfinite(value))
+          value = 0;
+    }
 
     switch (Tsig) {
       case icSigUInt8ArrayType:
+        if (value < 0) value = 0;
+        if constexpr (std::numeric_limits<T>::max() > 255) {
+          if (value > 255) value = 255;
+        }
         switch (nType) {
           case icConvert8Bit:
           default:
-            snprintf(str, strSize, "%u", (icUInt8Number)buf[i]);
+            snprintf(str, strSize, "%u", (icUInt8Number)value);
             break;
 
           case icConvert16Bit:
-            snprintf(str, strSize, "%u", (icUInt16Number)((icFloatNumber)buf[i] * 65535.0 / 255.0 + 0.5));
+            if (value > 1.0) value = 1.0;
+            snprintf(str, strSize, "%u", (icUInt16Number)((icFloatNumber)value * 65535.0 / 255.0 + 0.5));
             break;
 
           case icConvertFloat:
-            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)buf[i] / 255.0);
+            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)value / 255.0);
             break;
         }
         break;
 
       case icSigUInt16ArrayType:
+        if (value < 0) value = 0;
+        if constexpr (std::numeric_limits<T>::max() > 65535) {
+          if (value > 65535) value = 65535;
+        }
         switch (nType) {
           case icConvert8Bit:
-            snprintf(str, strSize, "%u", (icUInt16Number)((icFloatNumber)buf[i] * 255.0 / 65535.0 + 0.5));
+            snprintf(str, strSize, "%u", (icUInt16Number)((icFloatNumber)value * 255.0 / 65535.0 + 0.5));
             break;
 
           case icConvert16Bit:
           default:
-            snprintf(str, strSize, "%u", (icUInt16Number)buf[i]);
+            snprintf(str, strSize, "%u", (icUInt16Number)value);
             break;
 
           case icConvertFloat:
-            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)buf[i] / 65535.0);
+            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)value / 65535.0);
             break;
         }
         break;
 
       case icSigUInt32ArrayType:
-        snprintf(str, strSize, "%u", (icUInt32Number)buf[i]);
+        if (value < 0) value = 0;
+        if constexpr (std::numeric_limits<T>::max() > std::numeric_limits<uint32_t>::max()) {
+          if (value > std::numeric_limits<uint32_t>::max()) value = std::numeric_limits<uint32_t>::max();
+        }
+        snprintf(str, strSize, "%u", (unsigned int)value);
         break;
       
       case icSigUInt64ArrayType:
@@ -888,21 +728,25 @@ bool CIccXmlArrayType<T, Tsig>::DumpArray(std::string &xml, std::string blanks, 
       case icSigFloat64ArrayType:
         switch (nType) {
           case icConvert8Bit:
-            snprintf(str, strSize, "%u", (icUInt8Number)(buf[i] * 255.0 + 0.5));
+            if (value < 0) value = 0;
+            if (value > 1.0) value = 1.0;
+            snprintf(str, strSize, "%u", (icUInt8Number)(value * 255.0 + 0.5));
             break;
 
           case icConvert16Bit:
-            snprintf(str, strSize, "%u", (icUInt16Number)(buf[i] * 65535.0 + 0.5));
+            if (value < 0) value = 0;
+            if (value > 1.0) value = 1.0;
+            snprintf(str, strSize, "%u", (icUInt16Number)(value * 65535.0 + 0.5));
             break;
 
           case icConvertFloat:
           default:
-            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)buf[i]);
+            snprintf(str, strSize, icXmlFloatFmt, (icFloatNumber)value);
         }
         break;
     }
     xml += str;
-    if (i%nColumns == nColumns-1) {
+    if (i%nColumns == (icUInt32Number)(nColumns-1)) {
       xml += "\n";
     }
   }
@@ -947,7 +791,7 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseTextCountNum(const char *szText, 
     else if ( i <= num && !isspace(*szText) ) {
       const size_t lineSize = 100;
       char line[lineSize];
-      snprintf(line, lineSize, "Data '%c' in position %d is not a number. ", *szText, i);
+      snprintf(line, lineSize, "Data '%c' in position %d is not a number. ", *szText, (unsigned int) i );
       parseStr += line;
       return false;
     }
@@ -1000,10 +844,23 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseTextCount(const char *szText)
 template<typename T, typename F>
 T clipTypeRange( const F &input )
 {
-  if (input > std::numeric_limits<T>::max())
-    return std::numeric_limits<T>::max();
-  if (input < std::numeric_limits<T>::lowest()) // not min, which is a positive small number for floating point
-    return std::numeric_limits<T>::lowest();
+  if constexpr (std::numeric_limits<T>::is_integer && !std::numeric_limits<F>::is_integer) {
+    using limit_type = long double;
+    const auto value = static_cast<limit_type>(input);
+    const auto upper = static_cast<limit_type>(std::numeric_limits<T>::max());
+    const auto lower = static_cast<limit_type>(std::numeric_limits<T>::lowest());
+
+    if (value > upper)
+      return std::numeric_limits<T>::max();
+    if (value < lower) // not min, which is a positive small number for floating point
+      return std::numeric_limits<T>::lowest();
+  }
+  else {
+    if (input > std::numeric_limits<T>::max())
+      return std::numeric_limits<T>::max();
+    if (input < std::numeric_limits<T>::lowest()) // not min, which is a positive small number for floating point
+      return std::numeric_limits<T>::lowest();
+  }
   if ( !std::numeric_limits<F>::is_integer && std::isnan(input) )
     return T(0);    // flush NaN to zero
   return T(input);  // passed all the checks, just cast it
@@ -1103,7 +960,7 @@ bool CIccXmlArrayType<T, Tsig>::ParseArray(T* pBuf, icUInt32Number nSize, xmlNod
           !icXmlStrCmp(pNode->name, "f") &&
           pNode->children &&
           pNode->children->content) {
-            float f;
+            float f = 0.0f;
             sscanf((const char *)(pNode->children->content), "%f", &f);
             pBuf[i] = (T)f;
             i++;
@@ -1147,9 +1004,7 @@ bool CIccXmlArrayType<T, Tsig>::ParseArray(T* pBuf, icUInt32Number nSize, xmlNod
 template <class T, icTagTypeSignature Tsig>
 bool CIccXmlArrayType<T, Tsig>::SetSize(icUInt32Number nSize)
 {
-  if (m_pBuf) {
-    free(m_pBuf);
-  }
+  free(m_pBuf);
   m_pBuf = (T*)malloc(nSize * sizeof(T));
   if (!m_pBuf) {
     m_nSize = 0;
@@ -1170,19 +1025,7 @@ template class CIccXmlArrayType<icFloat32Number, icSigFloat32ArrayType>;
 template class CIccXmlArrayType<icFloat64Number, icSigFloat64ArrayType>;
 
 
-icRenderingIntent icGetRenderingIntentValue (const icChar *szRenderingIntent)
-{
-  if (!strcmp(szRenderingIntent, "Perceptual"))
-	  return icPerceptual;
-  else if (!strcmp(szRenderingIntent, "Media-relative colorimetric"))
-	  return icRelativeColorimetric;
-  else if (!strcmp(szRenderingIntent, "Saturation"))
-	  return icSaturation;
-  else if (!strcmp(szRenderingIntent, "ICC-absolute colorimetric"))
-	  return icAbsoluteColorimetric;
-  
-  return icPerceptual;
-}
+// icGetRenderingIntentValue is now implemented in IccProfLib/IccUtil.cpp
 
 const icChar* icGetTagSigTypeName(icTagTypeSignature tagTypeSig)
 {
@@ -1218,20 +1061,7 @@ icTagSignature icGetTagNameSig(const icChar *szName)
 }
 
 
-icStandardObserver icGetNamedStandardObserverValue(const icChar* str)
-{
-  if (!strcmp(str, "Unknown observer"))
-	  return icStdObsUnknown;
-
-  if (!strcmp(str, "CIE 1931 (two degree) standard observer"))
-	  return icStdObs1931TwoDegrees;
-
-  if (!strcmp(str, "CIE 1964 (ten degree) standard observer"))
-	  return icStdObs1964TenDegrees;   
-
-  return icStdObsCustom;
-}
-
+// icGetNamedStandardObserverValue is now implemented in IccProfLib/IccUtil.cpp
 
 icMeasurementGeometry icGeNamedtMeasurementGeometryValue(const icChar* str)
 {
@@ -1264,128 +1094,26 @@ icMeasurementFlare icGetNamedMeasurementFlareValue(const icChar * str)
   return icFlare0;
 }
 
-icIlluminant icGetIlluminantValue(const icChar* str)
-{
-  if (!strcmp(str, "Illuminant Unknown"))
-	  return icIlluminantUnknown;
- 
-  if (!strcmp(str, "Illuminant D50") || !strcmp(str, "D50"))  
-	  return icIlluminantD50;  
-
-  if (!strcmp(str, "Illuminant D65") || !strcmp(str, "D65"))
-	  return icIlluminantD65;
-
-  if (!strcmp(str, "Illuminant D93") || !strcmp(str, "D93"))
-	  return icIlluminantD93;
-
-  if (!strcmp(str, "Illuminant F2") || !strcmp(str, "F2"))
-	  return icIlluminantF2;
-  
-  if (!strcmp(str, "Illuminant D55") || !strcmp(str, "D55"))
-	  return icIlluminantD55;
-  
-  if (!strcmp(str, "Illuminant A") || !strcmp(str, "A"))
-	  return icIlluminantA;  
-
-  if (!strcmp(str, "Illuminant EquiPowerE") || !strcmp(str, "Illuminant E") || !strcmp(str, "E"))
-	  return icIlluminantEquiPowerE;
-
-  if (!strcmp(str, "Illuminant F8") || !strcmp(str, "F8"))
-	  return icIlluminantF8; 
-  
-  if (!strcmp(str, "Illuminant Black Body") || !strcmp(str, "Black Body"))
-    return icIlluminantBlackBody;
-
-  if (!strcmp(str, "Illuminant Daylight") || !strcmp(str, "Daylight"))
-    return icIlluminantDaylight;
-
-  if (!strcmp(str, "Illuminant B") || !strcmp(str, "B"))
-    return icIlluminantB;
-
-  if (!strcmp(str, "Illuminant C") || !strcmp(str, "C"))
-    return icIlluminantC;
-
-  if (!strcmp(str, "Illuminant F1") || !strcmp(str, "F1"))
-    return icIlluminantF1;
-
-  if (!strcmp(str, "Illuminant F3") || !strcmp(str, "F3"))
-    return icIlluminantF3;
-
-  if (!strcmp(str, "Illuminant F4") || !strcmp(str, "F4"))
-    return icIlluminantF4;
-
-  if (!strcmp(str, "Illuminant F5") || !strcmp(str, "F5"))
-    return icIlluminantF5;
-
-  if (!strcmp(str, "Illuminant F6") || !strcmp(str, "F6"))
-    return icIlluminantF6;
-
-  if (!strcmp(str, "Illuminant F7") || !strcmp(str, "F7"))
-    return icIlluminantF7;
-
-  if (!strcmp(str, "Illuminant F9") || !strcmp(str, "F9"))
-    return icIlluminantF9;
-
-  if (!strcmp(str, "Illuminant F10") || !strcmp(str, "F10"))
-    return icIlluminantF10;
-
-  if (!strcmp(str, "Illuminant F11") || !strcmp(str, "F11"))
-    return icIlluminantF11;
-
-  if (!strcmp(str, "Illuminant F12") || !strcmp(str, "F12"))
-    return icIlluminantF12;
-  
-  return icIlluminantCustom;
-}
+// icGetIlluminantValue is now implemented in IccProfLib/IccUtil.cpp
 
 const icChar* icGetStandardObserverName(icStandardObserver str)
 {
   switch (str) {
   case icStdObsUnknown:
-    return "Unknown Observer";
+    return "Unknown observer";
 
   case icStdObs1931TwoDegrees:
-    return "CIE 1931 standard colorimetric observer";
+    return "CIE 1931 (two degree) standard observer";
 
   case icStdObs1964TenDegrees:
-    return "CIE 1964 standard colorimetric observer";
+    return "CIE 1964 (ten degree) standard observer";
 
   default:    
-    return "Unknown Observer";
+    return "Unknown observer";
   }
 }
 
-icDateTimeNumber icGetDateTimeValue(const icChar* str)
-{
-	unsigned int day=0, month=0, year=0, hours=0, minutes=0, seconds=0;
-	icDateTimeNumber dateTime = {};	
-
-  if (!stricmp(str, "now")) {
-    time_t rawtime;
-    struct tm * timeinfo;
-
-    time ( &rawtime );
-    timeinfo = localtime ( &rawtime );
-    year = timeinfo->tm_year+1900;
-    month = timeinfo->tm_mon+1;
-    day = timeinfo->tm_mday;
-    hours = timeinfo->tm_hour;
-    minutes = timeinfo->tm_min;
-    seconds = timeinfo->tm_sec;
-  }
-  else {
-  	sscanf(str, "%d-%02d-%02dT%02d:%02d:%02d", &year, &month, &day, &hours, &minutes, &seconds);
-  }
-
-	dateTime.year = year;
-	dateTime.month = month;
-	dateTime.day = day;
-	dateTime.hours = hours;
-	dateTime.minutes = minutes;
-	dateTime.seconds = seconds;
-	
-	return dateTime;		
-}
+// icGetDateTimeValue is now implemented in IccProfLib/IccUtil.cpp
 
 icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
 {	
@@ -1412,7 +1140,7 @@ icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
 	
   attr = icXmlFindAttr(pNode, "VendorSpecific");
   if (attr) {
-    icUInt64Number vendor;
+    icUInt64Number vendor = 0;
     sscanf(icXmlAttrValue(attr), "%llx", &vendor);
     devAttr |= vendor;
   }
@@ -1437,37 +1165,7 @@ icColorantEncoding icGetColorantValue(const icChar* str)
   return icColorantUnknown;
 }
 
-icMeasurementUnitSig icGetMeasurementValue(const icChar* str)
-{
-	if (!strcmp(str, "Status A"))  
-		return icSigStatusA;  
-
-	if (!strcmp(str, "Status E"))  
-		return icSigStatusE;  
-
-	if (!strcmp(str, "Status I"))  
-		return icSigStatusI;  
-
-	if (!strcmp(str, "Status T"))  
-		return icSigStatusT;  
-
-	if (!strcmp(str, "Status M"))  
-		return icSigStatusM;  
-
-	if (!strcmp(str, "DIN with no polarizing filter"))  
-		return icSigDN;  
-
-	if (!strcmp(str, "DIN with polarizing filter"))  
-		return icSigDNP;  
-
-	if (!strcmp(str, "Narrow band DIN with no polarizing filter"))  
-		return icSigDNN;  
-
-	if (!strcmp(str, "Narrow band DIN with polarizing filter"))  
-		return icSigDNNP; 
-
-  return icSigStatusA;
-}
+// icGetMeasurementValue moved to IccProfLib/IccUtil.cpp
 
 const std::string icGetDeviceAttrName(icUInt64Number devAttr)
 {
@@ -1536,7 +1234,8 @@ const std::string icGetHeaderFlagsName(icUInt32Number flags, bool bUsesMCS)
     xml += line;
   }
 
-  icUInt32Number otherFlags = ~(icEmbeddedProfileTrue | icUseWithEmbeddedDataOnly | icExtendedRangePCS);
+  // these #defines really should be const icUint32Number
+  icUInt32Number otherFlags = (icUInt32Number)( ~(icEmbeddedProfileTrue | icUseWithEmbeddedDataOnly | icExtendedRangePCS) );
 
   if (bUsesMCS) {
     if (flags & icMCSNeedsSubsetTrue)
@@ -1545,12 +1244,12 @@ const std::string icGetHeaderFlagsName(icUInt32Number flags, bool bUsesMCS)
       snprintf(line, lineSize, " MCSNeedsSubset=\"false\"");
     xml += line;
 
-    otherFlags &= ~icMCSNeedsSubsetTrue;
+    otherFlags &= ~(icUInt32Number)icMCSNeedsSubsetTrue;
   }
 
   if (flags & otherFlags) {
-    snprintf(line, lineSize, " VendorFlags=\"%08x\"", flags & otherFlags);
-    xml += line;  		
+    snprintf(line, lineSize, " VendorFlags=\"%08x\"", (unsigned int) ( flags & otherFlags) );
+    xml += line;
   }
 
   xml += "/>\n";
@@ -1571,3 +1270,31 @@ const std::string icGetPadSpace(double value)
    return space;
 }
 
+// See IccUtilXml.h for rationale — safe integer parsers to replace
+// `atoi(icXmlAttrValue(...))` patterns that silently narrow to u8/u16.
+bool icXmlParseU16(const char *s, icUInt16Number &out, icUInt16Number max_value)
+{
+  if (!s || !*s) return false;
+  // strtoul accepts an optional leading sign; explicitly reject '-' so
+  // that "-0", "-1", etc. are refused rather than wrapping or returning 0.
+  if (*s == '-') return false;
+  char *end = nullptr;
+  errno = 0;
+  unsigned long v = std::strtoul(s, &end, 10);
+  if (*end != '\0' || errno == ERANGE || v > max_value) return false;
+  out = static_cast<icUInt16Number>(v);
+  return true;
+}
+
+bool icXmlParseU32(const char *s, icUInt32Number &out, icUInt32Number max_value)
+{
+  if (!s || !*s) return false;
+  // Same sign guard as icXmlParseU16.
+  if (*s == '-') return false;
+  char *end = nullptr;
+  errno = 0;
+  unsigned long long v = std::strtoull(s, &end, 10);
+  if (*end != '\0' || errno == ERANGE || v > max_value) return false;
+  out = static_cast<icUInt32Number>(v);
+  return true;
+}

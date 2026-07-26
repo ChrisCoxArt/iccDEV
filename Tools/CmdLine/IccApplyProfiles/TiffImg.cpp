@@ -71,29 +71,116 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <limits>
 #include "TiffImg.h"
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
-#ifdef _DEBUG
+
+#if false && defined(_DEBUG)
 #undef THIS_FILE
 static char THIS_FILE[]=__FILE__;
 #define new DEBUG_NEW
 #endif
+
+// Wrap this translation unit in the iccDEV namespace under the library-wide
+// USEICCDEVNAMESPACE convention (see IccArrayFactory.cpp / IccTagFactory.cpp,
+// and the sibling guard in IccTagEmbedIcc.cpp / IccTagJson.cpp). This localizes
+// the file-local anonymous namespace below (the #1204 bounds-checking helpers
+// kMaxTiffSamples / checkedUInt32 / calcBytesPerLine / canCreateRegularOutput)
+// so it documents as iccDEV::anonymous_namespace{TiffImg.cpp} instead of a
+// top-level anonymous_namespace{} (issue #1428). The macro is off in the default
+// build, so this is compiled away there and only the Doxygen pass / namespace-
+// enabled builds see the wrapper; behaviour and linkage are unchanged either way
+// (the helpers keep internal linkage from the anonymous namespace regardless).
+#ifdef USEICCDEVNAMESPACE
+namespace iccDEV {
+#endif
+
+namespace {
+
+const icUInt16Number kMaxTiffSamples = std::numeric_limits<icUInt16Number>::max();
+
+bool checkedUInt32(icUInt64Number value, unsigned int &result)
+{
+  if (value > static_cast<icUInt64Number>(std::numeric_limits<unsigned int>::max()))
+    return false;
+
+  result = static_cast<unsigned int>(value);
+  return true;
+}
+
+bool checkedUInt32Product(unsigned int a, unsigned int b, unsigned int &result)
+{
+  return checkedUInt32(static_cast<icUInt64Number>(a) * b, result);
+}
+
+bool canCreateRegularOutput(const char* szFname)
+{
+#if defined(_WIN32)
+  return true;
+#else
+  struct stat st;
+  if (stat(szFname, &st) != 0)
+    return true;
+
+  return S_ISREG(st.st_mode);
+#endif
+}
+
+bool calcBytesPerLine(unsigned int width, unsigned int bitsPerSample,
+                      unsigned int samples, unsigned int &bytesPerLine)
+{
+  if (!width || !bitsPerSample || !samples)
+    return false;
+
+  icUInt64Number bitsPerLine = static_cast<icUInt64Number>(width) *
+                               bitsPerSample * samples;
+  icUInt64Number bytes = bitsPerLine / 8;
+
+  if (bitsPerLine % 8)
+    bytes++;
+
+  return checkedUInt32(bytes, bytesPerLine);
+}
+
+}
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
 
 CTiffImg::CTiffImg()
+  : m_hTif(NULL),
+    m_bRead(false),
+    m_nWidth(0),
+    m_nHeight(0),
+    m_nBitsPerSample(0),
+    m_nBytesPerSample(0),
+    m_nPhoto(0),
+    m_nSamples(0),
+    m_nExtraSamples(0),
+    m_nPlanar(0),
+    m_nCompress(0),
+    m_nSampleFormat(SAMPLEFORMAT_UINT),
+    m_nOrientation(ORIENTATION_TOPLEFT),
+    m_fXRes(0.0f),
+    m_fYRes(0.0f),
+    m_nBytesPerLine(0),
+    m_nRowsPerStrip(0),
+    m_nStripSize(0),
+    m_nStripSamples(0),
+    m_nStripsPerSample(0),
+    m_nBytesPerStripLine(0),
+    m_pStripBuf(NULL),
+    m_nCurLine(0),
+    m_nCurStrip(0),
+    m_pProfile(NULL),
+    m_nProfileLength(0)
 {
-  m_nWidth = 0;
-  m_nHeight = 0;
-  m_nBitsPerSample = 0;
-  m_nSamples = 0;
-  m_nExtraSamples = 0;
-
-  m_hTif = NULL;
-  m_pStripBuf = NULL;
 }
 
 CTiffImg::~CTiffImg()
@@ -103,15 +190,25 @@ CTiffImg::~CTiffImg()
 
 void CTiffImg::Close()
 {
-  m_nWidth = 0;
-  m_nHeight = 0;
-  m_nBitsPerSample = 0;
-  m_nSamples = 0;
-  m_nExtraSamples = 0;
+  // Close() is both the public reset and the destructor's cleanup (~CTiffImg
+  // calls it), and Create()/Open() call it up front to recycle an instance.
+  // Previously it released the two heap resources but only zeroed five of the
+  // scalar members, leaving the rest (geometry, strip layout, cursors, photo,
+  // resolution, profile fields) holding values from the prior image.  A reused
+  // object therefore did not return to its freshly-constructed state, so a stale
+  // member could leak into the next Open()/Create() if any path read it before
+  // re-initializing it.  Align Close() with the constructor: free what is owned,
+  // then reset EVERY member to the exact value CTiffImg::CTiffImg() initializes
+  // it to, in the same order, so post-Close state is identical to post-ctor and
+  // the object is safe to reuse (#1429).
 
+  // Release owned resources first.  m_hTif is the libtiff handle; m_pStripBuf is
+  // the only heap buffer this class allocates (in Open()/Create()).  Note
+  // m_pProfile/m_nProfileLength are vestigial: GetIccProfile()/SetIccProfile()
+  // route the ICC payload through libtiff's own TIFFTAG_ICCPROFILE storage and
+  // never assign m_pProfile, so nulling it (below) frees nothing and cannot leak.
   if (m_hTif) {
     TIFFClose(m_hTif);
-
     m_hTif = NULL;
   }
 
@@ -119,6 +216,32 @@ void CTiffImg::Close()
     free(m_pStripBuf);
     m_pStripBuf = NULL;
   }
+
+  // Reset all remaining members to their ctor-initialized values (ctor order).
+  m_bRead = false;
+  m_nWidth = 0;
+  m_nHeight = 0;
+  m_nBitsPerSample = 0;
+  m_nBytesPerSample = 0;
+  m_nPhoto = 0;
+  m_nSamples = 0;
+  m_nExtraSamples = 0;
+  m_nPlanar = 0;
+  m_nCompress = 0;
+  m_nSampleFormat = SAMPLEFORMAT_UINT;
+  m_nOrientation = ORIENTATION_TOPLEFT;
+  m_fXRes = 0.0f;
+  m_fYRes = 0.0f;
+  m_nBytesPerLine = 0;
+  m_nRowsPerStrip = 0;
+  m_nStripSize = 0;
+  m_nStripSamples = 0;
+  m_nStripsPerSample = 0;
+  m_nBytesPerStripLine = 0;
+  m_nCurLine = 0;
+  m_nCurStrip = 0;
+  m_pProfile = NULL;
+  m_nProfileLength = 0;
 }
 
 bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHeight,
@@ -127,6 +250,15 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
 {
   Close();
   m_bRead = false;
+
+  if (nBPS % 8)
+    return false;
+
+  if (bCompress && nBPS != 8 && nBPS != 16 && nBPS != 32)
+    return false;
+
+  if (nSamples == 0 || nSamples > kMaxTiffSamples || nExtraSamples > nSamples)
+    return false;
 
   m_nWidth = nWidth;
   m_nHeight = nHeight;
@@ -138,6 +270,13 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
   m_fYRes = fYRes;
   m_nPlanar = bSep ? PLANARCONFIG_SEPARATE : PLANARCONFIG_CONTIG;
   m_nCompress = bCompress ? COMPRESSION_LZW : COMPRESSION_NONE;
+  m_nSampleFormat = SAMPLEFORMAT_UINT;
+  
+  // fix up some common errors from malformed TIFF files (which could cause errors down the line)
+  if (m_fXRes <= 0.0)
+    m_fXRes = 96.0;
+  if (m_fYRes <= 0.0)
+    m_fYRes = 96.0;
 
   switch(nPhoto) {
   case PHOTO_RGB:
@@ -167,6 +306,11 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
     break;
   }
 
+  if (!canCreateRegularOutput(szFname)) {
+    TIFFError(szFname,"Output image must be a regular file");
+    return false;
+  }
+
   m_hTif = TIFFOpen(szFname, "w");
   if (!m_hTif) {
     TIFFError(szFname,"Can not open output image");
@@ -178,22 +322,30 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
   TIFFSetField(m_hTif, TIFFTAG_PLANARCONFIG, m_nPlanar);
   TIFFSetField(m_hTif, TIFFTAG_SAMPLESPERPIXEL, m_nSamples);
   if (m_nExtraSamples) {
-    unsigned short* extrasamplevalues = (unsigned short*)calloc(m_nExtraSamples, sizeof(unsigned short));
-    if (extrasamplevalues) {
-      TIFFSetField(m_hTif, TIFFTAG_EXTRASAMPLES, m_nExtraSamples, extrasamplevalues);
-      free(extrasamplevalues);
+    unsigned short* extrasamplevalues = static_cast<unsigned short*>(calloc(m_nExtraSamples, sizeof(unsigned short)));
+    if (!extrasamplevalues) {
+      Close();
+      return false;
+    }
+    int extraStatus = TIFFSetField(m_hTif, TIFFTAG_EXTRASAMPLES, m_nExtraSamples, extrasamplevalues);
+    free(extrasamplevalues);
+    if (extraStatus != 1) {
+      Close();
+      return false;
     }
   }
   TIFFSetField(m_hTif, TIFFTAG_BITSPERSAMPLE, m_nBitsPerSample);
-  if (m_nBitsPerSample==32)
+  if (m_nBitsPerSample >= 32) {
+    m_nSampleFormat = SAMPLEFORMAT_IEEEFP;
     TIFFSetField(m_hTif, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_IEEEFP);
+  }
   TIFFSetField(m_hTif, TIFFTAG_ROWSPERSTRIP, m_nRowsPerStrip);
   TIFFSetField(m_hTif, TIFFTAG_COMPRESSION, m_nCompress);
-  TIFFSetField(m_hTif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+  TIFFSetField(m_hTif, TIFFTAG_ORIENTATION, m_nOrientation);
   TIFFSetField(m_hTif, TIFFTAG_XRESOLUTION, fXRes);
   TIFFSetField(m_hTif, TIFFTAG_YRESOLUTION, fYRes);
   if (bCompress) {
-    if (m_nBitsPerSample==32) {
+    if (m_nBitsPerSample >= 32) {
       TIFFSetField(m_hTif, TIFFTAG_PREDICTOR, PREDICTOR_FLOATINGPOINT);
     }
     else {
@@ -203,6 +355,9 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
 
   m_nCurLine = 0;
   m_nCurStrip = 0;
+  
+  // we should always calculate this
+  m_nBytesPerSample = m_nBitsPerSample / 8;
 
   if (bSep && m_nSamples>1) {
     m_nStripSamples = m_nSamples;
@@ -210,7 +365,6 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
       Close();
       return false;
     }
-    m_nBytesPerSample = m_nBitsPerSample / 8;
 
     m_nStripSize = (unsigned int)TIFFStripSize(m_hTif);
     m_nBytesPerStripLine = m_nWidth * m_nBytesPerSample;
@@ -221,9 +375,9 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
     }
     m_nBytesPerLine = m_nWidth * m_nBytesPerSample * m_nSamples;
 
-    m_pStripBuf = (unsigned char*)malloc(m_nStripSize*m_nStripSamples);
+    m_pStripBuf = static_cast<unsigned char*>(malloc((size_t)m_nStripSize*m_nStripSamples));
 
-    if (!m_pStripBuf) {
+    if (m_nRowsPerStrip == 0 || !m_pStripBuf) {
       Close();
       return false;
     }
@@ -247,26 +401,29 @@ bool CTiffImg::Open(const char *szFname)
     TIFFError(szFname,"Can not open input image");
     return false;
   }
-  //icUInt16Number nPlanar=PLANARCONFIG_CONTIG;
-  icUInt16Number nOrientation=ORIENTATION_TOPLEFT;
-  icUInt16Number nSampleFormat=SAMPLEFORMAT_UINT;
   icUInt16Number *nSampleInfo=NULL;
 
-  TIFFGetField(m_hTif, TIFFTAG_IMAGEWIDTH, &m_nWidth);
-  TIFFGetField(m_hTif, TIFFTAG_IMAGELENGTH, &m_nHeight);
-  TIFFGetField(m_hTif, TIFFTAG_PHOTOMETRIC, &m_nPhoto);
-  TIFFGetField(m_hTif, TIFFTAG_PLANARCONFIG, &m_nPlanar);
-  TIFFGetField(m_hTif, TIFFTAG_SAMPLESPERPIXEL, &m_nSamples);
+  if (!TIFFGetField(m_hTif, TIFFTAG_IMAGEWIDTH, &m_nWidth) ||
+      !TIFFGetField(m_hTif, TIFFTAG_IMAGELENGTH, &m_nHeight) ||
+      !TIFFGetField(m_hTif, TIFFTAG_PHOTOMETRIC, &m_nPhoto) ||
+      !TIFFGetField(m_hTif, TIFFTAG_BITSPERSAMPLE, &m_nBitsPerSample)) {
+    Close();
+    return false;
+  }
+
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_PLANARCONFIG, &m_nPlanar);
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_SAMPLESPERPIXEL, &m_nSamples);
   TIFFGetField(m_hTif, TIFFTAG_EXTRASAMPLES, &m_nExtraSamples, &nSampleInfo);
-  TIFFGetField(m_hTif, TIFFTAG_BITSPERSAMPLE, &m_nBitsPerSample);
-  TIFFGetField(m_hTif, TIFFTAG_SAMPLEFORMAT, &nSampleFormat);
-  TIFFGetField(m_hTif, TIFFTAG_ROWSPERSTRIP, &m_nRowsPerStrip);
-  TIFFGetField(m_hTif, TIFFTAG_ORIENTATION, &nOrientation);
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_SAMPLEFORMAT, &m_nSampleFormat);
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_ROWSPERSTRIP, &m_nRowsPerStrip);
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_ORIENTATION, &m_nOrientation);
   TIFFGetField(m_hTif, TIFFTAG_XRESOLUTION, &m_fXRes);
   TIFFGetField(m_hTif, TIFFTAG_YRESOLUTION, &m_fYRes);
-  TIFFGetField(m_hTif, TIFFTAG_COMPRESSION, &m_nCompress);
+  TIFFGetFieldDefaulted(m_hTif, TIFFTAG_COMPRESSION, &m_nCompress);
   
-  if (m_nRowsPerStrip == 0 || m_nSamples == 0 || m_nBitsPerSample == 0) {
+  if (m_nWidth == 0 || m_nHeight == 0 || m_nRowsPerStrip == 0 ||
+      m_nSamples == 0 || m_nSamples > kMaxTiffSamples ||
+      m_nExtraSamples > m_nSamples || m_nBitsPerSample == 0) {
     // Corrupt parameters - can't read the file
     // If the file is uncompressed, we might guess some of the values,
     // but it would take a bit of testing to get right.  Probably not worth it.
@@ -277,26 +434,46 @@ bool CTiffImg::Open(const char *szFname)
   if (m_nRowsPerStrip > m_nHeight)
     m_nRowsPerStrip = m_nHeight;    // best guess, to limit memory allocated
 
-  //Validate what we expect to work with
-  if ((m_nBitsPerSample==32 && nSampleFormat!=SAMPLEFORMAT_IEEEFP) ||
-      (m_nBitsPerSample!=32 && nSampleFormat!=SAMPLEFORMAT_UINT) ||
-       nOrientation != ORIENTATION_TOPLEFT) {
+  // Validate what we expect to work with:
+  // 32 bit or greater is floating point
+  // less than 32 bit is unsigned integer
+  // this could be more general, but will require more code and testing
+  if ((m_nBitsPerSample >= 32 && m_nSampleFormat != SAMPLEFORMAT_IEEEFP) ||
+      (m_nBitsPerSample < 32 && m_nSampleFormat != SAMPLEFORMAT_UINT) ||
+       m_nOrientation != ORIENTATION_TOPLEFT) {
     Close();
     return false;
   }
   
+  // fix up some common errors from malformed TIFF files (which could cause errors down the line)
+  if (m_fXRes <= 0.0)
+    m_fXRes = 96.0;
+  if (m_fYRes <= 0.0)
+    m_fYRes = 96.0;
+  
   m_nCurStrip=(unsigned int)-1;
   m_nCurLine = 0;
 
-  m_nStripSize = (unsigned int)TIFFStripSize(m_hTif);
+  tmsize_t stripSize = TIFFStripSize(m_hTif);
+  if (stripSize <= 0 ||
+      !checkedUInt32(static_cast<icUInt64Number>(stripSize), m_nStripSize)) {
+    Close();
+    return false;
+  }
 
   if (m_nSamples>1 && m_nPlanar==PLANARCONFIG_SEPARATE) {
     m_nStripSamples = m_nSamples;
-    m_nBytesPerLine = (m_nWidth * m_nBitsPerSample * m_nSamples + 7)>>3;
-    m_nBytesPerSample = m_nBitsPerSample / 8;
-    m_nBytesPerStripLine = m_nWidth * m_nBytesPerSample;
     //Only support bitspersample that fits on byte boundary
     if (m_nBitsPerSample%8) {
+      Close();
+      return false;
+    }
+    if (!calcBytesPerLine(m_nWidth, m_nBitsPerSample, m_nSamples, m_nBytesPerLine)) {
+      Close();
+      return false;
+    }
+    m_nBytesPerSample = m_nBitsPerSample / 8;
+    if (m_nRowsPerStrip == 0 || !checkedUInt32Product(m_nWidth, m_nBytesPerSample, m_nBytesPerStripLine)) {
       Close();
       return false;
     }
@@ -309,10 +486,28 @@ bool CTiffImg::Open(const char *szFname)
   }
   else {
     m_nStripSamples = 1;
-    m_nBytesPerLine = (m_nWidth * m_nBitsPerSample * m_nSamples + 7)>>3;
+    if (!calcBytesPerLine(m_nWidth, m_nBitsPerSample, m_nSamples, m_nBytesPerLine)) {
+      Close();
+      return false;
+    }
+  }
+  
+  // Just in case we had to recalc the strip byte count,
+  //   it is safer to have the buffer too large than too small.
+  unsigned int minStripSize = 0;
+  if (!checkedUInt32Product(m_nRowsPerStrip, m_nBytesPerLine, minStripSize)) {
+    Close();
+    return false;
+  }
+  m_nStripSize = std::max( m_nStripSize, minStripSize );
+  
+  unsigned int stripBufferSize = 0;
+  if (!checkedUInt32Product(m_nStripSize, m_nStripSamples, stripBufferSize)) {
+    Close();
+    return false;
   }
 
-  m_pStripBuf = (unsigned char*)malloc(m_nStripSize*m_nStripSamples);
+  m_pStripBuf = static_cast<unsigned char*>(malloc((size_t)stripBufferSize));
 
   if (!m_pStripBuf) {
     Close();
@@ -325,7 +520,9 @@ bool CTiffImg::Open(const char *szFname)
 
 bool CTiffImg::ReadLine(unsigned char *pBuf)
 {
-  if (!m_bRead || m_nRowsPerStrip == 0)
+  if (!m_bRead || m_nRowsPerStrip == 0 ||
+      m_nSamples == 0 || m_nSamples > kMaxTiffSamples ||
+      m_nStripSamples == 0 || m_nStripSamples > kMaxTiffSamples)
     return false;
 
   unsigned int nStrip = m_nCurLine / m_nRowsPerStrip;
@@ -376,7 +573,9 @@ bool CTiffImg::ReadLine(unsigned char *pBuf)
 
 bool CTiffImg::WriteLine(unsigned char *pBuf)
 {
-  if (m_bRead)
+  if (m_bRead ||
+      m_nSamples == 0 || m_nSamples > kMaxTiffSamples ||
+      m_nStripSamples == 0 || m_nStripSamples > kMaxTiffSamples)
     return false;
 
   if (m_nCurStrip < m_nHeight) { //Contig to Sep
@@ -428,8 +627,14 @@ unsigned int CTiffImg::GetPhoto()
     return PHOTO_CIELAB;
   else if (m_nPhoto==PHOTOMETRIC_ICCLAB)
     return PHOTO_ICCLAB;
+  else if (m_nPhoto==PHOTOMETRIC_PALETTE)
+    // Palette TIFFs previously fell through to PHOTO_MINISWHITE and were silently
+    // accepted; give them their own value so callers can reject them (#1381).
+    return PHOTO_PALETTE;
   else
-    return PHOTO_MINISWHITE;
+    // Report unrecognised photometrics as UNKNOWN rather than masking them as
+    // PHOTO_MINISWHITE, so callers fail closed on unsupported input (#1380).
+    return PHOTO_UNKNOWN;
 }
 
 
@@ -445,7 +650,9 @@ bool CTiffImg::GetIccProfile(unsigned char *&pProfile, unsigned int &nLen)
 
 bool CTiffImg::SetIccProfile(unsigned char *pProfile, unsigned int nLen)
 {
-  TIFFSetField(m_hTif, TIFFTAG_ICCPROFILE, nLen, pProfile);
-  
-  return true;
+  return TIFFSetField(m_hTif, TIFFTAG_ICCPROFILE, nLen, pProfile) == 1;
 }
+
+#ifdef USEICCDEVNAMESPACE
+} //namespace iccDEV
+#endif

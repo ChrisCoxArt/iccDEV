@@ -79,8 +79,8 @@ Copyright:  (c) see Software License
 namespace iccDEV {
 #endif
 
-class CIccTagStruct;
-class CIccTagArray;
+class ICCPROFLIB_API CIccTagStruct;
+class ICCPROFLIB_API CIccTagArray;
 
 /**
 ****************************************************************************
@@ -194,6 +194,7 @@ protected:
   IIccStruct *m_pStruct; //Note: The CIccTagStruct will delete the m_pStruct in destructor
 
   void Cleanup();
+  void CopyElems(const CIccTagStruct &subTags);
   IccTagEntry* GetElem(icSignature sig) const;
   IccTagEntry* GetElem(CIccTag *pTag) const;
 

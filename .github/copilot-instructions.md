@@ -1,130 +1,120 @@
 # Copilot Instructions for iccDEV
 
-## Project Overview
-iccDEV is an open source set of libraries and tools for interaction, manipulation, and application of ICC-based color management profiles. The project is maintained by the International Color Consortium (ICC) and uses the BSD 3-Clause License.
+Use this as the short cross-cutting guide. Path-specific details auto-load from
+`.github/instructions/*.instructions.md`; prefer those files over duplicating
+commands here.
 
-## Code Style Guidelines
+## Path-Specific Instructions
 
-### Indentation and Formatting
-- Use **2 space indentation**, no tabs
-- Use **K&R brace style**
-- Aim for zero compiler warnings and static analysis warnings across all platforms
+| Pattern | File | Purpose |
+|---------|------|---------|
+| `.github/workflows/**` | `instructions/workflow-governance.instructions.md` | Shell hardening, injection prevention, output sanitization |
+| `.github/labels.yml`, `.github/labeler.yml` | `instructions/workflow-governance.instructions.md` | Maintainer-owned label automation and trusted write workflows |
+| `.github/scripts/**` | `instructions/sanitizer-scripts.instructions.md` | `sanitize-sed.sh` and `sanitize.ps1` APIs |
+| `Build/**` | `instructions/build-system.instructions.md` | CMake, platform notes, sanitizer options, WASM/LTO |
+| `IccProfLib/**`, `IccXML/**`, `Tools/**`, `IccJSON/**`, `IccConnect/**` | `instructions/icc-library-code.instructions.md` | Parser hardening and C++ safety patterns |
+| `Testing/**` | `instructions/testing.instructions.md` | Test scripts, profile directories, regression flow |
+| `IccProfLib/icProfileHeader.h` | `instructions/icc-specification.instructions.md` | ICC header, tag, and color-space rules |
+| `ports/**` | `instructions/vcpkg-port.instructions.md` | vcpkg overlay port and CI |
+| `python/**` | `instructions/python-bindings.instructions.md` | Cython build, tests, and `ICCDEV_BUILD_DIR` |
+| `matlab/**` | `instructions/matlab-mex.instructions.md` | MEX gateway, OOP layer, and `build_mex.m` |
+| `Tools/Winnt/IccIisIsapi/**` | `Tools/Winnt/IccIisIsapi/isapi-instructions.md` | IIS ISAPI setup and hardening |
 
-### Naming Conventions
-- Prefix class/struct members with `m_` (e.g., `m_variableName`)
-- No uniform convention for general variables - match nearby code
-- Use descriptive names
+## Current JSON/Config Regression Gate
 
-### Code Organization
-- Multiple classes per file, grouped by functionality
-- Use header guards in all header files
-- Minimize pollution of the `std` namespace
-- Const correctness: make inputs const when possible, class functions const when appropriate
+JSON/config parser fixes must fail closed: reject short arrays, non-numeric
+required values, failed nested `ParseJson()`, bad struct members, malformed
+fixed-size arrays, and stale reset/fromJson state.
 
-### Language Features
-- **Error handling**: Use manual return values, NOT exceptions (this is the existing pattern)
-- **Containers**: Prefer STL containers, but the codebase historically uses raw pointers
-- **Templates**: Currently minimal use. Ensure new templates are readable
-- **Namespaces**: Not currently using namespaces (work in progress)
-- **C++ Standard**: Requires C++17 or higher
+Canonical regression scripts:
 
-### Comments
-- No consistent style exists - match nearby code
-- Don't over-comment obvious code
+- `.github/scripts/iccdev-json-parser-regression-tests.sh`
+- `.github/scripts/iccdev-json-cfg-tests.sh`
+- `.github/scripts/iccdev-stdobserver-regression-tests.sh`
+- `.github/scripts/iccdev-mluc-setter-regression-tests.sh`
+- `.github/scripts/iccdev-mluc-read-utf16-regression-tests.sh`
+- `.github/scripts/iccdev-cam-degenerate-regression-tests.sh`
+- `.github/scripts/iccdev-namedcolor-apply-regression-tests.sh`
+- `.github/scripts/iccdev-v5-namedcmm-regression-tests.sh`
 
-## Build System
+For regression workflow updates, use
+`.github/skills/regression-workflow-governance/SKILL.md` and
+`docs/regression-workflow-governance.md`.
 
-### Primary Build Tool
-- CMake-based build system located in `Build/Cmake/`
-- Supports multiple platforms: Linux, macOS, Windows
+For maintainer regression-container use, PR validation, and issue reproduction,
+use `.github/skills/regression-container-maintainer/SKILL.md` and
+`docs/regression-container.md`.
 
-## Required libraries
+## Build, Test, and Safety
 
-| Platform          | Libraries                                                                 |
-|-------------------|---------------------------------------------------------------------------|
-| **macOS**         | libpng, jpeg, libtiff, libxml2, wxwidgets, nlohmann-json                  |
-| **Windows**       | libpng, libjpeg-turbo, libtiff, libxml2, wxwidgets, nlohmann-json         |
-| **Linux (Ubuntu)** | libpng-dev, libjpeg-dev, libtiff-dev, libxml2-dev, wxwidgets*, nlohmann-json |
+- User build instructions: `docs/build.md`
+- Maintainer build and sanitizer policy: `.github/instructions/build-system.instructions.md`
+- Test profile workflow: `.github/instructions/testing.instructions.md`
+- Workflow governance: `.github/instructions/workflow-governance.instructions.md`
 
-\* **Note:** On Ubuntu, `wxwidgets` is installed via distribution-specific development packages  
-(e.g. `libwxgtk3.2-dev`). Refer to the `apt install` command below for the exact package names.
+## iccdev-mcp Review Notes
 
-### Build Commands
-#### Ubuntu
+- Keep user-facing MCP setup docs task-oriented; put reviewer and agent guidance
+  in `.github/` files or prompts.
+- When reviewing repository MCP settings, compare the `mcpServers.iccdev.tools`
+  allowlist against the MCP tool names from `iccdev_mcp/server.py`, not the REST
+  route aliases from `/api/tools`. REST names such as `sig_to_str`,
+  `list_profiles`, `to_xml`, `from_xml`, and `spec_sep` intentionally differ
+  from MCP names such as `icc_sig_to_str`, `list_available_profiles`,
+  `profile_to_xml`, `xml_to_profile`, and `spec_sep_to_tiff`.
+- For `profile_summary`, keep raw ICC signature fields unchanged and expose
+  printable `*_display` fields only for UI readability. ICC signature values may
+  arrive as either 4-character strings or raw 32-bit integers, so both forms need
+  test coverage.
+- Dashboard changes should preserve stale-output reset when switching tools.
 
-```
-export CXX=clang++
-git clone https://github.com/InternationalColorConsortium/iccdev.git iccdev
-cd iccdev/Build
-sudo apt install -y libpng-dev libjpeg-dev libtiff-dev libwxgtk3.2-dev libwxgtk-{media,webview}3.2-dev wx-common wx3.2-headers curl git make cmake clang{,-tools} libxml2{,-dev} nlohmann-json3-dev build-essential
-cmake Cmake
-make -j"$(nproc)"
+Key safety rules:
 
-```
+- 2-space C++ indentation, K&R braces, no tabs.
+- Member prefix `m_`; match nearby naming and ownership patterns.
+- Error handling uses return values, not exceptions.
+- New files need ICC copyright and BSD 3-Clause header unless generated.
+- Validate all file-controlled sizes, offsets, counts, and loop bounds.
+- Bounds check pattern: `if (size > limit || offset > limit - size)`.
+- Exit 1-127 is graceful failure, not a crash; exit 128+ is signal termination.
 
-#### macOS
+## Prompts
 
-```
-export CXX=clang++
-brew install libpng nlohmann-json libxml2 wxwidgets libtiff jpeg
-git clone https://github.com/InternationalColorConsortium/iccdev.git iccdev
-cd iccdev
-cmake -G "Xcode" Build/Cmake
-xcodebuild -project RefIccMAX.xcodeproj
-open RefIccMAX.xcodeproj
-```
+| Task | Prompt |
+|------|--------|
+| Bisect regression | `.github/prompts/bisect-regression.prompt.md` |
+| Reproduce security issue | `.github/prompts/reproduce-security-issue.prompt.md` |
+| File issue | `.github/prompts/file-security-issue.prompt.md` |
+| Code review hunting | `.github/prompts/code-review-hunting.prompt.md` |
+| Reduce documentation noise | `.github/prompts/reduce-doc-noise.prompt.md` |
+| Build/test/coverage | `.github/prompts/build-and-test.prompt.md` |
+| Regression workflow gate | `.github/prompts/add-regression-workflow.prompt.md` |
+| Maintainer regression container | `.github/prompts/regression-container-maintainer.prompt.md` |
+| Workflow governance audit | `.github/prompts/audit-workflow-governance.prompt.md` |
+| Maintainer label triage | `.github/prompts/maintainer-label-triage.prompt.md` |
+| vcpkg debug | `.github/prompts/vcpkg-port-debug.prompt.md` |
+| Debug MCP subprocess | `.github/prompts/debug-mcp-subprocess.prompt.md` |
+| Debug Python/Cython bindings | `.github/prompts/debug-python-bindings.prompt.md` |
+| Debug WASM build | `.github/prompts/debug-wasm-build.prompt.md` |
 
-#### Windows MSVC
+## Skills
 
-```
-git clone https://github.com/InternationalColorConsortium/iccdev.git iccdev
-cd iccdev
-vcpkg integrate install
-vcpkg install
-cmake --preset vs2022-x64 -B . -S Build/Cmake
-cmake --build . -- /m /maxcpucount
-```
+| Task | Skill |
+|------|-------|
+| Documentation maintenance | `.github/skills/docs-maintenance/SKILL.md` |
+| Sanitizer reproduction | `.github/skills/sanitizer-repro/SKILL.md` |
+| JSON/config regressions | `.github/skills/json-config-regression/SKILL.md` |
+| Regression workflow governance | `.github/skills/regression-workflow-governance/SKILL.md` |
+| Regression container maintainer | `.github/skills/regression-container-maintainer/SKILL.md` |
+| Maintainer label system | `.github/skills/maintainer-label-system/SKILL.md` |
+| Version bump | `.github/skills/version-bump/SKILL.md` |
+| Python bindings tests | `.github/skills/python-bindings-test/SKILL.md` |
+| WASM build tests | `.github/skills/wasm-build-test/SKILL.md` |
 
-## Testing
-- Test scripts located in `Testing/` directory
-- Run tests using `Testing/RunTests.sh` (Unix) or `Testing/RunTests.bat` (Windows)
-- Profile creation: `Testing/CreateAllProfiles.sh` (Unix) or `Testing/CreateAllProfiles.bat` (Windows)
-- Test various ICC profile operations and transformations
+## WASM Notes
 
-## Security Practices
-- Report security issues via GitHub Security Advisory
-- All new source files must begin with ICC Copyright notice and BSD 3-Clause License
-- Follow secure coding practices
-- Validate all inputs, especially when processing ICC profiles
-
-## Legal and Licensing
-
-### Copyright Notice
-All new source files must begin with the ICC Copyright notice and include or reference the BSD 3-Clause "New" or "Revised" License.
-
-### Contributor License Agreement
-Contributors must sign the ICC Contributor License Agreement (CLA) before code can be merged.
-
-## Pull Request Process
-1. Create a topic branch: `feature/<your-feature>` or `bugfix/<your-fix>`
-2. Make focused changes related to the topic
-3. Ensure code compiles and tests pass
-4. Follow existing code style and conventions
-5. Create pull request with clear description
-6. Address review feedback
-7. Requires Committer approval before merge
-
-## Project Structure
-- `IccProfLib/` - Core ICC profile library
-- `IccXML/` - XML handling for ICC profiles
-- `Tools/` - Command-line tools for profile manipulation
-- `Build/` - Build system files (CMake, Xcode)
-- `Testing/` - Test files and scripts
-- `docs/` - Documentation
-
-## Key Considerations
-- This is an older codebase - consistency is valued over perfection
-- Match existing patterns when adding new code
-- Focus on cross-platform compatibility (Linux, macOS, Windows)
-- Performance matters for profile processing
-- Maintain compatibility with ICC specifications
+- The current WASM deliverable is the staged Node/npm-style module package from
+  `Build/Cmake/wasm-package/stage.sh`, not a browser UI.
+- Do not reintroduce or test legacy `wasm/*.html`, `wasm/*.css`, or
+  `wasm/*.js` assets; validate with `wasm-stage/test_all.js` and
+  `wasm-stage/regression.js`.

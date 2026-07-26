@@ -1,75 +1,45 @@
-# iccApplyToLink
+# IccApplyToLink
 
-## Overview
-
-`iccApplyToLink` is a versatile command-line tool that builds either an ICC DeviceLink profile or a `.cube` LUT file by applying a sequence of ICC profiles. It supports fine-grained control over rendering intents, LUT size, interpolation, and Profile Connection Conditions (PCC).
-
-This tool is especially useful for creating link profiles for production workflows or transforming color spaces for VFX, printing, or display calibration.
-
----
-
-## Features
-
-- Supports output as ICC v4/v5 DeviceLink or `.cube` 3D LUT format
-- Accepts a sequence of profiles and rendering intents
-- Handles Profile Connection Conditions (`-PCC`)
-- Applies CMM Environment variables (`-ENV:sig value`)
-- Supports LUT precision and custom input ranges
-- Choice of interpolation methods (linear/tetrahedral)
-
----
+`iccApplyToLink` builds an ICC DeviceLink profile or `.cube` LUT by applying a
+sequence of ICC profiles. It supports rendering intent, LUT size, interpolation,
+and Profile Connection Condition controls.
 
 ## Usage
 
-```sh
-iccApplyToLink output_file link_type lut_size option title min_input max_input use_src_xform interp profile_seq...
-```
-
-### Example
+Run without arguments to print the current command syntax and supported options:
 
 ```sh
-iccApplyToLink myLink.icc 0 33 1 "My DisplayLink" 0.0 1.0 1 1 sRGB.icc 1 printer.icc 1
+iccApplyToLink
 ```
 
----
+Command shape:
 
-## Parameters
+```sh
+iccApplyToLink dst_link_file link_type lut_size option title range_min range_max first_transform interp profile_file_path rendering_intent [...]
+```
 
-- `output_file`: Path to save the ICC or `.cube` output
-- `link_type`:
-  - `0` = ICC DeviceLink
-  - `1` = `.cube` LUT
-- `lut_size`: Grid size per dimension (e.g., 33)
-- `option`:
-  - For ICC: `0` = v4, `1` = v5
-  - For cube: precision (e.g., `4`)
-- `title`: Title embedded in output
-- `min_input` / `max_input`: Input value range, e.g., `0.0` to `1.0`
-- `use_src_xform`: `1` = use source xform from first profile, else destination
-- `interp`: `0` = linear, `1` = tetrahedral
-- `profile_seq`: Sequence of profile files and intents, optionally with:
-  - `-ENV:TAG value` to set environment sigs
-  - `-PCC path.icc` to provide connection conditions
+Key arguments:
 
----
+| Argument | Values |
+|----------|--------|
+| `link_type` | `0` writes an ICC DeviceLink profile; `1` writes a `.cube` text LUT. Other values are rejected. |
+| `lut_size` | Integer grid size from `2` through `255`. |
+| `option` with `link_type=0` | `0` writes a version 4 profile; `1` writes a version 5 profile. |
+| `option` with `link_type=1` | Digits of precision for `.cube` output, from `0` through `20`. |
+| `first_transform` | `0` uses the destination transform from the first profile; `1` uses the source transform from the first profile. |
+| `interp` | `0` linear interpolation; `1` tetrahedral interpolation. |
 
-## Rendering Intents
+For a CMYK output profile to RGB color-space profile chain, use the first
+profile as a source transform and write a DeviceLink profile:
 
-Supports all ICC intents plus combinations:
+```sh
+iccApplyToLink GRACoL_to_sRGB.icc 0 2 1 "GRACoL_to_sRGB" 0 1 1 0 GRACoL2006_Coated1v2.icc 1 sRGB_v4_ICC_preference.icc 0
+```
 
-| Code | Intent |
-|------|--------|
-| 0–3  | Perceptual / Relative / Saturation / Absolute |
-| 10+  | Skip D2Bx/B2Dx |
-| 20+  | Preview Intents |
-| 40+  | BPC-enabled |
-| 50+  | BDRF variations |
-| 100+ | Luminance adjusted |
-| 1000+| V5 sub-profile override |
+`.cube` output requires both source and destination spaces to have exactly three
+channels.
 
----
+## See Also
 
-## Changelog
-
-- Initial implementation by Max Derhak (Mar 2023)
-- Multi-output support and argument extensions by David Hoyt (2025)
+- [CLI tool reference](../../../docs/tools-cli-reference.md)
+- [IccFromCube](../IccFromCube/Readme.md)

@@ -5,7 +5,7 @@
 #
 # Contains:   Implementation of sanitizer for BASH Shell.
 #
-# Version:    V1
+# Version:    V3
 #
 # Copyright:  (c) see Software License
 #------------------------------------------------------------------------------
@@ -54,21 +54,22 @@
 #------------------------------------------------------------------------------
 
 ###############################################################
-# Copyright (©) 2024-2025 David H Hoyt. All rights reserved.
+# Copyright (c) 2024-2025 David H Hoyt. All rights reserved.
 ###############################################################
 #                 https://srd.cx
 #
-# Last Updated: 02-JAN-2026 2100Z by David Hoyt
+# Last Updated: 02-MAR-2026 0045Z by David Hoyt
 #
 # Intent: Try Sanitizing User Controllable Inputs
 #
 # File: .github/scripts/sanitize-sed.sh
-# 
 #
-# Comment: Sanitizing User Controllable Input 
+#
+# Comment: Sanitizing User Controllable Input
 #          - is a Moving Target
 #          - needs ongoing updates
 #          - needs additional unit tests
+#          - v3: Unicode control/bidi/ZWJ stripping
 #
 #
 #
@@ -97,26 +98,68 @@ escape_html() {
   printf '%s' "$s"
 }
 
+# _strip_unicode_control STRING
+# Remove Unicode control/formatting characters that enable Trojan Source,
+# invisible padding, and homoglyph attacks:
+#   - Bidi overrides/embeddings (U+202A-202E, U+2066-2069)
+#   - Zero-width chars (U+200B-200F, U+2060, U+FEFF)
+#   - Tag characters (U+E0001-E007F) - used in emoji but abusable
+# Uses perl for reliable multi-byte removal; falls back to sed byte patterns.
+_strip_unicode_control() {
+  local s="$1"
+  if command -v perl >/dev/null 2>&1; then
+    s="$(printf '%s' "$s" | perl -CS -pe '
+      s/[\x{200B}-\x{200F}]//g;
+      s/[\x{2028}-\x{202F}]//g;
+      s/[\x{2060}-\x{2069}]//g;
+      s/[\x{E0001}-\x{E007F}]//g;
+      s/[\x{FEFF}]//g;
+      s/[\x{FFF9}-\x{FFFB}]//g;
+    ')"
+  else
+    # Fallback: strip known UTF-8 byte sequences for the most dangerous chars
+    s="$(printf '%s' "$s" | sed -E '
+      s/\xe2\x80[\x8b-\x8f]//g;
+      s/\xe2\x80[\xa8-\xaf]//g;
+      s/\xe2\x81[\xa0-\xa9]//g;
+      s/\xf3\xa0[\x80-\x81][\x80-\xbf]//g;
+      s/\xef\xbb\xbf//g;
+      s/\xef\xbf[\xb9-\xbb]//g;
+    ')"
+  fi
+  printf '%s' "$s"
+}
+
 # _strip_ctrl_keep_newlines STRING
 # Remove control characters except newline (0x0A). Also remove NUL.
+# Strips ANSI escape sequences (CSI, OSC, etc.) to prevent log spoofing.
+# Strips Unicode control/formatting characters to prevent Trojan Source attacks.
 _strip_ctrl_keep_newlines() {
   local s="$1"
   # remove CRs explicitly
   s="${s//$'\r'/}"
+  # strip ANSI escape sequences: CSI (\x1b[...m), OSC (\x1b]...\x07), then any remaining bare ESC
+  s="$(printf '%s' "$s" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b//g')"
+  # strip Unicode bidi overrides, zero-width chars, and formatting controls
+  s="$(_strip_unicode_control "$s")"
   # remove NUL and other C0 control chars except LF (0x0A), plus DEL (0x7F)
-  # tr with octal escapes: delete \000-\011 \013 \014 \016-\037 \177
-  # This keeps \n (LF) which is 012 octal.
   s="$(printf '%s' "$s" | tr -d '\000-\011\013\014\016-\037\177')"
   printf '%s' "$s"
 }
 
 # _strip_ctrl_remove_newlines STRING
 # Remove control characters and newlines (useful for single-line outputs).
+# Strips ANSI escape sequences (CSI, OSC, etc.) to prevent log spoofing.
+# Strips Unicode control/formatting characters to prevent Trojan Source attacks.
 _strip_ctrl_remove_newlines() {
   local s="$1"
   # remove CRs and LFs
   s="${s//$'\r'/}"
   s="${s//$'\n'/ }"
+  # strip ANSI escape sequences: CSI (\x1b[...m), OSC (\x1b]...\x07), then any remaining bare ESC
+  s="$(printf '%s' "$s" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b//g')"
+  # strip Unicode bidi overrides, zero-width chars, and formatting controls
+  s="$(_strip_unicode_control "$s")"
   # remove other control characters (NUL, etc.) plus DEL (0x7F)
   s="$(printf '%s' "$s" | tr -d '\000-\011\013\014\016-\037\177')"
   printf '%s' "$s"
@@ -183,6 +226,26 @@ sanitize_print() {
   printf '%s' "$s"
 }
 
+# sanitize_code_line STRING
+# Produce a single-line string for fenced code blocks:
+# - remove CR/LF and control chars
+# - trim
+# - neutralize markdown fence delimiters
+# - truncate to SANITIZE_LINE_MAXLEN
+#
+# Unlike sanitize_line(), this intentionally does not HTML-escape quotes and
+# braces. Use it only inside fenced code blocks so JSON and command output remain
+# readable in GitHub summaries without rendering as HTML.
+sanitize_code_line() {
+  local input="$1"
+  local s
+  s="$(_strip_ctrl_remove_newlines "$input")"
+  s="$(_trim_whitespace "$s")"
+  s="${s//\`\`\`/\` \` \`}"
+  s="$(_truncate "$s" "$SANITIZE_LINE_MAXLEN")"
+  printf '%s' "$s"
+}
+
 # sanitize_ref STRING
 # Sanitize branch, tag or ref names for use in filenames, concurrency groups, etc.
 # - replace disallowed chars with '-'
@@ -196,7 +259,8 @@ sanitize_ref() {
   s="${s//$'\r'/}"
   s="${s//$'\n'/}"
   # replace any character not in the allowed set [A-Za-z0-9._/-] with '-'
-  s="$(printf '%s' "$s" | sed -E 's#[^A-Za-z0-9._/-]#-#g')"
+  # LC_ALL=C ensures byte-level matching (prevents overlong UTF-8 bypass)
+  s="$(printf '%s' "$s" | LC_ALL=C sed -E 's#[^A-Za-z0-9._/-]#-#g')"
   # collapse multiple hyphens
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g')"
   # trim leading/trailing hyphen
@@ -229,9 +293,123 @@ safe_echo_for_summary() {
   printf '\n'
 }
 
+# --- Detection functions (detect-and-alert, not strip-and-pass) -------------
+
+# detect_hidden_chars STRING [LABEL]
+# Detect hidden Unicode characters in STRING. Returns 0 if hidden chars found
+# (DANGEROUS), 1 if clean. Emits [CRITICAL] diagnostics to stderr.
+# LABEL is an optional context label (e.g., "GITHUB_HEAD_REF").
+#
+# Detects:
+#   - BOM / Zero-Width No-Break Space (U+FEFF)
+#   - Bidi overrides/embeddings (U+202A-202E, U+2066-2069)
+#   - Zero-width chars (U+200B-200F, U+2060)
+#   - Line/paragraph separators (U+2028-2029)
+#   - Interlinear annotation (U+FFF9-U+FFFB)
+#   - Any non-ASCII byte in a ref name context
+#
+# Design: This function is a DETECTION system (like GitHub UI warnings),
+# not a sanitization filter. It reports findings without modifying the input.
+# Use sanitize_ref() or sanitize_line() separately for safe output.
+detect_hidden_chars() {
+  local input="$1"
+  local label="${2:-input}"
+  local found=1  # 1 = clean (shell convention: 0=true/found, 1=false/clean)
+  local details=""
+
+  # Skip empty input
+  if [[ -z "$input" ]]; then
+    return 1
+  fi
+
+  # Check for BOM (U+FEFF = EF BB BF in UTF-8)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '\xef\xbb\xbf' 2>/dev/null; then
+    details="${details}  - U+FEFF (BOM / Zero-Width No-Break Space)\n"
+    found=0
+  fi
+
+  # Check for bidi overrides (U+202A-202E = E2 80 AA-AE)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[\xe2][\x80][\xaa-\xae]' 2>/dev/null; then
+    details="${details}  - U+202A-202E (Bidi Override/Embedding)\n"
+    found=0
+  fi
+
+  # Check for bidi isolates (U+2066-2069 = E2 81 A6-A9)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[\xe2][\x81][\xa6-\xa9]' 2>/dev/null; then
+    details="${details}  - U+2066-2069 (Bidi Isolate)\n"
+    found=0
+  fi
+
+  # Check for zero-width chars (U+200B-200F = E2 80 8B-8F)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[\xe2][\x80][\x8b-\x8f]' 2>/dev/null; then
+    details="${details}  - U+200B-200F (Zero-Width Space/Joiner/Mark)\n"
+    found=0
+  fi
+
+  # Check for word joiner (U+2060 = E2 81 A0)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '\xe2\x81\xa0' 2>/dev/null; then
+    details="${details}  - U+2060 (Word Joiner)\n"
+    found=0
+  fi
+
+  # Check for line/paragraph separators (U+2028-2029 = E2 80 A8-A9)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[\xe2][\x80][\xa8-\xa9]' 2>/dev/null; then
+    details="${details}  - U+2028-2029 (Line/Paragraph Separator)\n"
+    found=0
+  fi
+
+  # Check for tag characters (U+E0001-E007F = F3 A0 80 81 through F3 A0 81 BF)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '\xf3\xa0[\x80-\x81][\x80-\xbf]' 2>/dev/null; then
+    details="${details}  - U+E0001-E007F (Tag Character)\n"
+    found=0
+  fi
+
+  # Check for interlinear annotation (U+FFF9-FFFB = EF BF B9-BB)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[\xef][\xbf][\xb9-\xbb]' 2>/dev/null; then
+    details="${details}  - U+FFF9-FFFB (Interlinear Annotation)\n"
+    found=0
+  fi
+
+  # Broad check: any non-ASCII byte (catches novel attacks)
+  if printf '%s' "$input" | LC_ALL=C grep -qP '[^\x20-\x7E]' 2>/dev/null; then
+    if [[ $found -ne 0 ]]; then
+      # Only flag if we haven't already identified specific chars above
+      details="${details}  - Non-ASCII byte(s) detected (unknown category)\n"
+      found=0
+    fi
+  fi
+
+  # Report findings
+  if [[ $found -eq 0 ]]; then
+    {
+      printf '[CRITICAL] Hidden Unicode characters detected in %s\n' "$label"
+      printf '%b' "$details"
+      printf '  Raw bytes: '
+      printf '%s' "$input" | xxd -p | head -c 120
+      printf '\n'
+      printf '  Sanitized: %s\n' "$(sanitize_ref "$input")"
+      printf '  GitHub UI parity: this finding matches GitHub warning\n'
+      printf '    "The head ref may contain hidden characters"\n'
+    } >&2
+  fi
+
+  return $found
+}
+
+# validate_ref STRING [LABEL]
+# Wrapper: detect hidden chars + sanitize. Returns sanitized ref on stdout.
+# Emits [CRITICAL] to stderr if hidden chars found (non-zero exit suppressed
+# so callers can continue after logging the finding).
+validate_ref() {
+  local input="$1"
+  local label="${2:-ref}"
+  detect_hidden_chars "$input" "$label" || true
+  sanitize_ref "$input"
+}
+
 # Provide a minimal no-op marker so callers can check we're present
 sanitizer_version() {
-  printf 'iccDEV-sanitizer-v1\n'
+  printf 'iccDEV-sanitizer-v4\n'
 }
 
 # End of sanitize-sed.sh

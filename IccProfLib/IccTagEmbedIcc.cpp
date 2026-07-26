@@ -76,12 +76,24 @@ Copyright:  ? see ICC Software License
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <climits>
 #include "IccTagEmbedIcc.h"
 #include "IccUtil.h"
 #include "IccProfile.h"
 #include "IccTagFactory.h"
 #include "IccIO.h"
 #include "IccDefs.h"
+
+// Wrap this translation unit in the iccDEV namespace under the library-wide
+// USEICCDEVNAMESPACE convention (see IccArrayFactory.cpp / IccTagFactory.cpp).
+// This localizes the file-local anonymous namespace below so it documents as
+// iccDEV::anonymous_namespace{IccTagEmbedIcc.cpp} instead of a top-level
+// anonymous_namespace{} (issue #1425). The macro is off in the default build,
+// so this is compiled away there and only the Doxygen pass / namespace-enabled
+// builds see the wrapper; behaviour is unchanged either way.
+#ifdef USEICCDEVNAMESPACE
+namespace iccDEV {
+#endif
 
 /**
 ****************************************************************************
@@ -130,8 +142,7 @@ CIccTagEmbeddedProfile &CIccTagEmbeddedProfile::operator=(const CIccTagEmbeddedP
   if (&ITEP == this)
     return *this;
 
-  if (m_pProfile)
-    delete m_pProfile;
+  delete m_pProfile;
 
   if (ITEP.m_pProfile)
     m_pProfile = ITEP.m_pProfile->NewCopy();
@@ -150,8 +161,7 @@ CIccTagEmbeddedProfile &CIccTagEmbeddedProfile::operator=(const CIccTagEmbeddedP
 */
 CIccTagEmbeddedProfile::~CIccTagEmbeddedProfile()
 {
-  if (m_pProfile)
-    delete m_pProfile;
+  delete m_pProfile;
 }
 
 
@@ -165,7 +175,7 @@ CIccTagEmbeddedProfile::~CIccTagEmbeddedProfile()
 void CIccTagEmbeddedProfile::SetProfile(CIccProfile* pProfile)
 {
   //delete old profile as appropriate
-  if (pProfile != m_pProfile && m_pProfile) {
+  if (pProfile != m_pProfile) {
     delete m_pProfile;
     m_pProfile = NULL;
   }
@@ -188,8 +198,29 @@ void CIccTagEmbeddedProfile::SetProfile(CIccProfile* pProfile)
 *  true = successful, false = failure
 *****************************************************************************
 */
+// Guard against attacker-crafted profiles that nest embedded-profile tags
+// arbitrarily deep. Each level adds a C++ stack frame through
+// CIccProfile::Read -> ReadTags/LoadTag -> CIccTag::Create(icSigEmbeddedProfileTag)
+// -> CIccTagEmbeddedProfile::Read -> CIccProfile::Read (recursion). On
+// Emscripten's ~1 MB stack this aborts at ~50-150 levels; on native ~500-1500.
+// 8 nesting levels is far beyond any legitimate use.
+namespace {
+  static thread_local int s_embeddedProfileDepth = 0;
+  static const int kMaxEmbeddedProfileDepth = 8;
+
+  struct EmbedDepthGuard {
+    EmbedDepthGuard()  { ++s_embeddedProfileDepth; }
+    ~EmbedDepthGuard() { --s_embeddedProfileDepth; }
+    bool TooDeep() const { return s_embeddedProfileDepth > kMaxEmbeddedProfileDepth; }
+  };
+}
+
 bool CIccTagEmbeddedProfile::Read(icUInt32Number size, CIccIO *pIO, CIccProfile *pProfile)
 {
+  EmbedDepthGuard depthGuard;
+  if (depthGuard.TooDeep())
+    return false;
+
   if (size<sizeof(icTagTypeSignature) || !pIO) {
     return false;
   }
@@ -219,8 +250,7 @@ bool CIccTagEmbeddedProfile::Read(icUInt32Number size, CIccIO *pIO, CIccProfile 
     return false;
   }
 
-  if (m_pProfile)
-    delete m_pProfile;
+  delete m_pProfile;
 
   m_pProfile = pProfile ? pProfile->NewProfile() : new CIccProfile();
 
@@ -358,7 +388,7 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     else
       sDescription += "Profile ID:         Profile ID not calculated.\n";
     sDescription += "Size:               ";
-    snprintf(buf, bufSize, "%d(0x%x) bytes\n", pHdr->size, pHdr->size);
+    snprintf(buf, bufSize, "%u(0x%x) bytes\n", (unsigned int) pHdr->size, (unsigned int) pHdr->size);
     sDescription += buf;
     sDescription += "\nHeader\n";
     sDescription += "------\n";
@@ -372,11 +402,11 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     sDescription += buf;
     snprintf(buf, bufSize, "Creator:            %s\n", icGetSig(buf2, bufSize, pHdr->creator));
     sDescription += buf;
-    snprintf(buf, bufSize, "Data Color Space:   %s\n", Fmt.GetColorSpaceSigName(pHdr->colorSpace));
+    snprintf(buf, bufSize, "Data Colour Space:  %s\n", Fmt.GetColorSpaceSigName(pHdr->colorSpace));
     sDescription += buf;
     snprintf(buf, bufSize, "Flags               %s\n", Fmt.GetProfileFlagsName(pHdr->flags));
     sDescription += buf;
-    snprintf(buf, bufSize, "PCS Color Space:    %s\n", Fmt.GetColorSpaceSigName(pHdr->pcs));
+    snprintf(buf, bufSize, "PCS Colour Space:   %s\n", Fmt.GetColorSpaceSigName(pHdr->pcs));
     sDescription += buf;
     snprintf(buf, bufSize, "Platform:           %s\n", Fmt.GetPlatformSigName(pHdr->platform));
     sDescription += buf;
@@ -425,11 +455,11 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
       sDescription += "BiSpectral Range:   Not Defined\n";
     }
     if (pHdr->mcs) {
-      snprintf(buf, bufSize, "MCS Color Space:    %s\n", Fmt.GetColorSpaceSigName((icColorSpaceSignature)pHdr->mcs));
+      snprintf(buf, bufSize, "MCS Colour Space:   %s\n", Fmt.GetColorSpaceSigName((icColorSpaceSignature)pHdr->mcs));
       sDescription += buf;
     }
     else {
-      sDescription += "MCS Color Space:    Not Defined\n";
+      sDescription += "MCS Colour Space:   Not Defined\n";
     }
 
     sDescription += "\nProfile Tags\n";
@@ -438,27 +468,36 @@ void CIccTagEmbeddedProfile::Describe(std::string& sDescription, int /* nVerbose
     sDescription += fillColumns("Tag", "ID", "Offset", "Size", "Pad") + "\n";
     sDescription += fillColumns("---", "--", "------", "----", "---") + "\n";
 
-    int n, closest, pad;
+    int n, pad;
+    icUInt32Number closest;
     TagEntryList::iterator i, j;
 
     // n is number of Tags in Tag Table
     for (n = 0, i = m_pProfile->m_Tags.begin(); i != m_pProfile->m_Tags.end(); i++, n++) {
-      // Find closest tag after this tag, by scanning all offsets of other tags 
+      // Find closest tag after this tag, by scanning all offsets of other tags
+      // NOTE - if this O(N^2) search is a performance problem, copy algorithm from iccDumpProfile
       closest = pHdr->size;
       for (j = m_pProfile->m_Tags.begin(); j != m_pProfile->m_Tags.end(); j++) {
-        if ((i != j) && (j->TagInfo.offset >= i->TagInfo.offset + i->TagInfo.size) && ((int)j->TagInfo.offset <= closest)) {
+        if ((i != j) && (i->TagInfo.size <= (0xFFFFFFFF - i->TagInfo.offset)) && (j->TagInfo.offset >= i->TagInfo.offset + i->TagInfo.size) && (j->TagInfo.offset <= closest)) {
           closest = j->TagInfo.offset;
         }
       }
+      
       // Number of actual padding bytes between this tag and closest neighbour (or EOF)
       // Should be 0-3 if compliant. Negative number if tags overlap!
-      pad = closest - i->TagInfo.offset - i->TagInfo.size;
+      int64_t temp = (int64_t)closest - i->TagInfo.offset - i->TagInfo.size;
+      if (temp > (int64_t)INT_MAX)
+        pad = INT_MAX;
+      else if (temp < (int64_t)INT_MIN)
+        pad = INT_MIN;
+      else
+        pad = (int)temp;
 
       const size_t tempSize = 20;
       char sOffset[tempSize], sSize[tempSize], sPad[tempSize];
-      snprintf(sOffset, tempSize, "%u", i->TagInfo.offset);
-      snprintf(sSize, tempSize, "%u", i->TagInfo.size);
-      snprintf(sPad, tempSize, "%u", pad);
+      snprintf(sOffset, tempSize, "%u", (unsigned int)i->TagInfo.offset);
+      snprintf(sSize, tempSize, "%u", (unsigned int)i->TagInfo.size);
+      snprintf(sPad, tempSize, "%d", pad);
       sDescription += fillColumns(Fmt.GetTagSigName(i->TagInfo.sig), icGetSig(sigbuf, bufSize, i->TagInfo.sig, false), sOffset, sSize, sPad) + "\n";
     }
   }
@@ -518,3 +557,7 @@ icValidateStatus CIccTagEmbeddedProfile::Validate(std::string sigPath, std::stri
   
   return rv;
 }
+
+#ifdef USEICCDEVNAMESPACE
+} //namespace iccDEV
+#endif

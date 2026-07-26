@@ -69,6 +69,7 @@
 
 #include "IccDefs.h"
 #include "IccPcc.h"
+#include "IccObject.h"
 #include <list>
 #include <string>
 
@@ -78,9 +79,9 @@ namespace iccDEV {
 
 #ifdef __cplusplus
 
-class ICCPROFLIB_API CIccTag;
-class ICCPROFLIB_API CIccIO;
-class ICCPROFLIB_API CIccMemIO;
+class CIccTag;
+class CIccIO;
+class CIccMemIO;
 
 /**
  **************************************************************************
@@ -142,7 +143,7 @@ typedef enum {
  *  on a profile is done using this object.
  **************************************************************************
  */
-class ICCPROFLIB_API CIccProfile : public IIccProfileConnectionConditions 
+class ICCPROFLIB_API CIccProfile : public IIccProfileConnectionConditions, public IIccObject
 {
 public:
   CIccProfile();
@@ -150,9 +151,12 @@ public:
   CIccProfile &operator=(const CIccProfile &Profile);
   virtual CIccProfile* NewCopy() const { return new CIccProfile(*this); }
   virtual CIccProfile* NewProfile() const { return new CIccProfile(); }
+
   virtual ~CIccProfile();
 
-  virtual const char *GetClassName() const { return "CIccProfile"; }
+  virtual const char *GetClassName()  const { return "CIccProfile"; }
+  virtual const char *GetObjectType() const { return GetClassName(); }
+  virtual const CIccProfile* GetParentProfile() const { return m_pParent; }
 
   CIccTag* FindTag(icSignature sig);
   CIccTag* FindTag(IccTagEntry &entry);
@@ -189,17 +193,17 @@ public:
 	bool IsTagPresent(icSignature sig) const { return (GetTag(sig)!=NULL); }
 
 
-  //Implement the IIccProfileConnectionConditions interface
-  virtual const CIccTagSpectralViewingConditions *getPccViewingConditions() { return (const CIccTagSpectralViewingConditions*)
-                                                                                FindTagOfType(icSigSpectralViewingConditionsTag, 
-                                                                                              icSigSpectralViewingConditionsType); }
-  virtual CIccTagMultiProcessElement *getCustomToStandardPcc() { return (CIccTagMultiProcessElement*)
-                                                                   FindTagOfType(icSigCustomToStandardPccTag, 
-                                                                                 icSigMultiProcessElementType); }
-
-  virtual CIccTagMultiProcessElement *getStandardToCustomPcc() { return (CIccTagMultiProcessElement*)
-                                                                   FindTagOfType(icSigStandardToCustomPccTag, 
-                                                                                 icSigMultiProcessElementType); }
+  //Implement the IIccProfileConnectionConditions interface.
+  //
+  // For an abstract profile that carries a devicePccTag ('dpcc'), the iccMAX
+  // extended device colour space amendment (9.2.x+1 / 12.2.y) replaces these
+  // profile-level connection conditions with the matching members of the tag's
+  // profileConnectionConditionsStructure. Each getter prefers the structure
+  // member (via getDevicePccElem) and falls back to the profile's own tag, so
+  // every consumer of the PCC interface picks up the replacement automatically.
+  virtual const CIccTagSpectralViewingConditions *getPccViewingConditions();
+  virtual CIccTagMultiProcessElement *getCustomToStandardPcc();
+  virtual CIccTagMultiProcessElement *getStandardToCustomPcc();
   virtual icIlluminant getPccIlluminant();
   virtual icFloatNumber getPccCCT();
   virtual icStandardObserver getPccObserver();
@@ -212,6 +216,13 @@ public:
   bool calcMediaWhiteXYZ(icFloatNumber *pXYZ, IIccProfileConnectionConditions *pObservingPCC);
 
 protected:
+
+  // Return the member sub-tag of the given signature/type from this profile's
+  // devicePccTag ('dpcc') profileConnectionConditionsStructure, or NULL when the
+  // profile is not an abstract iccMAX profile, has no devicePccTag, or the member
+  // is absent. Used by the PCC interface getters to apply the extended device
+  // colour space amendment's connection-condition replacements (#626 / #1559).
+  CIccTag* getDevicePccElem(icSignature sigMember, icTagTypeSignature sigType);
 
   void Cleanup();
   IccTagEntry* GetTag(icSignature sig) const;
@@ -226,12 +237,13 @@ protected:
   // Profile Validation functions
   icValidateStatus CheckRequiredTags(std::string &sReport, const CIccProfile *pParentProfile = NULL) const;
   bool CheckTagExclusion(std::string &sReport) const;
-  icValidateStatus CheckHeader(std::string &sReport) const;
+  icValidateStatus CheckHeader(std::string &sReport, const CIccProfile *pParentProfile = NULL) const;
   icValidateStatus CheckTagTypes(std::string &sReport) const;
   bool IsTypeValid(icTagSignature tagSig, icTagTypeSignature typeSig,
                    icStructSignature structSig=icSigUndefinedStruct,
                    icArraySignature arraySig=icSigUndefinedArray) const;
   bool CheckFileSize(CIccIO *pIO) const;
+  icValidateStatus CheckTagLayout(CIccIO *pIO, std::string &sReport) const;
 
 
 public:
@@ -247,16 +259,17 @@ protected:
   TagPtrList m_TagVals;
 
   icColorSpaceSignature m_parentColorSpace = icSigNoColorData;
+  const CIccProfile *m_pParent = nullptr;
 };
 
-CIccProfile ICCPROFLIB_API *ReadIccProfile(const icChar *szFilename, bool bUseSubProfile=false);
-CIccProfile ICCPROFLIB_API *ReadIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool bUseSubProfile=false);
-CIccProfile ICCPROFLIB_API *OpenIccProfile(const icChar *szFilename, bool bUseSubProfile=false);
-CIccProfile ICCPROFLIB_API *OpenIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool bUseSubProfile=false);  //pMem must be available for entire life of returned CIccProfile Object
+ICCPROFLIB_API CIccProfile *ReadIccProfile(const icChar *szFilename, bool bUseSubProfile=false);
+ICCPROFLIB_API CIccProfile *ReadIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool bUseSubProfile=false);
+ICCPROFLIB_API CIccProfile *OpenIccProfile(const icChar *szFilename, bool bUseSubProfile=false);
+ICCPROFLIB_API CIccProfile *OpenIccProfile(const icUInt8Number *pMem, icUInt32Number nSize, bool bUseSubProfile=false);  //pMem must be available for entire life of returned CIccProfile Object
 
-CIccProfile ICCPROFLIB_API *ValidateIccProfile(CIccIO *pIO, std::string &sReport, icValidateStatus &nStatus);
-CIccProfile ICCPROFLIB_API *ValidateIccProfile(const icChar *szFilename, std::string &sReport, icValidateStatus &nStatus);
-CIccProfile ICCPROFLIB_API* ValidateIccProfile(const icUInt8Number* pMem, icUInt32Number nSize, std::string& sReport, icValidateStatus& nStatus);
+ICCPROFLIB_API CIccProfile *ValidateIccProfile(CIccIO *pIO, std::string &sReport, icValidateStatus &nStatus);
+ICCPROFLIB_API CIccProfile *ValidateIccProfile(const icChar *szFilename, std::string &sReport, icValidateStatus &nStatus);
+ICCPROFLIB_API CIccProfile *ValidateIccProfile(const icUInt8Number* pMem, icUInt32Number nSize, std::string& sReport, icValidateStatus& nStatus);
 
 bool ICCPROFLIB_API SaveIccProfile(const icChar *szFilename, CIccProfile *pIcc, icProfileIDSaveMethod nWriteId=icVersionBasedID);
 bool ICCPROFLIB_API SaveIccProfile(FILE *f, CIccProfile *pIcc, icProfileIDSaveMethod nWriteId = icVersionBasedID);
@@ -265,9 +278,9 @@ void ICCPROFLIB_API CalcProfileID(CIccIO *pIO, icProfileID *profileID);
 bool ICCPROFLIB_API CalcProfileID(const icChar *szFilename, icProfileID *profileID);
 
 #ifdef WIN32
-CIccProfile ICCPROFLIB_API *ReadIccProfile(const icWChar *szFilename, bool bUseSubProfile=false);
-CIccProfile ICCPROFLIB_API *OpenIccProfile(const icWChar *szFilename, bool bUseSubProfile=false);
-CIccProfile ICCPROFLIB_API *ValidateIccProfile(const icWChar *szFilename, std::string &sReport, icValidateStatus &nStatus);
+ICCPROFLIB_API CIccProfile *ReadIccProfile(const icWChar *szFilename, bool bUseSubProfile=false);
+ICCPROFLIB_API CIccProfile *OpenIccProfile(const icWChar *szFilename, bool bUseSubProfile=false);
+ICCPROFLIB_API CIccProfile *ValidateIccProfile(const icWChar *szFilename, std::string &sReport, icValidateStatus &nStatus);
 bool ICCPROFLIB_API SaveIccProfile(const icWChar *szFilename, CIccProfile *pIcc, icProfileIDSaveMethod nWriteId=icVersionBasedID);
 bool ICCPROFLIB_API CalcProfileID(const icWChar *szFilename, icProfileID *profileID);
 #endif

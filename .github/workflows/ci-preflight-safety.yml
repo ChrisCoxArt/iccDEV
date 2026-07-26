@@ -1,0 +1,453 @@
+###############################################################
+#
+# Copyright (c) 2025-2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+## Intent: Pre-flight safety, security, and sanity checks
+#
+###############################################################
+
+name: "ci-preflight-safety"
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/**'
+      - '.githooks/**'
+      - 'Dockerfile'
+      - 'Dockerfile.*'
+      - '.dockerignore'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/**'
+      - '.githooks/**'
+      - 'Dockerfile'
+      - 'Dockerfile.*'
+      - '.dockerignore'
+  workflow_dispatch:
+
+concurrency:
+  group: "preflight-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: "Pre-flight checks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout trusted scanner helpers
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout target repository
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch pre-flight base ref
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        working-directory: target
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source ../trusted/.github/scripts/sanitize-sed.sh
+          git fetch --no-tags --prune origin '+refs/heads/master:refs/remotes/origin/master'
+          git rev-parse --verify origin/master >/dev/null
+
+      # preflight: allow-package-install reason=security-tool-bootstrap
+      - name: Install pre-flight tools
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source trusted/.github/scripts/sanitize-sed.sh
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+          python3 -m venv /tmp/iccdev-preflight
+          /tmp/iccdev-preflight/bin/python -m pip install --upgrade pip --quiet
+          /tmp/iccdev-preflight/bin/python -m pip install \
+            'PyYAML>=6,<7' \
+            'yamllint>=1.35,<2' \
+            'zizmor>=1.9,<2' \
+            --quiet
+          echo "/tmp/iccdev-preflight/bin" >> "$GITHUB_PATH"
+
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+          if command -v codeql >/dev/null 2>&1; then
+            dirname "$(command -v codeql)" >> "$GITHUB_PATH"
+          else
+            CODEQL_VER="2.24.1"
+            CODEQL_ARCHIVE="/tmp/codeql-bundle-linux64.tar.gz"
+            CODEQL_SHA256="9767468e00a505ed022eedcf5813dd47760567a400ead7bf2519ce22f953dde1"
+            CODEQL_URL="https://github.com/github/codeql-action/releases/download"
+            curl -fsSL --retry 3 \
+              -o "${CODEQL_ARCHIVE}" \
+              "${CODEQL_URL}/codeql-bundle-v${CODEQL_VER}/codeql-bundle-linux64.tar.gz"
+            printf '%s  %s\n' "${CODEQL_SHA256}" "${CODEQL_ARCHIVE}" | sha256sum -c -
+            tar xzf "${CODEQL_ARCHIVE}" -C /opt
+            echo "/opt/codeql" >> "$GITHUB_PATH"
+          fi
+
+      - name: Select pre-flight scanner
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source trusted/.github/scripts/sanitize-sed.sh
+
+          trusted_scanner="$PWD/trusted/.github/scripts/preflight-safety-checks.sh"
+          if [ -f "$trusted_scanner" ]; then
+            echo "PREFLIGHT_SCRIPT=$trusted_scanner" >> "$GITHUB_ENV"
+            echo "PREFLIGHT_TRUST_MODE=trusted-base" >> "$GITHUB_ENV"
+          else
+            echo "[WARN] Base ref lacks preflight-safety-checks.sh; using inline bootstrap validation."
+            echo "PREFLIGHT_TRUST_MODE=bootstrap-inline" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run pre-flight checks
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          PREFLIGHT_BASE_REF: origin/master
+          PREFLIGHT_OUTPUT: ${{ runner.temp }}/preflight-output.log
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source trusted/.github/scripts/sanitize-sed.sh
+          echo "Pre-flight scanner mode: $(sanitize_line "$PREFLIGHT_TRUST_MODE")"
+          if [ "$PREFLIGHT_TRUST_MODE" = "trusted-base" ]; then
+            set +e
+            PREFLIGHT_SCAN_ROOT="$PWD/target" \
+              "$PREFLIGHT_SCRIPT" --require-tools 2>&1 | tee "$PREFLIGHT_OUTPUT"
+            preflight_status="${PIPESTATUS[0]}"
+            set -e
+            exit "$preflight_status"
+          fi
+
+          cd target
+          mapfile -t changed_files < <(
+            git diff --name-only --diff-filter=ACMRT origin/master...HEAD -- \
+              .github .githooks Dockerfile 'Dockerfile.*' .dockerignore | sort
+          )
+          mapfile -t workflow_files < <(
+            find .github/workflows -maxdepth 1 -type f \
+              \( -name '*.yml' -o -name '*.yaml' \) | sort
+          )
+          mapfile -t script_files < <(
+            printf '%s\n' "${changed_files[@]}" |
+              awk '/^\.github\/scripts\/.*\.sh$/ || /^\.githooks\/pre-commit$/ || /^\.githooks\/pre-push$/'
+          )
+          mapfile -t python_files < <(
+            printf '%s\n' "${changed_files[@]}" |
+              awk '/^\.github\/scripts\/.*\.py$/'
+          )
+          mapfile -t docker_files < <(
+            printf '%s\n' "${changed_files[@]}" |
+              awk '/^Dockerfile$/ || /^Dockerfile\./'
+          )
+
+          failures=0
+          if [ "${#workflow_files[@]}" -gt 0 ]; then
+            python3 - "${workflow_files[@]}" <<'PY'
+          import re
+          import sys
+
+          import yaml
+
+          failures = 0
+
+          for path in sys.argv[1:]:
+              with open(path, "r", encoding="utf-8") as handle:
+                  workflow = yaml.safe_load(handle) or {}
+              print(f"[OK] YAML parse: {path}")
+              if not isinstance(workflow, dict):
+                  continue
+              triggers = workflow.get("on")
+              if triggers is None:
+                  triggers = workflow.get(True)
+              if isinstance(triggers, str):
+                  trigger_names = {triggers}
+              elif isinstance(triggers, list):
+                  trigger_names = {str(trigger) for trigger in triggers}
+              elif isinstance(triggers, dict):
+                  trigger_names = {str(trigger) for trigger in triggers}
+              else:
+                  trigger_names = set()
+              raw = open(path, "r", encoding="utf-8").read()
+              if "pull_request_target" in trigger_names and re.search(r"ref.*pull_request.*head", raw):
+                  print(f"[FAIL] {path}: pull_request_target checks out PR head content", file=sys.stderr)
+                  failures += 1
+              high_risk = {"issue_comment", "repository_dispatch"}
+              for trigger in sorted(trigger_names & high_risk):
+                  print(f"[FAIL] {path}: high-risk event trigger {trigger}", file=sys.stderr)
+                  failures += 1
+              workflow_run_guard = "workflow_run.head_repository.full_name == github.repository"
+              if "workflow_run" in trigger_names and workflow_run_guard not in raw:
+                  print(f"[FAIL] {path}: workflow_run trigger is missing same-repository guard",
+                        file=sys.stderr)
+                  failures += 1
+              jobs = workflow.get("jobs", {})
+              if not isinstance(jobs, dict):
+                  continue
+              for job_name, job in jobs.items():
+                  if not isinstance(job, dict):
+                      continue
+                  steps = job.get("steps", [])
+                  if not isinstance(steps, list):
+                      continue
+                  for index, step in enumerate(steps, start=1):
+                      if not isinstance(step, dict):
+                          continue
+                      uses = str(step.get("uses", ""))
+                      if uses and not uses.startswith("./") and not uses.startswith("docker://"):
+                          if "@" not in uses or not re.search(r"@[0-9a-f]{40}(?:\s|$)", uses):
+                              print(f"[FAIL] {path}: action is not SHA-pinned: {uses}", file=sys.stderr)
+                              failures += 1
+                      if not uses.startswith("actions/checkout@"):
+                          continue
+                      with_block = step.get("with", {})
+                      if not isinstance(with_block, dict):
+                          with_block = {}
+                      persist = with_block.get("persist-credentials")
+                      if persist is False or str(persist).lower() == "false":
+                          continue
+                      print(f"[FAIL] {path}: checkout missing persist-credentials in {job_name}/{index}",
+                            file=sys.stderr)
+                      failures += 1
+
+          raise SystemExit(1 if failures else 0)
+          PY
+            actionlint -no-color "${workflow_files[@]}"
+          yamllint_config='{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}'
+          yamllint -d "$yamllint_config" "${workflow_files[@]}"
+          zizmor "${workflow_files[@]}"
+          trusted_cache_policy="../trusted/.github/scripts/check-workflow-cache-policy.sh"
+          if [ ! -x "$trusted_cache_policy" ]; then
+            echo "[FAIL] Trusted cache policy helper not found" >&2
+            failures=$((failures + 1))
+          else
+            "$trusted_cache_policy" "${workflow_files[@]}"
+          fi
+          else
+            echo "[SKIP] No changed workflow files"
+          fi
+
+          if [ "${#script_files[@]}" -gt 0 ]; then
+            shellcheck "${script_files[@]}"
+          else
+            echo "[SKIP] No changed shell hook/script files"
+          fi
+
+          if [ "${#python_files[@]}" -gt 0 ]; then
+            python3 -m py_compile "${python_files[@]}"
+          else
+            echo "[SKIP] No changed Python scripts"
+          fi
+
+          if [ "${#docker_files[@]}" -gt 0 ]; then
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "[FAIL] docker is required for Dockerfile security checks" >&2
+              failures=$((failures + 1))
+            else
+              hadolint_image='hadolint/hadolint@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e'
+              trivy_image='aquasec/trivy@sha256:5c59e08f980b5d4d503329773480fcea2c9bdad7e381d846fbf9f2ecb8050f6b'
+              if ! docker run --rm \
+                -v "$PWD":/repo:ro \
+                -w /repo \
+                "$hadolint_image" \
+                hadolint "${docker_files[@]}"; then
+                failures=$((failures + 1))
+              fi
+              rm -rf "${RUNNER_TEMP:-/tmp}/trivy-cache"
+              mkdir -p "${RUNNER_TEMP:-/tmp}/trivy-cache"
+              if ! docker run --rm \
+                -v "$PWD":/repo:ro \
+                -v "${RUNNER_TEMP:-/tmp}/trivy-cache":/root/.cache/ \
+                -w /repo \
+                "$trivy_image" \
+                config --skip-check-update --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 /repo; then
+                failures=$((failures + 1))
+              fi
+              for dockerfile in "${docker_files[@]}"; do
+                if grep -qiE '^[[:space:]]*FROM[[:space:]].*nixos/nix' "$dockerfile"; then
+                  final_from="$(
+                    awk 'BEGIN{IGNORECASE=1}
+                         /^[[:space:]]*FROM[[:space:]]/ { line=$0 }
+                         END { print line }' "$dockerfile"
+                  )"
+                  if grep -qi 'nixos/nix' <<< "$final_from"; then
+                    echo "[FAIL] $dockerfile final stage inherits from nixos/nix; use a minimal runtime stage" >&2
+                    failures=$((failures + 1))
+                  fi
+                fi
+              done
+            fi
+          else
+            echo "[SKIP] No changed Dockerfile files"
+          fi
+
+          if [ -f .github/codeql-queries/iccdev-security-suite.qls ]; then
+            codeql resolve queries .github/codeql-queries/iccdev-security-suite.qls
+          fi
+          if [ -f .github/codeql-queries/iccdev-mcp/iccdev-mcp-security-suite.qls ]; then
+            codeql resolve queries .github/codeql-queries/iccdev-mcp/iccdev-mcp-security-suite.qls
+          fi
+
+          exit "$failures"
+
+      - name: Write pre-flight summary
+        if: always()
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          JOB_STATUS: ${{ job.status }}
+          PREFLIGHT_BASE_REF: origin/master
+          PREFLIGHT_OUTPUT: ${{ runner.temp }}/preflight-output.log
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          TRUSTED_SANITIZER="$GITHUB_WORKSPACE/trusted/.github/scripts/sanitize-sed.sh"
+          if [[ -f "$TRUSTED_SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$TRUSTED_SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}"
+              s="${s//</&lt;}"
+              s="${s//>/&gt;}"
+              s="${s//\"/&quot;}"
+              s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+            sanitize_print() { escape_html "$1"; }
+          fi
+
+          summary_status="${JOB_STATUS:-failure}"
+          summary_label="[FAIL]"
+          summary_message="Pre-flight safety checks require maintainer review."
+          if [[ "$summary_status" == "success" ]]; then
+            summary_label="[PASS]"
+            summary_message="Pre-flight safety checks completed successfully."
+          elif [[ "$summary_status" == "cancelled" ]]; then
+            summary_label="[CANCELLED]"
+            summary_message="Pre-flight safety checks were cancelled before completion."
+          fi
+
+          run_url="${GH_SERVER_URL}/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}"
+          short_sha="${GH_SHA:0:12}"
+          output_file="${PREFLIGHT_OUTPUT:-}"
+
+          extract_metric() {
+            local label="$1"
+            local value="unavailable"
+            if [[ -n "$output_file" && -f "$output_file" ]]; then
+              value="$(grep -E "^${label}: " "$output_file" | tail -n 1 | sed -E "s/^${label}: //" || true)"
+              if [[ -z "$value" ]]; then
+                value="unavailable"
+              fi
+            fi
+            sanitize_line "$value"
+          }
+
+          {
+            echo "## Pre-flight Safety Summary"
+            echo ""
+            echo "> **$(sanitize_line "$summary_label")** $(sanitize_line "$summary_message")"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            printf "| Workflow result | \`%s\` |\n" "$(sanitize_line "$summary_status")"
+            printf "| Scanner mode | \`%s\` |\n" "$(sanitize_line "${PREFLIGHT_TRUST_MODE:-unavailable}")"
+            printf "| Event | \`%s\` |\n" "$(sanitize_line "${GH_EVENT_NAME:-unknown}")"
+            printf "| Repository | \`%s\` |\n" "$(sanitize_line "${GH_REPOSITORY:-unknown}")"
+            printf "| Ref | \`%s\` |\n" "$(sanitize_line "${GH_REF_NAME:-unknown}")"
+            printf "| Base ref | \`%s\` |\n" "$(sanitize_line "${PREFLIGHT_BASE_REF:-unknown}")"
+            printf "| Commit | \`%s\` |\n" "$(sanitize_line "${short_sha:-unknown}")"
+            printf "| Run | [\`%s\`](%s) |\n" "$(sanitize_line "${GH_RUN_ID:-unknown}")" "$(sanitize_line "$run_url")"
+            echo ""
+            echo "### Workflow Security Canary Summary"
+            echo ""
+            echo "| Canary | Count |"
+            echo "|--------|-------|"
+            printf "| Cache policy canaries | \`%s\` |\n" "$(extract_metric "cache publish canaries")"
+            printf "| Artifact intake canaries | \`%s\` |\n" "$(extract_metric "artifact intake canaries")"
+            printf "| Artifact publish canaries | \`%s\` |\n" "$(extract_metric "artifact publish canaries")"
+            printf "| Untrusted PR artifact canaries | \`%s\` |\n" "$(extract_metric "untrusted PR artifact canaries")"
+            printf "| Auth/accounting canaries | \`%s\` |\n" "$(extract_metric "auth/accounting canaries")"
+            printf "| PR-controlled script execution canaries | \`%s\` |\n" \
+              "$(extract_metric "PR-controlled script execution canaries")"
+            printf "| Reviewed untrusted PR artifact exceptions | \`%s\` |\n" \
+              "$(extract_metric "reviewed untrusted PR artifact exceptions")"
+            printf "| Reviewed token exposure exceptions | \`%s\` |\n" \
+              "$(extract_metric "reviewed token exposure exceptions")"
+            printf "| Reviewed PR-controlled script exceptions | \`%s\` |\n" \
+              "$(extract_metric "reviewed PR-controlled script exceptions")"
+            printf "| Workflow canary warnings | \`%s\` |\n" "$(extract_metric "workflow canary warnings")"
+            printf "| CodeQL Actions raw results | \`%s\` |\n" "$(extract_metric "CodeQL Actions raw results")"
+            printf "| CodeQL Actions findings | \`%s\` |\n" "$(extract_metric "CodeQL Actions findings")"
+            printf "| Reviewed CodeQL Actions exceptions | \`%s\` |\n" \
+              "$(extract_metric "reviewed CodeQL Actions exceptions")"
+            printf "| CodeQL Python raw results | \`%s\` |\n" "$(extract_metric "CodeQL Python raw results")"
+            printf "| CodeQL Python findings | \`%s\` |\n" "$(extract_metric "CodeQL Python findings")"
+            printf "| Reviewed CodeQL Python exceptions | \`%s\` |\n" \
+              "$(extract_metric "reviewed CodeQL Python exceptions")"
+            echo ""
+            if [[ -n "$output_file" && -f "$output_file" ]] &&
+              grep -q '^\[OK\].*reviewed .* exception reason=' "$output_file"; then
+              echo "### Reviewed Exceptions"
+              echo ""
+              grep '^\[OK\].*reviewed .* exception reason=' "$output_file" |
+                sed -n '1,12p' |
+                while IFS= read -r exception_line; do
+                  printf -- "- \`%s\`\n" "$(sanitize_line "$exception_line")"
+                done
+              echo ""
+            fi
+            if [[ "$summary_status" == "success" ]]; then
+              echo "Maintainer action: review the pre-flight log only if additional assurance is required."
+            else
+              echo "Maintainer action: inspect the failed pre-flight step and full workflow logs before merging."
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

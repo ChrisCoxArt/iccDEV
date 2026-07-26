@@ -1,33 +1,13 @@
 #!/bin/sh
 #################################################################################
-# CalcTest/checkInvalidProfiles.sh | iccMAX Project
-# Copyright (C) 2024-2025 The International Color Consortium. 
+# CalcTest/checkInvalidProfiles.sh | iccDEV Project
+# Copyright (C) 2024-2026 The International Color Consortium.
 #                                        All rights reserved.
-# 
 #
-#  Last Updated: 24-APRIL-2025 16:00 EDT 2025 by David Hoyt
+#  Last Updated: 2026-04-09
 #
-#
-#
-#
-#
-#
-# Intent: iccMAX CICD
-#
-#
-#
-#
+# Intent: iccDEV CICD
 #################################################################################
-
-echo "====================== Entering CalcTest/checkInvalidProfiles.sh =========================="
-
-# Properly handle newline-separated paths as a list
-find ../../Build/Tools -type f -perm -111 -exec dirname {} \; | sort -u | while read -r d; do
-  abs_path=$(cd "$d" && pwd)
-  PATH="$abs_path:$PATH"
-done
-
-export PATH
 
 echo "====================== Running checkInvalidProfiles.sh Checks =========================="
 
@@ -48,12 +28,6 @@ iccDumpProfile -v calcOverMem_tput.icc >> report.txt 2>&1
 check_error
 
 iccDumpProfile -v calcOverMem_tsav.icc >> report.txt 2>&1
-check_error
-
-iccDumpProfile -v calcUnderStack_tput.icc >> report.txt 2>&1
-check_error
-
-iccDumpProfile -v calcUnderStack_tsav.icc >> report.txt 2>&1
 check_error
 
 iccDumpProfile -v calcUnderStack_tput.icc >> report.txt 2>&1
@@ -287,6 +261,5 @@ iccApplyNamedCmm -debugcalc rgbExercise8bit.txt 0 1 calcCheckInit.icc 1
 iccFromXml calcExercizeOps.xml calcExercizeOps.icc
 echo "Running Check for IccMpeCalc.cpp:Line:4563"
 iccApplyNamedCmm -debugcalc rgbExercise8bit.txt 0 1 calcExercizeOps.icc 1
-echo "====================== Exiting CalcTest Stub =========================="
-exit 0
 echo "====================== Exiting CalcTest/checkInvalidProfiles.sh =========================="
+exit 0

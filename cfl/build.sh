@@ -1,0 +1,263 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+# This source file is licensed under the BSD 3-Clause "New" or "Revised"
+# License used by ICC software projects.
+#
+# Build and optionally smoke-test the core CFL command-line fuzzers.
+###############################################################################
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 [--targets CSV] [--seconds N] [--build-dir DIR] [--work-dir DIR] [--patches [DIR]] [--skip-run]"
+  echo "Targets: dump, toxml, fromxml, tojson, fromjson, roundtrip"
+}
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+build_dir="${ICCDEV_CFL_BUILD_DIR:-$repo_root/build-cfl-smoke}"
+work_dir="${ICCDEV_CFL_WORK_DIR:-$repo_root/.cfl-smoke}"
+targets_csv="${ICCDEV_CFL_TARGETS:-dump,toxml,fromxml,tojson,fromjson,roundtrip}"
+seconds="${ICCDEV_CFL_SECONDS:-30}"
+max_seed_bytes="${ICCDEV_CFL_MAX_SEED_BYTES:-49152}"
+apply_patches="${ICCDEV_CFL_APPLY_PATCHES:-0}"
+patch_dir="${ICCDEV_CFL_PATCH_DIR:-$repo_root/.github/ci/fuzz-patches/cfl}"
+skip_run=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --targets)
+      [ "$#" -ge 2 ] || { echo "ERROR: --targets requires a value" >&2; exit 2; }
+      targets_csv="$2"
+      shift 2
+      ;;
+    --seconds|--duration-seconds)
+      [ "$#" -ge 2 ] || { echo "ERROR: $1 requires a value" >&2; exit 2; }
+      seconds="$2"
+      shift 2
+      ;;
+    --runs)
+      echo "ERROR: --runs used an execution-count unit and is no longer accepted; use --seconds" >&2
+      exit 2
+      ;;
+    --build-dir)
+      [ "$#" -ge 2 ] || { echo "ERROR: --build-dir requires a directory" >&2; exit 2; }
+      build_dir="$2"
+      shift 2
+      ;;
+    --work-dir)
+      [ "$#" -ge 2 ] || { echo "ERROR: --work-dir requires a directory" >&2; exit 2; }
+      work_dir="$2"
+      shift 2
+      ;;
+    --patches)
+      apply_patches=1
+      if [ "$#" -ge 2 ] && [ "${2#--}" = "$2" ]; then
+        patch_dir="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --patch-dir)
+      [ "$#" -ge 2 ] || { echo "ERROR: --patch-dir requires a directory" >&2; exit 2; }
+      patch_dir="$2"
+      shift 2
+      ;;
+    --skip-run)
+      skip_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$seconds" in
+  ''|*[!0-9]*)
+    echo "ERROR: --seconds must be numeric" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$seconds" -lt 1 ] || [ "$seconds" -gt 3600 ]; then
+  echo "ERROR: --seconds must be between 1 and 3600" >&2
+  exit 2
+fi
+
+case "$max_seed_bytes" in
+  ''|*[!0-9]*)
+    echo "ERROR: ICCDEV_CFL_MAX_SEED_BYTES must be numeric" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$max_seed_bytes" -lt 1024 ]; then
+  echo "ERROR: ICCDEV_CFL_MAX_SEED_BYTES must be at least 1024" >&2
+  exit 2
+fi
+
+IFS=',' read -r -a requested_targets <<< "$targets_csv"
+selected_targets=()
+for target in "${requested_targets[@]}"; do
+  target="${target#"${target%%[![:space:]]*}"}"
+  target="${target%"${target##*[![:space:]]}"}"
+  if [ -z "$target" ]; then
+    echo "ERROR: empty CFL target entry in --targets" >&2
+    exit 2
+  fi
+  if [[ "$target" =~ [[:space:]] ]]; then
+    echo "ERROR: malformed CFL target contains whitespace: $target" >&2
+    exit 2
+  fi
+  case "$target" in
+    dump|toxml|fromxml|tojson|fromjson|roundtrip)
+      ;;
+    *)
+      echo "ERROR: unsupported CFL target: $target" >&2
+      exit 2
+      ;;
+  esac
+  for selected_target in "${selected_targets[@]}"; do
+    if [ "$target" = "$selected_target" ]; then
+      echo "ERROR: duplicate CFL target: $target" >&2
+      exit 2
+    fi
+  done
+  selected_targets+=("$target")
+done
+
+for tool in cmake clang++; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "ERROR: required tool not found: $tool" >&2
+    exit 127
+  fi
+done
+
+if [ "$apply_patches" != "0" ]; then
+  patch_applicator="${ICCDEV_FUZZ_PATCH_APPLICATOR:-$repo_root/.github/scripts/iccdev-apply-fuzz-patches.sh}"
+  "$patch_applicator" --mode cfl --patch-dir "$patch_dir"
+fi
+
+cmake -S "$repo_root/Build/Cmake" -B "$build_dir" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_C_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+  -DCMAKE_CXX_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+  -DENABLE_TOOLS=ON \
+  -DENABLE_TESTS=OFF \
+  -DENABLE_WXWIDGETS=OFF \
+  -DENABLE_SHARED_LIBS=OFF \
+  -DENABLE_STATIC_LIBS=ON \
+  -DENABLE_LTO=OFF \
+  -Wno-dev
+cmake --build "$build_dir" --parallel "$(nproc)"
+
+bin_dir="$script_dir/bin"
+mkdir -p "$bin_dir"
+for target in "${selected_targets[@]}"; do
+  clang++ -std=c++17 -g -O1 -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined \
+    -DICCDEV_CFL_TARGET="\"$target\"" \
+    "$script_dir/icc_cli_fuzzer.cpp" \
+    -o "$bin_dir/icc_${target}_fuzzer"
+done
+
+seed_root="$work_dir/seeds"
+seed_inventory_tsv="$work_dir/seed-inventory.tsv"
+skipped_seeds_tsv="$work_dir/skipped-seeds.tsv"
+mkdir -p "$seed_root/icc" "$seed_root/xml" "$seed_root/json"
+cp "$repo_root"/.github/ci/test-data/*.icc "$seed_root/icc/"
+cp "$repo_root"/.github/ci/test-data/*.xml "$seed_root/xml/" 2>/dev/null || true
+
+first_icc="$(find "$seed_root/icc" -maxdepth 1 -type f -name '*.icc' | sort | head -n 1)"
+if [ -n "$first_icc" ]; then
+  "$build_dir/Tools/IccToXml/iccToXml" "$first_icc" "$seed_root/xml/generated-from-seed.xml" >/dev/null 2>&1 || true
+  "$build_dir/Tools/IccToJson/iccToJson" "$first_icc" "$seed_root/json/generated-from-seed.json" >/dev/null 2>&1 || true
+fi
+if ! find "$seed_root/xml" -maxdepth 1 -type f | grep -q .; then
+  printf '<IccProfile></IccProfile>\n' > "$seed_root/xml/minimal.xml"
+fi
+if ! find "$seed_root/json" -maxdepth 1 -type f | grep -q .; then
+  printf '{"IccProfile":{}}\n' > "$seed_root/json/minimal.json"
+fi
+
+printf 'kind\tsize\tfile\n' > "$seed_inventory_tsv"
+printf 'kind\tsize\tfile\treason\n' > "$skipped_seeds_tsv"
+
+prune_large_seeds() {
+  local kind="$1"
+  local dir="$2"
+  local file=""
+  local size=""
+
+  [ -d "$dir" ] || return 0
+  while IFS= read -r -d '' file; do
+    size="$(stat -c '%s' "$file")"
+    printf '%s\t%s\t%s\n' "$kind" "$size" "$file" >> "$seed_inventory_tsv"
+    if [ "$size" -gt "$max_seed_bytes" ]; then
+      printf '%s\t%s\t%s\tlarger-than-%s-bytes\n' "$kind" "$size" "$file" "$max_seed_bytes" >> "$skipped_seeds_tsv"
+      rm -f -- "$file"
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f -print0 | sort -z)
+}
+
+prune_large_seeds "icc" "$seed_root/icc"
+prune_large_seeds "xml" "$seed_root/xml"
+prune_large_seeds "json" "$seed_root/json"
+
+if [ "$(awk 'END { print NR }' "$skipped_seeds_tsv")" -gt 1 ]; then
+  echo "Skipped CFL smoke seeds larger than $max_seed_bytes bytes:"
+  tail -n +2 "$skipped_seeds_tsv"
+fi
+
+summary_tsv="$work_dir/summary.tsv"
+logs_dir="$work_dir/logs"
+artifacts_dir="$work_dir/artifacts"
+mkdir -p "$logs_dir" "$artifacts_dir"
+printf 'target\tstatus\tduration_seconds\tcorpus\n' > "$summary_tsv"
+
+failures=0
+if [ "$skip_run" -eq 0 ]; then
+  for target in "${selected_targets[@]}"; do
+    case "$target" in
+      fromxml) corpus="$seed_root/xml" ;;
+        fromjson) corpus="$seed_root/json" ;;
+        *) corpus="$seed_root/icc" ;;
+    esac
+    log_file="$logs_dir/$target.log"
+    set +e
+    ICCDEV_CFL_TOOL_DIR="$build_dir/Tools" \
+      ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1:allocator_may_return_null=1 \
+      UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1:print_stacktrace=1 \
+      "$bin_dir/icc_${target}_fuzzer" \
+        -artifact_prefix="$artifacts_dir/$target-" \
+        -max_total_time="$seconds" "$corpus" 2>&1 | tee "$log_file"
+    fuzzer_status="${PIPESTATUS[0]}"
+    set -e
+    if [ "$fuzzer_status" -eq 0 ]; then
+      printf '%s\tpass\t%s\t%s\n' "$target" "$seconds" "$corpus" >> "$summary_tsv"
+    else
+      printf '%s\tfail\t%s\t%s\n' "$target" "$seconds" "$corpus" >> "$summary_tsv"
+      failures=$((failures + 1))
+    fi
+  done
+fi
+
+echo "CFL smoke summary: $summary_tsv"
+cat "$summary_tsv"
+if [ "$failures" -ne 0 ]; then
+  exit 1
+fi

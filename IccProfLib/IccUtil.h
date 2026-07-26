@@ -191,7 +191,7 @@ ICCPROFLIB_API icSignature icGetLastSigPathSig(std::string sigPath);
 ICCPROFLIB_API icUInt32Number icGetSigVal(const icChar *pBuf);
 ICCPROFLIB_API icUInt32Number icGetSpaceSamples(icColorSpaceSignature sig);
 ICCPROFLIB_API icUInt32Number icGetSpectralSpaceSamples(const icHeader *pHdr);
-ICCPROFLIB_API icUInt32Number icGetMaterialColorSpaceSamples(icMaterialColorSignature sig);
+ICCPROFLIB_API icUInt32Number icGetMultiplexColorSpaceSamples(icMultiplexColorSignature sig);
 
 bool ICCPROFLIB_API icSameSpectralRange(const icSpectralRange &rng1, const icSpectralRange &rng2);
 
@@ -285,6 +285,26 @@ inline void icSwab64Array(void *pVoid, size_t num)
 #define icSwab32(flt) icSwab32Ptr(&flt)
 #define icSwab64(flt) icSwab64Ptr(&flt)
 
+
+#if defined(_MSC_VER) || defined(__MINGW32__)
+#include <time.h>
+
+// compatibility shim, because Microsoft.
+inline
+struct tm *localtime_r( const time_t *source, struct tm *dest )
+{
+  (void)localtime_s( dest, source );
+  return dest;
+}
+
+// compatibility shim, because Microsoft.
+inline
+struct tm *gmtime_r( const time_t *source, struct tm *dest )
+{
+  (void)gmtime_s( dest, source );
+  return dest;
+}
+#endif
 
 /**
  **************************************************************************
@@ -407,6 +427,58 @@ public:
 
 
 extern ICCPROFLIB_API CIccInfo icInfo;
+
+// ---------------------------------------------------------------------------
+// UTF-16 string class and conversion helpers
+// (Pure utilities shared between IccXML and IccJSON; no libxml2 dependency)
+// ---------------------------------------------------------------------------
+class ICCPROFLIB_API CIccUTF16String
+{
+public:
+  CIccUTF16String();
+  CIccUTF16String(const icUInt16Number *uzStr);
+  CIccUTF16String(const char *szStr);
+  CIccUTF16String(const CIccUTF16String &str);
+  virtual ~CIccUTF16String();
+
+  void Clear();
+  size_t Size() { return m_len; }
+  bool Resize(size_t len);
+
+  CIccUTF16String& operator=(const CIccUTF16String &wstr);
+  CIccUTF16String& operator=(const char *szStr);
+  CIccUTF16String& operator=(const icUInt16Number *uzStr);
+
+  icUInt16Number operator[](size_t nIndex) { return m_str[nIndex]; }
+
+  const icUInt16Number *c_str() { return m_str; }
+
+  bool FromUtf8(const char *szStr, size_t sizeSrc=0);
+  const char *ToUtf8(std::string &buf);
+  const wchar_t *ToWString(std::wstring &buf);
+
+  static size_t WStrlen(const icUInt16Number *uzStr);
+
+protected:
+  static size_t AllocSize(size_t n) { return (((n+64)/64)*64); }
+  size_t m_alloc;
+  size_t m_len;
+  icUInt16Number *m_str;
+};
+
+ICCPROFLIB_API const char *icUtf16ToUtf8(std::string &buf, const icUInt16Number *szSrc, int sizeSrc=0);
+ICCPROFLIB_API const unsigned short *icUtf8ToUtf16(CIccUTF16String &buf, const char *szSrc, int sizeSrc=0);
+ICCPROFLIB_API const char *icWCharToUtf8(std::string &buf, const wchar_t *szSrc, size_t sizeSrc);
+
+// ---------------------------------------------------------------------------
+// Date/time and rendering intent parsing helpers
+// (Pure utilities shared between IccXML and IccJSON; no libxml2 dependency)
+// ---------------------------------------------------------------------------
+ICCPROFLIB_API icDateTimeNumber    icGetDateTimeValue(const icChar *str);
+ICCPROFLIB_API icRenderingIntent   icGetRenderingIntentValue(const icChar *szRenderingIntent);
+ICCPROFLIB_API icStandardObserver    icGetNamedStandardObserverValue(const icChar *str);
+ICCPROFLIB_API icIlluminant          icGetIlluminantValue(const icChar *str);
+ICCPROFLIB_API icMeasurementUnitSig  icGetMeasurementValue(const icChar *str);
 
 #ifdef USEICCDEVNAMESPACE
 } //namespace iccDEV

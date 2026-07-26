@@ -68,9 +68,11 @@
 #if !defined(_ICCTAGBASIC_H)
 #define _ICCTAGBASIC_H
 
+#include <cstddef>
 #include <list>
 #include <string>
 #include "IccDefs.h"
+#include "IccObject.h"
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -78,16 +80,110 @@ namespace iccDEV {
 
 class CIccIO;
 
-class ICCPROFLIB_API CIccProfile;
+class CIccProfile;
 
 class CIccSparseMatrix;
 
 class IIccExtensionTag
 {
 public:
+  virtual ~IIccExtensionTag() {}
   virtual const char *GetExtClassName() const =0;
   virtual const char *GetExtDerivedClassName() const =0;
 };
+
+/**
+ ***********************************************************************
+ * Class: IDescribeSink
+ *
+ * Purpose:
+ *  Output sink for streaming Describe() output. Lets memory-constrained
+ *  consumers (WASM, sandboxed, embedded) receive bytes incrementally
+ *  instead of forcing the whole dump to materialize in a single
+ *  std::string. ShouldContinue() lets a sink enforce byte budgets, honour
+ *  user cancellation, or pipe to bounded buffers.
+ *
+ *  See StringDescribeSink for a default implementation that funnels
+ *  output back into a std::string (preserves the existing
+ *  Describe(std::string&, int) contract).
+ ***********************************************************************
+ */
+class ICCPROFLIB_API IDescribeSink
+{
+public:
+  virtual ~IDescribeSink() {}
+
+  // Append `len` bytes from `data` to the sink. Sinks must be append-only;
+  // existing content is never modified.
+  virtual void Write(const char *data, std::size_t len) = 0;
+
+  // Return false to ask the producer to stop emitting further output.
+  // Implementations that do not need cancellation can leave the default,
+  // matching today's "always run to completion" behaviour.
+  virtual bool ShouldContinue() { return true; }
+};
+
+/**
+ ***********************************************************************
+ * Class: StringDescribeSink
+ *
+ * Purpose:
+ *  Drop-in sink that appends to a caller-owned std::string. The legacy
+ *  CIccTag::Describe(std::string&, int) overload is implemented in
+ *  terms of this sink, so existing code paths produce byte-for-byte
+ *  identical output.
+ ***********************************************************************
+ */
+class ICCPROFLIB_API StringDescribeSink : public IDescribeSink
+{
+public:
+  explicit StringDescribeSink(std::string &out) : m_out(out) {}
+  virtual void Write(const char *data, std::size_t len) override
+  { if (data && len) m_out.append(data, len); }
+
+private:
+  std::string &m_out;
+};
+
+/**
+ ***********************************************************************
+ * Struct: DescribeOptions
+ *
+ * Purpose:
+ *  Composable, per-section verbosity controls. Replaces the coarse
+ *  integer verbosity (>25 / >50 / >75 / 100) with explicit booleans plus
+ *  budgets, so callers can ask for "everything except CLUT cells" or
+ *  "first N cells then truncate" without modifying IccProfLib.
+ *
+ *  Defaults match nVerboseness = 100 — i.e. a default-constructed
+ *  DescribeOptions produces today's full dump.
+ ***********************************************************************
+ */
+struct DescribeOptions
+{
+  // Section toggles. Defaults match nVerboseness = 100, so a default-
+  // constructed DescribeOptions produces today's full dump verbatim.
+  // Each flag is annotated with the legacy nVerboseness threshold it
+  // mirrors. Tag classes that have not yet been converted to honour the
+  // flags directly fall back through the legacy integer verbosity path
+  // (see CIccTag::Describe(IDescribeSink&, const DescribeOptions&)
+  // default implementation).
+  bool emit_header        = true;
+  bool emit_text_meta     = true;   // legacy gate: nVerboseness > 25 (text/desc/mluc tag metadata)
+  bool emit_text_full     = true;   // legacy gate: nVerboseness > 50 (full text content)
+  bool emit_curve_points  = true;   // legacy gate: nVerboseness > 75 (CIccTagCurve point dump)
+  bool emit_clut_channels = true;   // legacy gate: nVerboseness > 75 (CIccCLUT input/output channel header)
+  bool emit_clut_cells    = true;   // legacy gate: nVerboseness > 75 (CIccCLUT grid cells — the explosive one)
+  bool emit_spd_samples   = true;   // legacy gate: nVerboseness > 75 (observer / illuminant SPD samples)
+
+  // Budgets. 0 = unbounded (matches today's behaviour).
+  std::size_t max_clut_cells_per_tag = 0;
+  std::size_t max_curve_points       = 0;
+  std::size_t max_total_bytes        = 0; // soft cap; "[truncated]" footer
+};
+
+ICCPROFLIB_API DescribeOptions OptionsFromVerbosity(int nVerboseness);
+ICCPROFLIB_API int             VerbosityFromOptions(const DescribeOptions &opts);
 
 /**
  ***********************************************************************
@@ -100,7 +196,7 @@ public:
  *  factory.
  ***********************************************************************
  */
-class ICCPROFLIB_API CIccTag  
+class ICCPROFLIB_API CIccTag : public IIccObject
 {
 public:
   CIccTag();
@@ -133,6 +229,7 @@ public:
   virtual bool IsNumArrayType() const { return false;} //If true then CIccTag can be cast as a CIccTagNumArray
 
   virtual const icChar *GetClassName() const { return "CIccTag"; }
+  virtual const icChar *GetObjectType() const { return GetClassName(); }
 
   static CIccTag* Create(icTagTypeSignature sig);
 
@@ -212,9 +309,30 @@ public:
   *
   * Parameter(s):
   * sDescription - A string to put the tag's description into.
-* * verbosenss   - integer value. Default=0. The larger the value, the more verbose the output. 
+* * verbosenss   - integer value. Default=0. The larger the value, the more verbose the output.
   */
   virtual void Describe(std::string &sDescription, int /*nVerboseness=0*/) { sDescription.clear(); }
+
+  /**
+  * Function: Describe(sink, opts)
+  *  Sink-based Describe overload. Lets memory-constrained consumers
+  *  receive Describe() output incrementally and lets callers express
+  *  finer-grained verbosity than the integer nVerboseness gates.
+  *
+  *  Default implementation delegates to the legacy
+  *  Describe(std::string&, int) virtual via a StringDescribeSink, then
+  *  copies the bytes through `sink` honouring opts.max_total_bytes. So
+  *  every existing tag class works through this entry point with no
+  *  changes to its derived implementation; tag classes whose Describe()
+  *  output can grow large (e.g. CIccMBB / CIccCLUT) can override this
+  *  virtual to stream output directly and honour the per-section flags
+  *  and budgets.
+  */
+  virtual void Describe(IDescribeSink &sink, const DescribeOptions &opts);
+
+  // Convenience overload — Describe to a sink with verbosity-style int.
+  void Describe(IDescribeSink &sink, int nVerboseness)
+  { Describe(sink, OptionsFromVerbosity(nVerboseness)); }
 
   /**
    ******************************************************************************
@@ -295,7 +413,7 @@ public:
 
   const icChar *GetText() const { return m_szText; }
   void SetText(const icChar *szText);
-  const icChar *operator=(const icChar *szText);
+  CIccTagText &operator=(const icChar *szText);
 
   icChar *GetBuffer(icUInt32Number nSize);
   void Release();
@@ -337,8 +455,8 @@ public:
   void SetText(const icUChar *szText);
   void SetText(const icChar *szText) { SetText((icUChar*)szText); }
   
-  const icUChar *operator=(const icUChar *szText);
-  const icChar *operator=(const icChar *szText) { return (const icChar*)operator=((icUChar*)szText); }
+  CIccTagUtf8Text& operator=(const icUChar *szText);
+  CIccTagUtf8Text& operator=(const icChar *szText) { return operator=((icUChar*)szText); }
 
   icUChar *GetBuffer(icUInt32Number nSize);
   void Release();
@@ -452,7 +570,7 @@ public:
 
   icUInt32Number GetLength() const;
 
-  const icUChar16 *operator=(const icUChar16 *szText);
+  CIccTagUtf16Text& operator=(const icUChar16 *szText);
 
   icUChar16 *GetBuffer(icUInt32Number nSize);
   void Release();
@@ -492,7 +610,7 @@ public:
 
   const icChar *GetText() const { return m_szText; }
   void SetText(const icChar *szText);
-  const icChar *operator=(const icChar *szText);
+  CIccTagTextDescription& operator=(const icChar *szText);
 
   icChar *GetBuffer(icUInt32Number nSize);
   void Release();
@@ -549,7 +667,7 @@ public:
 
   icUInt32Number GetValue() const { return m_nSig; }
   void SetValue(icUInt32Number sig) { m_nSig = sig; }
-  icUInt32Number operator=(icUInt32Number sig) { SetValue(sig); return m_nSig; }
+  CIccTagSignature& operator=(icUInt32Number sig) { SetValue(sig); return *this; }
   virtual icValidateStatus Validate(std::string sigPath, std::string &sReport, const CIccProfile* pProfile=NULL) const;
 
 protected:
@@ -1185,13 +1303,17 @@ public: //member functions
   bool SetText(const icUInt16Number *sszUnicode16Text,
                icLanguageCode nLanguageCode = icLanguageCodeEnglish,
                icCountryCode nRegionCode = icCountryCodeUSA);
+  bool SetText(const icUInt16Number *sszUnicode16Text,
+               icUInt32Number nLength,
+               icLanguageCode nLanguageCode = icLanguageCodeEnglish,
+               icCountryCode nRegionCode = icCountryCodeUSA);
   bool SetText(const icUInt32Number *sszUnicode32Text,
                icLanguageCode nLanguageCode = icLanguageCodeEnglish,
                icCountryCode nRegionCode = icCountryCodeUSA);
 
-  const icChar *operator=(const icChar *szText) { SetText(szText); return szText; }
-  const icUInt16Number *operator=(const icUInt16Number *sszText) { SetText(sszText); return sszText; }
-  const icUInt32Number *operator=(const icUInt32Number *sszText) { SetText(sszText); return sszText; }
+  CIccLocalizedUnicode& operator=(const icChar *szText) { SetText(szText); return *this; }
+  CIccLocalizedUnicode& operator=(const icUInt16Number *sszText) { SetText(sszText); return *this; }
+  CIccLocalizedUnicode& operator=(const icUInt32Number *sszText) { SetText(sszText); return *this; }
 
   //Data
   icLanguageCode m_nLanguageCode;
@@ -1245,7 +1367,11 @@ public:
   void SetText(const icChar *szText,
                icLanguageCode nLanguageCode = icLanguageCodeEnglish,
                icCountryCode nRegionCode = icCountryCodeUSA);
-  void SetText(const icUInt16Number *sszUnicode16Text,
+  bool SetText(const icUInt16Number *sszUnicode16Text,
+               icLanguageCode nLanguageCode = icLanguageCodeEnglish,
+               icCountryCode nRegionCode = icCountryCodeUSA);
+  bool SetText(const icUInt16Number *sszUnicode16Text,
+               icUInt32Number nLength,
                icLanguageCode nLanguageCode = icLanguageCodeEnglish,
                icCountryCode nRegionCode = icCountryCodeUSA);
   void SetText(const icUInt32Number *sszUnicode32Text,
@@ -1450,7 +1576,7 @@ public:
 *  so this class provides a single interface to both.
 *****************************************************************************
 */
-class ICCPROFLIB_API CIccProfileDescText
+class ICCPROFLIB_API CIccProfileDescText : public IIccObject
 {
 public:
   CIccProfileDescText();
@@ -1670,6 +1796,44 @@ public:
   virtual icValidateStatus Validate(std::string sigPath, std::string &sReport, const CIccProfile* pProfile=NULL) const;
 
   icSignature m_nSig;
+  icSpectralRange m_spectralRange;
+  icSpectralRange m_biSpectralRange;
+};
+
+
+/**
+****************************************************************************
+* Class: CIccTagSpectralRange
+*
+* Purpose: The spectralRangeType ('srng') tag type, added by the iccMAX
+*   extended device colour space amendment (spec 10.2.w). It carries the
+*   spectral wavelength range (and, for bi-spectral spaces, the bi-spectral
+*   wavelength range) for a device colour space that uses a spectral colour
+*   space signature in the header. Used by the deviceSpectralRangeTag ('dsrn').
+*   Wire layout (Table W, 20 bytes): type signature, 4 reserved bytes, then
+*   the spectralRange and bi-spectralRange (icSpectralRange, 6 bytes each).
+*   The bi-spectral range is zero when the colour space is not bi-spectral.
+*****************************************************************************
+*/
+class ICCPROFLIB_API CIccTagSpectralRange : public CIccTag
+{
+public:
+  CIccTagSpectralRange();
+  CIccTagSpectralRange(const CIccTagSpectralRange &ITSR);
+  CIccTagSpectralRange &operator=(const CIccTagSpectralRange &SpectralRangeTag);
+  virtual CIccTag* NewCopy() const {return new CIccTagSpectralRange(*this);}
+  virtual ~CIccTagSpectralRange();
+
+  virtual icTagTypeSignature GetType() const { return icSigSpectralRangeType; }
+  virtual const icChar *GetClassName() const { return "CIccTagSpectralRange"; }
+
+  virtual bool Read(icUInt32Number size, CIccIO *pIO);
+  virtual bool Write(CIccIO *pIO);
+  virtual void Describe(std::string &sDescription, int nVerboseness);
+
+  virtual icValidateStatus Validate(std::string sigPath, std::string &sReport, const CIccProfile* pProfile=NULL) const;
+
+  icUInt32Number m_nReserved;
   icSpectralRange m_spectralRange;
   icSpectralRange m_biSpectralRange;
 };

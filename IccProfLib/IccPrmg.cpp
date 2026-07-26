@@ -61,6 +61,7 @@ Copyright:  (c) see ICC Software License
 * 
 */
 
+#include <cmath>
 #include "IccPrmg.h"
 #include "IccUtil.h"
 
@@ -137,11 +138,11 @@ CIccPRMG::CIccPRMG()
 
 icFloatNumber CIccPRMG::GetChroma(icFloatNumber L, icFloatNumber h)
 {
-  if (L < 3.5 || L > 100.0)
+  if (!std::isfinite(L) || !std::isfinite(h))
     return -1;
 
-  int nHIndex, nLIndex;
-  icFloatNumber dHFraction, dLFraction;
+  if (L < 3.5 || L > 100.0)
+    return -1;
 
   // Normalize h to the range [0, 360)
   while (h < 0.0)
@@ -149,9 +150,11 @@ icFloatNumber CIccPRMG::GetChroma(icFloatNumber L, icFloatNumber h)
   while (h >= 360.0)
     h -= 360.0;
 
-  nHIndex = (int)(h / 10.0);
-  dHFraction = (h - nHIndex * 10.0f) / 10.0f;
+  int nHIndex = (int)(h / 10.0);
+  icFloatNumber dHFraction = (h - nHIndex * 10.0f) / 10.0f;
 
+  icFloatNumber dLFraction;
+  int nLIndex;
   if (L < 5) {
     nLIndex = 0;
     dLFraction = (L - 3.5f) / (5.0f - 3.5f);
@@ -230,13 +233,14 @@ icStatusCMM CIccPRMG::EvaluateProfile(CIccProfile *pProfile, icRenderingIntent n
   }
 
   CIccCmm Lab2Dev2Lab(icSigLabData, icSigLabData, false);
+  icXformLutType nLutType = buseMpeTags ? icXformLutColor : icXformLutColorimetric;
 
-  icStatusCMM result = Lab2Dev2Lab.AddXform(*pProfile, nIntent, nInterp, NULL, icXformLutColorimetric, buseMpeTags);
+  icStatusCMM result = Lab2Dev2Lab.AddXform(*pProfile, nIntent, nInterp, NULL, nLutType, buseMpeTags);
   if (result != icCmmStatOk) {
     return result;
   }
 
-  result = Lab2Dev2Lab.AddXform(*pProfile, nIntent, nInterp, NULL, icXformLutColorimetric, buseMpeTags);
+  result = Lab2Dev2Lab.AddXform(*pProfile, nIntent, nInterp, NULL, nLutType, buseMpeTags);
   if (result != icCmmStatOk) {
     return result;
   }

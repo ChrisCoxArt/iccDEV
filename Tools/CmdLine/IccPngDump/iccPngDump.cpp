@@ -80,6 +80,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
@@ -89,7 +90,13 @@
 #include "IccUtil.h"
 #include "IccDefs.h"
 #include "IccProfLibVer.h"
+#include "../IccCmdLineUtil.h"
 #include <zlib.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // Handle platform-specific png_get_iCCP() profile pointer types
 #if defined(__APPLE__) && defined(__clang__)
@@ -100,18 +107,9 @@
     typedef png_bytep png_icc_profilep;
 #endif
 
-// Platform-specific trap macro for debugging fatal errors
-#ifdef __x86_64__
-    #define TRAP() asm volatile ("ud2")
-#elif defined(__aarch64__)
-    #define TRAP() asm volatile ("brk #0")
-#else
-    #define TRAP() abort()
-#endif
-
 // Logging macros for error handling
 #define LOG_ERROR(msg) do { fprintf(stderr, "[ERROR] %s\n", msg); } while (0)
-#define BAIL_OUT(msg) do { LOG_ERROR(msg); TRAP(); } while (0)
+#define BAIL_OUT(msg) safe_exit(msg)
 
 
 // Function declarations
@@ -124,7 +122,7 @@ void Usage();
 
 /**
  * Safely exits the program with a given reason.
- * 
+ *
  * @param reason The reason for exiting.
  */
 
@@ -160,7 +158,7 @@ bool InjectIccProfile(const std::string& inputPng,
  * @param nLen     Size of ICC data.
  * @param outputFile Path to write ICC (optional).
  */
-void PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const char *outputFile);
+bool PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const char *outputFile);
 
 /**
  * Prints information about a given PNG file.
@@ -196,15 +194,22 @@ int main(int argc, char* argv[]) {
     const char *outputPngFile = NULL;
 
     // Simple CLI arg parsing
-    for (int i = 1; i < argc; ++i) {
+    int i = 1;
+    while (i < argc) {
         if (strcmp(argv[i], "--write-icc") == 0 && i + 1 < argc) {
-            injectIccFile = argv[++i];
+            injectIccFile = argv[i + 1];
+            i += 2;
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
-            outputPngFile = argv[++i];
+            outputPngFile = argv[i + 1];
+            i += 2;
         } else if (!inputFile) {
             inputFile = argv[i];
+            i++;
         } else if (!outputIccFile) {
             outputIccFile = argv[i];
+            i++;
+        } else {
+            i++;
         }
     }
 
@@ -272,7 +277,12 @@ if (injectIccFile) {
     unsigned char *pProfMem = NULL;
     unsigned int nLen = 0;
     if (ExtractIccProfile(png_ptr, info_ptr, &pProfMem, &nLen)) {
-        PrintIccProfileInfo(pProfMem, nLen, outputIccFile);
+        if (!PrintIccProfileInfo(pProfMem, nLen, outputIccFile)) {
+            free(pProfMem);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            fclose(fp);
+            safe_exit("Failed to save extracted ICC profile.");
+        }
         free(pProfMem);
     } else {
         printf("[INFO] No embedded ICC Profile found.\n");
@@ -323,6 +333,206 @@ void Usage() {
 // Function: InjectIccProfile
 // Description: Injects an ICC profile into a PNG file
 // =====================================================================
+static FILE* OpenPngOutputFile(const char* outputPng)
+{
+    // PNG export paths are intentional caller-selected output files after regular-file validation.
+
+    // codeql[cpp/path-injection]
+    return icOpenRegularWriteBinaryFile(outputPng);
+}
+
+static bool ReadBinaryStream(std::istream& in, std::vector<unsigned char>& data)
+{
+    unsigned char buffer[4096];
+
+    data.clear();
+    while (in) {
+        in.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
+        std::streamsize bytesRead = in.gcount();
+        if (bytesRead > 0) {
+            data.insert(data.end(), buffer, buffer + bytesRead);
+        }
+    }
+
+    return in.eof() && !in.bad();
+}
+
+static bool InjectIccProfileData(const char* inputPng,
+                                 const char* outputPng,
+                                 const unsigned char* iccData,
+                                 png_uint_32 iccDataSize)
+{
+    FILE* fpIn = fopen(inputPng, "rb");
+    if (!fpIn) {
+        LOG_ERROR("Failed to open input PNG file.");
+        return false;
+    }
+
+    FILE* volatile fpOut = OpenPngOutputFile(outputPng);
+    if (!fpOut) {
+        fclose(fpIn);
+        LOG_ERROR("Failed to open output PNG file.");
+        return false;
+    }
+
+    png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) {
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("Failed to create PNG read struct.");
+        return false;
+    }
+
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_read_struct(&png_ptr, NULL, NULL);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("Failed to create PNG info struct.");
+        return false;
+    }
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("LibPNG read error.");
+        return false;
+    }
+
+    png_init_io(png_ptr, fpIn);
+    png_read_info(png_ptr, info_ptr);
+
+    png_structp write_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!write_ptr) {
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("Failed to create PNG write struct.");
+        return false;
+    }
+
+    png_infop write_info_ptr = png_create_info_struct(write_ptr);
+    if (!write_info_ptr) {
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        png_destroy_write_struct(&write_ptr, NULL);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("Failed to create PNG write info struct.");
+        return false;
+    }
+
+    png_bytepp row_pointers = NULL;
+    volatile png_uint_32 rowsAllocated = 0;
+    if (setjmp(png_jmpbuf(write_ptr))) {
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        png_destroy_write_struct(&write_ptr, &write_info_ptr);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("LibPNG write error.");
+        return false;
+    }
+
+    png_init_io(write_ptr, fpOut);
+    png_set_compression_level(write_ptr, Z_BEST_COMPRESSION);
+
+    // MUST propagate original info to write_info_ptr before setting ICC
+    png_set_rows(write_ptr, write_info_ptr, nullptr);  // optional
+    png_set_IHDR(write_ptr, write_info_ptr,
+                 png_get_image_width(png_ptr, info_ptr),
+                 png_get_image_height(png_ptr, info_ptr),
+                 png_get_bit_depth(png_ptr, info_ptr),
+                 png_get_color_type(png_ptr, info_ptr),
+                 png_get_interlace_type(png_ptr, info_ptr),
+                 png_get_compression_type(png_ptr, info_ptr),
+                 png_get_filter_type(png_ptr, info_ptr));
+
+    // libpng requires the palette (PLTE) -- and any transparency (tRNS) -- to be
+    // set on the output before png_write_info() for indexed-colour images.
+    // Copying only IHDR left paletted PNGs failing with "Valid palette required
+    // for paletted images" when injecting an ICC profile (#1383), so propagate
+    // the palette (and tRNS) from the input here.
+    if (png_get_color_type(png_ptr, info_ptr) == PNG_COLOR_TYPE_PALETTE) {
+        png_colorp palette = NULL;
+        int num_palette = 0;
+        if (!png_get_PLTE(png_ptr, info_ptr, &palette, &num_palette) || !palette || num_palette <= 0) {
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            png_destroy_write_struct(&write_ptr, &write_info_ptr);
+            fclose(fpIn); fclose(fpOut);
+            LOG_ERROR("Palette PNG is missing a valid PLTE chunk.");
+            return false;
+        }
+        png_set_PLTE(write_ptr, write_info_ptr, palette, num_palette);
+
+        png_bytep trans_alpha = NULL;
+        int num_trans = 0;
+        png_color_16p trans_color = NULL;
+        if (png_get_tRNS(png_ptr, info_ptr, &trans_alpha, &num_trans, &trans_color)) {
+            png_set_tRNS(write_ptr, write_info_ptr, trans_alpha, num_trans, trans_color);
+        }
+    }
+
+    // only now is it safe to attach ICC
+    png_set_iCCP(write_ptr, write_info_ptr, "icc", 0, iccData, iccDataSize);
+
+    // finally write header
+    png_write_info(write_ptr, write_info_ptr);
+
+
+    // Re-read the input image data and write to output
+    const png_uint_32 height = png_get_image_height(png_ptr, info_ptr);
+    const png_size_t rowBytes = png_get_rowbytes(png_ptr, info_ptr);
+    row_pointers = static_cast<png_bytepp>(calloc(height, sizeof(png_bytep)));
+    if (!row_pointers) {
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        png_destroy_write_struct(&write_ptr, &write_info_ptr);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("Failed to allocate PNG row pointers.");
+        return false;
+    }
+
+    for (png_uint_32 y = 0; y < height; y++) {
+        row_pointers[y] = static_cast<png_bytep>(malloc(rowBytes));
+        if (!row_pointers[y]) {
+            for (png_uint_32 i = 0; i < rowsAllocated; i++) {
+                free(row_pointers[i]);
+            }
+            free(row_pointers);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            png_destroy_write_struct(&write_ptr, &write_info_ptr);
+            fclose(fpIn); fclose(fpOut);
+            LOG_ERROR("Failed to allocate PNG row.");
+            return false;
+        }
+        rowsAllocated++;
+    }
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        for (png_uint_32 y = 0; y < rowsAllocated; y++) {
+            free(row_pointers[y]);
+        }
+        free(row_pointers);
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        png_destroy_write_struct(&write_ptr, &write_info_ptr);
+        fclose(fpIn); fclose(fpOut);
+        LOG_ERROR("LibPNG image read error.");
+        return false;
+    }
+
+    png_read_image(png_ptr, row_pointers);
+    png_write_image(write_ptr, row_pointers);
+    png_write_end(write_ptr, NULL);
+
+    // Cleanup
+    for (png_uint_32 y = 0; y < rowsAllocated; y++) {
+        free(row_pointers[y]);
+    }
+    free(row_pointers);
+
+    png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+    png_destroy_write_struct(&write_ptr, &write_info_ptr);
+    fclose(fpIn);
+    if (!icFlushAndClose(fpOut)) {
+        LOG_ERROR("Failed to close output PNG file.");
+        return false;
+    }
+    return true;
+}
+
 /**
  * Injects a new ICC profile into a PNG image and writes the output.
  *
@@ -336,100 +546,22 @@ bool InjectIccProfile(const std::string& inputPng,
                       const std::string& outputPng) {
     std::ifstream iccIn(iccFile, std::ios::binary);
     if (!iccIn.is_open()) {
-        safe_exit("Failed to open ICC profile file for reading.");
+        LOG_ERROR("Failed to open ICC profile file for reading.");
+        return false;
     }
 
-    std::vector<unsigned char> iccData((std::istreambuf_iterator<char>(iccIn)),
-                                       std::istreambuf_iterator<char>());
-
-    FILE* fpIn = fopen(inputPng.c_str(), "rb");
-    if (!fpIn) {
-        safe_exit("Failed to open input PNG file.");
+    std::vector<unsigned char> iccData;
+    if (!ReadBinaryStream(iccIn, iccData)) {
+        LOG_ERROR("Failed to read ICC profile file.");
+        return false;
+    }
+    if (iccData.empty() || iccData.size() > std::numeric_limits<png_uint_32>::max()) {
+        LOG_ERROR("Invalid ICC profile size for PNG iCCP chunk.");
+        return false;
     }
 
-    FILE* fpOut = fopen(outputPng.c_str(), "wb");
-    if (!fpOut) {
-        fclose(fpIn);
-        safe_exit("Failed to open output PNG file.");
-    }
-
-    png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) {
-        fclose(fpIn); fclose(fpOut);
-        safe_exit("Failed to create PNG read struct.");
-    }
-
-    png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        png_destroy_read_struct(&png_ptr, NULL, NULL);
-        fclose(fpIn); fclose(fpOut);
-        safe_exit("Failed to create PNG info struct.");
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-        fclose(fpIn); fclose(fpOut);
-        safe_exit("LibPNG read error.");
-    }
-
-    png_init_io(png_ptr, fpIn);
-    png_read_info(png_ptr, info_ptr);
-
-    png_structp write_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    png_infop write_info_ptr = png_create_info_struct(write_ptr);
-    if (!write_ptr || !write_info_ptr) {
-        safe_exit("Failed to create PNG write structures.");
-    }
-
-    if (setjmp(png_jmpbuf(write_ptr))) {
-        safe_exit("LibPNG write error.");
-    }
-
-    png_init_io(write_ptr, fpOut);
-   png_set_compression_level(write_ptr, Z_BEST_COMPRESSION);
-
-// MUST propagate original info to write_info_ptr before setting ICC
-png_set_rows(write_ptr, write_info_ptr, nullptr);  // optional
-png_set_IHDR(write_ptr, write_info_ptr,
-             png_get_image_width(png_ptr, info_ptr),
-             png_get_image_height(png_ptr, info_ptr),
-             png_get_bit_depth(png_ptr, info_ptr),
-             png_get_color_type(png_ptr, info_ptr),
-             png_get_interlace_type(png_ptr, info_ptr),
-             png_get_compression_type(png_ptr, info_ptr),
-             png_get_filter_type(png_ptr, info_ptr));
-
-// only now is it safe to attach ICC
-// TODO - this should have a size check to make sure the profile is less than 2 Gig (32 bit api limit)
-png_set_iCCP(write_ptr, write_info_ptr, "icc", 0, iccData.data(), (png_uint_32)iccData.size());
-
-// finally write header
-png_write_info(write_ptr, write_info_ptr);
-
-
-    // Re-read the input image data and write to output
-    png_bytepp row_pointers = (png_bytepp)png_malloc(png_ptr,
-        sizeof(png_bytep) * png_get_image_height(png_ptr, info_ptr));
-
-    for (png_uint_32 y = 0; y < png_get_image_height(png_ptr, info_ptr); y++) {
-        row_pointers[y] = (png_bytep)png_malloc(png_ptr, png_get_rowbytes(png_ptr, info_ptr));
-    }
-
-    png_read_image(png_ptr, row_pointers);
-    png_write_image(write_ptr, row_pointers);
-    png_write_end(write_ptr, NULL);
-
-    // Cleanup
-    for (png_uint_32 y = 0; y < png_get_image_height(png_ptr, info_ptr); y++) {
-        png_free(png_ptr, row_pointers[y]);
-    }
-    png_free(png_ptr, row_pointers);
-
-    png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-    png_destroy_write_struct(&write_ptr, &write_info_ptr);
-    fclose(fpIn);
-    fclose(fpOut);
-    return true;
+    return InjectIccProfileData(inputPng.c_str(), outputPng.c_str(), iccData.data(),
+                                static_cast<png_uint_32>(iccData.size()));
 }
 
 // =====================================================================
@@ -453,7 +585,7 @@ int ExtractIccProfile(png_structp png_ptr, png_infop info_ptr, unsigned char **p
     png_uint_32 profile_length = 0;
 
     if (png_get_iCCP(png_ptr, info_ptr, &profile_name, &compression_type,
-                     (png_bytepp)&profile_data_raw, &profile_length)) {
+                     &profile_data_raw, &profile_length)) {
 
         if (profile_length == 0) {
             LOG_ERROR("Empty ICC profile found.");
@@ -461,7 +593,7 @@ int ExtractIccProfile(png_structp png_ptr, png_infop info_ptr, unsigned char **p
         }
 
         *nLen = profile_length;
-        *pProfMem = (unsigned char *)malloc(profile_length);
+        *pProfMem = static_cast<unsigned char*>(malloc(profile_length));
         if (!(*pProfMem)) {
             LOG_ERROR("Memory allocation for ICC profile failed.");
             return 0;
@@ -551,7 +683,7 @@ void PrintPngInfo(png_structp png_ptr, png_infop info_ptr) {
  * @param nLen       Length of the ICC profile data in bytes.
  * @param outputFile Path to the output file for saving the ICC profile (optional).
  */
-void PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const char *outputFile) {
+bool PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const char *outputFile) {
     printf("--------------------> ICC Profile Information <---------------------------\n");
     printf("Profile Size:      %u bytes\n", nLen);
 
@@ -559,7 +691,7 @@ void PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const
     CIccProfile *pProfile = OpenIccProfile(pProfMem, nLen);
     if (!pProfile) {
         LOG_ERROR("Failed to parse ICC Profile.");
-        return;
+        return false;
     }
 
     // Extract ICC header details
@@ -568,24 +700,32 @@ void PrintIccProfileInfo(const unsigned char *pProfMem, unsigned int nLen, const
 
     printf(" Color Space:      %s\n", Fmt.GetColorSpaceSigName(pHdr->colorSpace));
     printf(" Colorimetric PCS: %s\n", Fmt.GetColorSpaceSigName(pHdr->pcs));
-    printf(" Profile Version:  %d.%d.%d\n", 
-           (pHdr->version >> 24) & 0xFF,   // Major version
-           (pHdr->version >> 20) & 0x0F,   // Minor version
-           (pHdr->version >> 16) & 0x0F);  // Sub-minor version
+    printf(" Profile Version:  %u.%u.%u\n",
+           (unsigned int) ((pHdr->version >> 24) & 0xFF),   // Major version
+           (unsigned int) ((pHdr->version >> 20) & 0x0F),   // Minor version
+           (unsigned int) ((pHdr->version >> 16) & 0x0F));  // Sub-minor version
 
     delete pProfile;
 
     // If an output file is specified, save the ICC profile
     if (outputFile) {
-        FILE *outFile = fopen(outputFile, "wb");
+        FILE *outFile = OpenPngOutputFile(outputFile);
         if (!outFile) {
             LOG_ERROR("Unable to open output file for writing.");
-            return;
+            return false;
         }
-        fwrite(pProfMem, 1, nLen, outFile);
-        fclose(outFile);
+        if (fwrite(pProfMem, 1, nLen, outFile) != nLen) {
+            LOG_ERROR("Failed to write ICC profile.");
+            fclose(outFile);
+            return false;
+        }
+        if (!icFlushAndClose(outFile)) {
+            LOG_ERROR("Failed to close ICC profile output file.");
+            return false;
+        }
         printf("[INFO] ICC Profile saved to: %s\n", outputFile);
     }
     
     printf("--------------------------------------------------------------------\n");
+    return true;
 }

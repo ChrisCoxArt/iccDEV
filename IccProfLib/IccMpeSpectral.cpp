@@ -5,7 +5,7 @@
 
     Version:    V1
 
-    Copyright:  � see ICC Software License
+    Copyright:  see ICC Software License
 */
 
 /*
@@ -76,6 +76,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <new>
 #include "IccMpeBasic.h"
 #include "IccMpeSpectral.h"
 #include "IccIO.h"
@@ -83,6 +84,10 @@
 #include "IccMatrixMath.h"
 #include "IccUtil.h"
 #include "IccCAM.h"
+
+namespace {
+  const size_t kMaxDescribeSamples = 4096;
+}
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -140,7 +145,8 @@ CIccMpeSpectralMatrix::CIccMpeSpectralMatrix(const CIccMpeSpectralMatrix &matrix
   if(matrix.m_pMatrix) {
     int num = m_size * sizeof(icFloatNumber);
     m_pMatrix = (icFloatNumber*)malloc(num);
-    memcpy(m_pMatrix, matrix.m_pMatrix, num);
+    if (m_pMatrix)
+      memcpy(m_pMatrix, matrix.m_pMatrix, num);
   }
   else
     m_pMatrix = NULL;
@@ -148,7 +154,8 @@ CIccMpeSpectralMatrix::CIccMpeSpectralMatrix(const CIccMpeSpectralMatrix &matrix
   if (matrix.m_pOffset) {
     int num = m_Range.steps * sizeof(icFloatNumber);
     m_pOffset = (icFloatNumber*)malloc(num);
-    memcpy(m_pOffset, matrix.m_pOffset, num);
+    if (m_pOffset)
+      memcpy(m_pOffset, matrix.m_pOffset, num);
   }
   else
     m_pOffset = NULL;
@@ -156,7 +163,8 @@ CIccMpeSpectralMatrix::CIccMpeSpectralMatrix(const CIccMpeSpectralMatrix &matrix
   if (matrix.m_pWhite) {
     int num = m_Range.steps * sizeof(icFloatNumber);
     m_pWhite = (icFloatNumber*)malloc(num);
-    memcpy(m_pWhite, matrix.m_pWhite, num);
+    if (m_pWhite)
+      memcpy(m_pWhite, matrix.m_pWhite, num);
   }
   else
     m_pWhite = NULL;
@@ -184,36 +192,36 @@ void CIccMpeSpectralMatrix::copyData(const CIccMpeSpectralMatrix &matrix)
 
   m_Range = matrix.m_Range;
 
-  if (m_pMatrix)
-    free(m_pMatrix);
+  free(m_pMatrix);
 
   m_size = matrix.m_size;
   if (matrix.m_pMatrix) {
     int num = m_size * sizeof(icFloatNumber);
     m_pMatrix = (icFloatNumber*)malloc(num);
-    memcpy(m_pMatrix, matrix.m_pMatrix, num);
+    if (m_pMatrix)
+      memcpy(m_pMatrix, matrix.m_pMatrix, num);
   }
   else
     m_pMatrix = NULL;
 
-  if (m_pOffset)
-    free(m_pOffset);
+  free(m_pOffset);
 
   if (matrix.m_pOffset) {
     int num = m_Range.steps * sizeof(icFloatNumber);
     m_pOffset = (icFloatNumber*)malloc(num);
-    memcpy(m_pOffset, matrix.m_pOffset, num);
+    if (m_pOffset)
+      memcpy(m_pOffset, matrix.m_pOffset, num);
   }
   else
     m_pOffset = NULL;
 
-  if (m_pWhite)
-    free(m_pWhite);
+  free(m_pWhite);
 
   if (matrix.m_pWhite) {
     int num = m_Range.steps * sizeof(icFloatNumber);
     m_pWhite = (icFloatNumber*)malloc(num);
-    memcpy(m_pWhite, matrix.m_pWhite, num);
+    if (m_pWhite)
+      memcpy(m_pWhite, matrix.m_pWhite, num);
   }
   else
     m_pWhite = NULL;
@@ -233,17 +241,10 @@ void CIccMpeSpectralMatrix::copyData(const CIccMpeSpectralMatrix &matrix)
  ******************************************************************************/
 CIccMpeSpectralMatrix::~CIccMpeSpectralMatrix()
 {
-  if (m_pMatrix)
-    free(m_pMatrix);
-
-  if (m_pOffset)
-    free(m_pOffset);
-
-  if (m_pWhite)
-    free(m_pWhite);
-
-  if (m_pApplyMtx)
-    delete m_pApplyMtx;
+  free(m_pMatrix);
+  free(m_pOffset);
+  free(m_pWhite);
+  delete m_pApplyMtx;
 }
 
 
@@ -259,25 +260,17 @@ CIccMpeSpectralMatrix::~CIccMpeSpectralMatrix()
  ******************************************************************************/
 bool CIccMpeSpectralMatrix::SetSize(icUInt16Number nInputChannels, icUInt16Number nOutputChannels, const icSpectralRange &range)
 {
-  if (m_pMatrix) {
-    free(m_pMatrix);
-    m_pMatrix = NULL;
-  }
+  free(m_pMatrix);
+  m_pMatrix = NULL;
 
-  if (m_pWhite) {
-    free(m_pWhite);
-    m_pWhite = NULL;
-  }
+  free(m_pWhite);
+  m_pWhite = NULL;
 
-  if (m_pOffset) {
-    free(m_pOffset);
-    m_pOffset = NULL;
-  }
+  free(m_pOffset);
+  m_pOffset = NULL;
 
-  if (m_pApplyMtx) {
-    delete m_pApplyMtx;
-    m_pApplyMtx = NULL;
-  }
+  delete m_pApplyMtx;
+  m_pApplyMtx = NULL;
 
   m_nInputChannels = nInputChannels;
   m_nOutputChannels = nOutputChannels;
@@ -320,35 +313,56 @@ void CIccMpeSpectralMatrix::Describe(std::string &sDescription, int /* nVerbosen
   snprintf(buf, bufSize, "RANGE %f %f %d\n", icF16toF(m_Range.start), icF16toF(m_Range.end), m_Range.steps);
   sDescription += buf;
 
+  size_t rangeSteps = static_cast<size_t>(m_Range.steps);
+  size_t describeSteps = rangeSteps < kMaxDescribeSamples ? rangeSteps : kMaxDescribeSamples;
+
   sDescription += "White\n";
-  for (j=0; j<(int)m_Range.steps; j++) {
-    if (j)
-      sDescription += " ";
-    snprintf(buf, bufSize, "%12.8lf", m_pWhite[j]);
-    sDescription += buf;
+  if (m_pWhite) {
+    for (j=0; j<(int)describeSteps; j++) {
+      if (j)
+        sDescription += " ";
+      snprintf(buf, bufSize, "%12.8lf", m_pWhite[j]);
+      sDescription += buf;
+    }
+    if (describeSteps < rangeSteps)
+      sDescription += " ...";
   }
   sDescription += "\n";
 
   sDescription += "BLACK_OFFSET\n";
-  for (j=0; j<(int)m_Range.steps; j++) {
-    if (j)
-      sDescription += " ";
-    snprintf(buf, bufSize, "%12.8lf", m_pOffset[j]);
-    sDescription += buf;
+  if (m_pOffset) {
+    for (j=0; j<(int)describeSteps; j++) {
+      if (j)
+        sDescription += " ";
+      snprintf(buf, bufSize, "%12.8lf", m_pOffset[j]);
+      sDescription += buf;
+    }
+    if (describeSteps < rangeSteps)
+      sDescription += " ...";
   }
   sDescription += "\n";
 
   if (data) {
+    icUInt16Number nVectors = numVectors();
+
     sDescription += "CHANNEL_DATA\n";
-    for (j=0; j<m_nOutputChannels; j++) {
-      for (i=0; i<(int)m_Range.steps; i++) {
+    // SetSize allocates numVectors() * range.steps floats in row-major order.
+    icFloatNumber *end = m_pMatrix + m_size;
+    size_t steps = rangeSteps;
+    for (j=0; j<(int)nVectors && data < end; j++) {
+      size_t remaining = static_cast<size_t>(end - data);
+      size_t rowCount = remaining < steps ? remaining : steps;
+      size_t describeCount = rowCount > describeSteps ? describeSteps : rowCount;
+      for (i=0; i<(int)describeCount; i++) {
         if (i)
           sDescription += " ";
         snprintf(buf, bufSize, "%12.8lf", data[i]);
         sDescription += buf;
       }
+      if (describeCount < steps)
+        sDescription += " ...";
       sDescription += "\n";
-      data += m_nInputChannels;
+      data += rowCount;
     }
   }
 
@@ -399,6 +413,9 @@ bool CIccMpeSpectralMatrix::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   if (!pIO->Read16(&nOutputChannels))
+    return false;
+
+  if (nInputChannels < 1 || nOutputChannels != 3)
     return false;
 
   if (!pIO->Read16(&range.start))
@@ -530,6 +547,16 @@ icValidateStatus CIccMpeSpectralMatrix::Validate(std::string sigPath, std::strin
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
+  if (m_nInputChannels < 1) {
+    CIccInfo Info;
+    std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
+
+    sReport += icMsgValidateCriticalError;
+    sReport += sSigPathName;
+    sReport += " - Cannot have zero Input Channels!\n";
+    rv = icMaxStatus(rv, icValidateCriticalError);
+  }
+
   if (m_nOutputChannels != 3) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
@@ -613,7 +640,7 @@ bool CIccMpeEmissionMatrix::Begin(icElemInterp /* nInterp */, CIccTagMultiProces
     return false;
 
   //convert m_Matrix emission values to a matrix of XYZ column vectors
-  m_pApplyMtx = new CIccMatrixMath(3,m_nInputChannels);
+  m_pApplyMtx = new (std::nothrow) CIccMatrixMath(3,m_nInputChannels);
 
   if (!m_pApplyMtx)
     return false;
@@ -697,7 +724,7 @@ bool CIccMpeInvEmissionMatrix::Begin(icElemInterp /* nInterp */, CIccTagMultiPro
   observer.VectorMult(m_xyzOffset, m_pOffset);
 
   //convert m_Matrix emission values to a matrix of XYZ column vectors
-  m_pApplyMtx = new CIccMatrixMath(3,m_nInputChannels);
+  m_pApplyMtx = new (std::nothrow) CIccMatrixMath(3,m_nInputChannels);
 
   if (!m_pApplyMtx)
     return false;
@@ -836,7 +863,8 @@ CIccMpeSpectralCLUT::CIccMpeSpectralCLUT(const CIccMpeSpectralCLUT &clut)
 
   if (clut.m_pWhite) {
     m_pWhite = (icFloatNumber *)malloc((int)clut.m_Range.steps*sizeof(icFloatNumber));
-    memcpy(m_pWhite, clut.m_pWhite, clut.m_Range.steps*sizeof(icFloatNumber));
+    if (m_pWhite)
+      memcpy(m_pWhite, clut.m_pWhite, clut.m_Range.steps*sizeof(icFloatNumber));
   }
   else
     m_pWhite = NULL;
@@ -862,14 +890,9 @@ CIccMpeSpectralCLUT::CIccMpeSpectralCLUT(const CIccMpeSpectralCLUT &clut)
  ******************************************************************************/
 void CIccMpeSpectralCLUT::copyData(const CIccMpeSpectralCLUT &clut)
 {
-  if (m_pCLUT)
-    delete m_pCLUT;
-
-  if (m_pApplyCLUT)
-    delete m_pApplyCLUT;
-
-  if (m_pWhite)
-    free(m_pWhite);
+  delete m_pCLUT;
+  delete m_pApplyCLUT;
+  free(m_pWhite);
 
   if (clut.m_pCLUT)
     m_pCLUT = new CIccCLUT(*clut.m_pCLUT);
@@ -883,7 +906,8 @@ void CIccMpeSpectralCLUT::copyData(const CIccMpeSpectralCLUT &clut)
 
   if (clut.m_pWhite) {
     m_pWhite = (icFloatNumber *)malloc((int)clut.m_Range.steps*sizeof(icFloatNumber));
-    memcpy(m_pWhite, clut.m_pWhite, clut.m_Range.steps*sizeof(icFloatNumber));
+    if (m_pWhite)
+      memcpy(m_pWhite, clut.m_pWhite, clut.m_Range.steps*sizeof(icFloatNumber));
   }
   else
     m_pWhite = NULL;
@@ -909,15 +933,9 @@ void CIccMpeSpectralCLUT::copyData(const CIccMpeSpectralCLUT &clut)
  ******************************************************************************/
 CIccMpeSpectralCLUT::~CIccMpeSpectralCLUT()
 {
-  if (m_pCLUT)
-    delete m_pCLUT;
-
-  if (m_pApplyCLUT)
-    delete m_pApplyCLUT;
-
-  if (m_pWhite)
-    free(m_pWhite);
-
+  delete m_pCLUT;
+  delete m_pApplyCLUT;
+  free(m_pWhite);
 }
 
 /**
@@ -934,8 +952,7 @@ void CIccMpeSpectralCLUT::SetData(CIccCLUT *pCLUT, icUInt16Number nStorageType,
                                   const icSpectralRange &range, icFloatNumber *pWhite,
                                   icUInt16Number nOutputChannels)
 {
-  if (m_pCLUT)
-    delete m_pCLUT;
+  delete m_pCLUT;
 
   m_pCLUT = pCLUT;
   if (pCLUT) {
@@ -946,15 +963,12 @@ void CIccMpeSpectralCLUT::SetData(CIccCLUT *pCLUT, icUInt16Number nStorageType,
 
   m_nStorageType = nStorageType;
 
-  if (m_pApplyCLUT) {
-    delete m_pApplyCLUT;
-    m_pApplyCLUT = NULL;
-  }
+  delete m_pApplyCLUT;
+  m_pApplyCLUT = NULL;
 
   m_Range = range;
 
-  if (m_pWhite)
-    free(m_pWhite);
+  free(m_pWhite);
 
   m_pWhite = pWhite;
 }
@@ -1021,6 +1035,9 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read16(&m_nOutputChannels))
     return false;
 
+  if (m_nInputChannels < 1 || m_nOutputChannels < 1)
+    return false;
+
   if (!pIO->Read32(&m_flags))
     return false;
 
@@ -1042,25 +1059,25 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
     return false;
   }
 
-  m_pCLUT = new CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_Range.steps, 4);
+  m_pCLUT = new (std::nothrow) CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_Range.steps, 4);
 
   if (!m_pCLUT)
     return false;
 
   m_pCLUT->SetClipFunc(NoClip);
-  icUInt32Number nBytesPerPoint = icGetStorageTypeBytes(m_nStorageType) * m_Range.steps;
+  icUInt32Number nBytesPerSample = icGetStorageTypeBytes(m_nStorageType);
   
-  if (!nBytesPerPoint)
+  if (!nBytesPerSample)
     return false;
 
-  m_pCLUT->Init(gridPoints, size - headerSize, (icUInt8Number)nBytesPerPoint);
+  m_pCLUT->Init(gridPoints, size - headerSize, nBytesPerSample);
 
   icFloatNumber *pData = m_pCLUT->GetData(0);
 
   if (!pData)
     return false;
 
-  size_t nPoints = m_pCLUT->NumPoints()*(int)m_Range.steps;
+  size_t nPoints = (size_t)m_pCLUT->NumPoints()*(int)m_Range.steps;
 
   switch(m_nStorageType) {
     case icValueTypeUInt8:
@@ -1086,8 +1103,12 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
     default:
       return false;
   }
+  
+  size_t nHeaderAndSamples = nPoints * nBytesPerSample + headerSize;
+  if (nHeaderAndSamples > (size_t)size)
+    return false;
 
-  if (m_Range.steps *nBytesPerPoint > size - headerSize - nPoints*nBytesPerPoint)
+  if (m_Range.steps * nBytesPerSample + nHeaderAndSamples > (size_t)size)
     return false;
 
   m_pWhite = (icFloatNumber *)malloc((int)m_Range.steps*sizeof(icFloatNumber));
@@ -1178,7 +1199,7 @@ bool CIccMpeSpectralCLUT::Write(CIccIO *pIO)
       return false;
 
     icFloatNumber *pData = m_pCLUT->GetData(0);
-    size_t nPoints = m_pCLUT->NumPoints()*(int)m_Range.steps;
+    size_t nPoints = (size_t)m_pCLUT->NumPoints()*(int)m_Range.steps;
 
     switch(m_nStorageType) {
     case icValueTypeUInt8:
@@ -1259,7 +1280,7 @@ CIccApplyMpe* CIccMpeSpectralCLUT::GetNewApply(CIccApplyTagMpe* /* pApplyTag */)
   if (!pApply)
     return NULL;
 
-  CIccApplyMpeSpectralCLUT* rv = new CIccApplyMpeSpectralCLUT(this, pApply);
+  CIccApplyMpeSpectralCLUT* rv = new (std::nothrow) CIccApplyMpeSpectralCLUT(this, pApply);
   if (!rv)
     delete pApply;
 
@@ -1402,8 +1423,7 @@ CIccApplyMpeSpectralCLUT::CIccApplyMpeSpectralCLUT(CIccMultiProcessElement* pEle
 */
 CIccApplyMpeSpectralCLUT::~CIccApplyMpeSpectralCLUT()
 {
-  if (m_pApply)
-    delete m_pApply;
+  delete m_pApply;
 }
 
 
@@ -1464,10 +1484,9 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
   if (!pAppliedPCC->getEmissiveObserver(m_Range, m_pWhite, observer.entry(0)))
     return false;
 
-  if (m_pApplyCLUT)
-    delete m_pApplyCLUT;
+  delete m_pApplyCLUT;
 
-  m_pApplyCLUT = new CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_nOutputChannels, 4);
+  m_pApplyCLUT = new (std::nothrow) CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_nOutputChannels, 4);
 
   if (!m_pApplyCLUT) {
     return false;
@@ -1518,7 +1537,9 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
  ******************************************************************************/
 bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement *pMPE)
 {
-  if (!m_pCLUT || !m_pWhite || m_pCLUT->GetOutputChannels()!=m_Range.steps || m_nOutputChannels!=3)
+  if (!m_pCLUT || !m_pWhite ||
+      m_Range.steps < 2 || m_Range.start >= m_Range.end ||
+      m_pCLUT->GetOutputChannels()!=m_Range.steps || m_nOutputChannels!=3)
     return false;
 
   switch (m_nInputChannels) {
@@ -1556,9 +1577,13 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   if (!pSVC)
     return false;
 
-  CIccMatrixMath observer(3, m_Range.steps);
   icSpectralRange illumRange;
   const icFloatNumber *illum = pSVC->getIlluminant(illumRange);
+
+  if (!illum || illumRange.steps < 2 || illumRange.start >= illumRange.end)
+    return false;
+
+  CIccMatrixMath observer(3, illumRange.steps);
 
   if (!pAppliedPCC->getEmissiveObserver(illumRange, illum, observer.entry(0)))
     return false;
@@ -1586,10 +1611,9 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   else
     pApplyMtx = rangeRef->Mult(&observer);
 
-  if (m_pApplyCLUT)
-    delete m_pApplyCLUT;
+  delete m_pApplyCLUT;
 
-  m_pApplyCLUT = new CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_nOutputChannels, 4);
+  m_pApplyCLUT = new (std::nothrow) CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_nOutputChannels, 4);
 
   if (!m_pApplyCLUT) {
     if (pApplyMtx!=&observer)
@@ -1612,9 +1636,9 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
 
   icFloatNumber xyzscale[3];
   if (!bUseAbsolute) {
-    xyzscale[0] = xyzi[0] / xyzW[0];
-    xyzscale[1] = xyzi[1] / xyzW[1];
-    xyzscale[2] = xyzi[2] / xyzW[2];
+    xyzscale[0] = xyzW[0] != 0.0f ? xyzi[0] / xyzW[0] : 0.0f;
+    xyzscale[1] = xyzW[1] != 0.0f ? xyzi[1] / xyzW[1] : 0.0f;
+    xyzscale[2] = xyzW[2] != 0.0f ? xyzi[2] / xyzW[2] : 0.0f;
   }
 
   for (i=0; i<(int)m_pCLUT->NumPoints(); i++) {
@@ -1692,7 +1716,8 @@ CIccMpeSpectralObserver::CIccMpeSpectralObserver(const CIccMpeSpectralObserver &
   if (matrix.m_pWhite) {
     int num = m_Range.steps*sizeof(icFloatNumber);
     m_pWhite = (icFloatNumber*)malloc(num);
-    memcpy(m_pWhite, matrix.m_pWhite, num);
+    if (m_pWhite)
+      memcpy(m_pWhite, matrix.m_pWhite, num);
   }
   else
     m_pWhite = NULL;
@@ -1719,13 +1744,13 @@ void CIccMpeSpectralObserver::copyData(const CIccMpeSpectralObserver &matrix)
 
   m_Range = matrix.m_Range;
 
-  if (m_pWhite)
-    free(m_pWhite);
+  free(m_pWhite);
 
   if (matrix.m_pWhite) {
     int num = m_Range.steps*sizeof(icFloatNumber);
     m_pWhite = (icFloatNumber*)malloc(num);
-    memcpy(m_pWhite, matrix.m_pWhite, num);
+    if (m_pWhite)
+      memcpy(m_pWhite, matrix.m_pWhite, num);
   }
   else
     m_pWhite = NULL;
@@ -1745,11 +1770,8 @@ void CIccMpeSpectralObserver::copyData(const CIccMpeSpectralObserver &matrix)
  ******************************************************************************/
 CIccMpeSpectralObserver::~CIccMpeSpectralObserver()
 {
-  if (m_pWhite)
-    free(m_pWhite);
-
-  if (m_pApplyMtx)
-    delete m_pApplyMtx;
+  free(m_pWhite);
+  delete m_pApplyMtx;
 }
 
 
@@ -1765,15 +1787,11 @@ CIccMpeSpectralObserver::~CIccMpeSpectralObserver()
  ******************************************************************************/
 bool CIccMpeSpectralObserver::SetSize(icUInt16Number nInputChannels, icUInt16Number nOutputChannels, const icSpectralRange &range)
 {
-  if (m_pWhite) {
-    free(m_pWhite);
-    m_pWhite = NULL;
-  }
+  free(m_pWhite);
+  m_pWhite = NULL;
 
-  if (m_pApplyMtx) {
-    delete m_pApplyMtx;
-    m_pApplyMtx = NULL;
-  }
+  delete m_pApplyMtx;
+  m_pApplyMtx = NULL;
 
   m_nInputChannels = nInputChannels;
   m_nOutputChannels = nOutputChannels;
@@ -1802,6 +1820,8 @@ void CIccMpeSpectralObserver::Describe(std::string &sDescription, int /* nVerbos
   const size_t bufSize = 81;
   icChar buf[bufSize];
   int j;
+  size_t rangeSteps = static_cast<size_t>(m_Range.steps);
+  size_t describeSteps = rangeSteps > kMaxDescribeSamples ? kMaxDescribeSamples : rangeSteps;
 
   snprintf(buf, bufSize, "BEGIN_%s %d %d \n", GetDescribeName(), m_nInputChannels, m_nOutputChannels);
   sDescription += buf;
@@ -1810,11 +1830,15 @@ void CIccMpeSpectralObserver::Describe(std::string &sDescription, int /* nVerbos
   sDescription += buf;
 
   sDescription += "White\n";
-  for (j=0; j<(int)m_Range.steps; j++) {
-    if (j)
-      sDescription += " ";
-    snprintf(buf, bufSize, "%12.8lf", m_pWhite[j]);
-    sDescription += buf;
+  if (m_pWhite) {
+    for (j=0; j<(int)describeSteps; j++) {
+      if (j)
+        sDescription += " ";
+      snprintf(buf, bufSize, "%12.8lf", m_pWhite[j]);
+      sDescription += buf;
+    }
+    if (describeSteps < rangeSteps)
+      sDescription += " ...";
   }
   sDescription += "\n";
 
@@ -1865,6 +1889,9 @@ bool CIccMpeSpectralObserver::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   if (!pIO->Read16(&nOutputChannels))
+    return false;
+
+  if (nInputChannels < 1 || nOutputChannels != 3)
     return false;
 
   if (!pIO->Read16(&range.start))
@@ -1998,6 +2025,16 @@ icValidateStatus CIccMpeSpectralObserver::Validate(std::string sigPath, std::str
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
+  if (m_nInputChannels < 1) {
+    CIccInfo Info;
+    std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
+
+    sReport += icMsgValidateCriticalError;
+    sReport += sSigPathName;
+    sReport += " - Cannot have zero Input Channels!\n";
+    rv = icMaxStatus(rv, icValidateCriticalError);
+  }
+
   if (m_nOutputChannels != 3) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
@@ -2056,7 +2093,7 @@ bool CIccMpeEmissionObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiProc
   if (!pSVC)
     return false;
 
-  m_pApplyMtx = new CIccMatrixMath(3, m_Range.steps);
+  m_pApplyMtx = new (std::nothrow) CIccMatrixMath(3, m_Range.steps);
 
   if (!m_pApplyMtx)
     return false;
@@ -2086,7 +2123,9 @@ bool CIccMpeEmissionObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiProc
  ******************************************************************************/
 bool CIccMpeReflectanceObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiProcessElement *pMPE)
 {
-  if (!m_pWhite || m_nInputChannels!=m_Range.steps || m_nOutputChannels!=3)
+  if (!m_pWhite ||
+      m_Range.steps < 2 || m_Range.start >= m_Range.end ||
+      m_nInputChannels!=m_Range.steps || m_nOutputChannels!=3)
     return false;
 
   IIccProfileConnectionConditions *pAppliedPCC = pMPE->GetAppliedPCC();
@@ -2097,9 +2136,13 @@ bool CIccMpeReflectanceObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiP
   if (!pSVC)
     return false;
 
-  CIccMatrixMath observer(3, m_Range.steps);
   icSpectralRange illumRange;
   const icFloatNumber *illum = pSVC->getIlluminant(illumRange);
+
+  if (!illum || illumRange.steps < 2 || illumRange.start >= illumRange.end)
+    return false;
+
+  CIccMatrixMath observer(3, illumRange.steps);
 
   if (!pAppliedPCC->getEmissiveObserver(illumRange, illum, observer.entry(0)))
     return false;
@@ -2132,9 +2175,9 @@ bool CIccMpeReflectanceObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiP
   //bool bLab = (m_flags & icLabSpectralData) != 0;
 
   if (!bUseAbsolute) {
-    m_xyzscale[0] = m_xyzw[0] / xyzm[0];
-    m_xyzscale[1] = m_xyzw[1] / xyzm[1];
-    m_xyzscale[2] = m_xyzw[2] / xyzm[2];
+    m_xyzscale[0] = xyzm[0] != 0.0f ? m_xyzw[0] / xyzm[0] : 0.0f;
+    m_xyzscale[1] = xyzm[1] != 0.0f ? m_xyzw[1] / xyzm[1] : 0.0f;
+    m_xyzscale[2] = xyzm[2] != 0.0f ? m_xyzw[2] / xyzm[2] : 0.0f;
   }
 
   return true;

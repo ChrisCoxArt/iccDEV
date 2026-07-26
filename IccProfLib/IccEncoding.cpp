@@ -78,6 +78,7 @@ Copyright:  see ICC Software License
 #include <string>
 #include <time.h>
 #include <cstring>
+#include <cmath>
 
 class CIccDefaultEncProfileCacheHandler : public IIccEncProfileCacheHandler
 {
@@ -99,7 +100,7 @@ static IIccEncProfileCacheHandler* g_pEncProfileCacheHandler = NULL;
 IIccEncProfileCacheHandler *IIccEncProfileCacheHandler::GetHandler()
 {
   if (!g_pEncProfileCacheHandler) {
-    g_pEncProfileCacheHandler = new CIccDefaultEncProfileCacheHandler();
+    g_pEncProfileCacheHandler = new (std::nothrow) CIccDefaultEncProfileCacheHandler();
   }
   return g_pEncProfileCacheHandler;
 }
@@ -107,9 +108,7 @@ IIccEncProfileCacheHandler *IIccEncProfileCacheHandler::GetHandler()
 void IIccEncProfileCacheHandler::SetEncCacheHandler(IIccEncProfileCacheHandler *pHandler)
 {
   if (pHandler) {
-    if (g_pEncProfileCacheHandler) {
-      delete g_pEncProfileCacheHandler;
-    }
+    delete g_pEncProfileCacheHandler;
     g_pEncProfileCacheHandler = pHandler;
   }
 }
@@ -137,6 +136,22 @@ static icFloatNumber icGetParamFloatNum(CIccTagStruct *pParams, icColorEncodingP
 
 static void icYxy2XYZVector(icFloatNumber*XYZ, icFloatNumber Y, icFloatNumber *xy, icUInt8Number idxOffset=1)
 {
+  // xy[1] is the CIE y chromaticity coordinate and the divisor that converts the
+  // Yxy white/media/surround point into tristimulus XYZ.  A valid chromaticity has
+  // y in (0,1]; a malformed profile can carry a colorEncodingParams chromaticity
+  // member whose y is zero (the fuzz PoC dbz-icYxy2XYZVector ships exactly this),
+  // so Y*x/y becomes a divide by zero -- UBSAN's float-divide-by-zero check flags
+  // it here (issue #1410) and the resulting inf/NaN then poisons the header
+  // illuminant and the XYZ tags built from this vector.  Treat a non-positive,
+  // non-finite y as a degenerate point and emit (0, Y, 0): the divide is skipped
+  // and downstream sees a finite, achromatic fallback instead of inf/NaN.
+  if (!(std::isfinite(xy[1]) && xy[1] > 0.0f)) {
+    XYZ[0] = 0.0f;
+    XYZ[idxOffset] = Y;
+    XYZ[idxOffset<<1] = 0.0f;
+    return;
+  }
+
   XYZ[0] = Y*xy[0] / xy[1];
   XYZ[idxOffset] = Y;
   XYZ[idxOffset<<1] = Y*(1.0f-xy[0]-xy[1]) / xy[1];
@@ -163,14 +178,18 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
     return icEncConvertBadParams;
   }
 
-  CIccProfile* pIcc = new CIccProfile;
+  CIccProfile* pIcc = new (std::nothrow) CIccProfile;
+  if (!pIcc)
+    return icEncConvertMemoryError;
+
   pIcc->m_Header = *pHeader;
 
-  struct tm* newtime;
+  struct tm timeBuf;
+  struct tm *newtime = &timeBuf;
   time_t long_time;
 
-  time(&long_time);                /* Get time as long integer. */
-  newtime = gmtime(&long_time);
+  time( &long_time );                /* Get time as long integer. */
+  newtime = gmtime_r( &long_time, newtime );
 
   pIcc->m_Header.date.year = newtime->tm_year + 1900;
   pIcc->m_Header.date.month = newtime->tm_mon + 1;
@@ -189,7 +208,11 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
   pIcc->m_Header.illuminant.Z = icDtoF(XYZWhite[2]);
 
   //Fill Media White Point tag
-  CIccTagXYZ* pXYZ = new CIccTagXYZ();
+  CIccTagXYZ* pXYZ = new (std::nothrow) CIccTagXYZ();
+  if (!pXYZ) {
+    delete pIcc;
+    return icEncConvertMemoryError;
+  }
   float XYZMedia[3];
   icYxy2XYZVector(XYZMedia, 1.0f, &(*pMediaWhitePt)[0], 1);
   if (!pXYZ->SetSize(1)) {
@@ -270,6 +293,11 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
   
   pxy = (CIccTagFloat32*)pParams->FindElemOfType(icSigCeptRedPrimaryXYZMbr, icSigFloat32ArrayType);
   if (!pxy || pxy->GetSize()<2) {
+    // pMtx is not attached to pMpeTag until after all three primary lookups
+    // succeed (the Attach is at the bottom of this block), so deleting pMpeTag
+    // here does not reclaim it -- the matrix must be freed explicitly, exactly
+    // as the SetSize failure path above already does.
+    delete pMtx;
     delete pMpeTag;
     delete pIcc;
     return icEncConvertMemoryError;
@@ -280,6 +308,8 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
 
   pxy = (CIccTagFloat32*)pParams->FindElemOfType(icSigCeptGreenPrimaryXYZMbr, icSigFloat32ArrayType);
   if (!pxy || pxy->GetSize()<2) {
+    // Same unattached-matrix leak as the red-primary path above.
+    delete pMtx;
     delete pMpeTag;
     delete pIcc;
     return icEncConvertMemoryError;
@@ -290,6 +320,8 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
 
   pxy = (CIccTagFloat32*)pParams->FindElemOfType(icSigCeptBluePrimaryXYZMbr, icSigFloat32ArrayType);
   if (!pxy || pxy->GetSize()<2) {
+    // Same unattached-matrix leak as the red-primary path above.
+    delete pMtx;
     delete pMpeTag;
     delete pIcc;
     return icEncConvertMemoryError;
@@ -391,7 +423,7 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
     pIcc->AttachTag(icSigSpectralViewingConditionsTag, pCond);
 
     icFloatNumber Lsw=pParams->GetElemNumberValue(icSigCeptViewingSurroundMbr, Lw/5.0f - 0.001f);
-    CIccCamConverter *pCstmConvert = new CIccCamConverter();
+    CIccCamConverter *pCstmConvert = new (std::nothrow) CIccCamConverter();
     if (!pCstmConvert) {
       delete pIcc;
       return icEncConvertMemoryError;
@@ -400,7 +432,22 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
     pCstmConvert->SetParameter_La(La);
     pCstmConvert->SetParameter_Yb(Lw);
 
-    icFloatNumber SWr = Lsw / Lw;
+    // Lw is the white-point luminance read from the profile a few lines above
+    // (icSigCeptWhitePointLuminanceMbr, defaulting to 100), so a malformed profile
+    // can set it to zero and turn this ratio into a division by zero. This is the
+    // companion site to the H_FunctionInv guard in IccCAM.cpp: the AFL patch stack
+    // pairs the two as one defect, and a constructed colorEncodingParams struct
+    // with a zero white-point luminance reproduces it directly (#1817).
+    //
+    // SWr only selects one of the three surround categories below, so a degenerate
+    // ratio resolves to 0.0f, which falls through to Dark surround -- the
+    // conservative choice when the white luminance is zero or non-finite. Only one
+    // case changes: Lsw > 0 with Lw == 0 previously produced +infinity and so
+    // selected Average surround, the least conservative option, off a white point
+    // that carries no luminance at all. Every finite non-zero Lw is unaffected.
+    icFloatNumber SWr = 0.0f;
+    if (std::isfinite((double)Lsw) && std::isfinite((double)Lw) && Lw != 0.0f)
+      SWr = Lsw / Lw;
 
     if (SWr>0.2) { //Average Surround
       pCstmConvert->SetParameter_C(0.69f);
@@ -418,7 +465,7 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
       pCstmConvert->SetParameter_F(0.8f);
     }
 
-    CIccCamConverter *pCstmConvert2 = new CIccCamConverter();
+    CIccCamConverter *pCstmConvert2 = new (std::nothrow) CIccCamConverter();
     if (!pCstmConvert2) {
       delete pCstmConvert;
       delete pIcc;
@@ -427,14 +474,14 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
     *pCstmConvert2 = *pCstmConvert;
 
     //By default New CIccCamConverter objects are initialized with default PCS conditions
-    CIccCamConverter *pStdConvert = new CIccCamConverter();
+    CIccCamConverter *pStdConvert = new (std::nothrow) CIccCamConverter();
     if (!pStdConvert) {
       delete pCstmConvert;
       delete pCstmConvert2;
       delete pIcc;
       return icEncConvertMemoryError;
     }
-    CIccCamConverter *pStdConvert2 = new CIccCamConverter();
+    CIccCamConverter *pStdConvert2 = new (std::nothrow) CIccCamConverter();
     if (!pStdConvert2) {
       delete pCstmConvert;
       delete pCstmConvert2;
@@ -510,7 +557,8 @@ icStatusEncConvert CIccDefaultEncProfileConverter::ConvertFromParams(CIccProfile
   }
 
 #if 1 && defined(_DEBUG)
-  SaveIccProfile("WEncConv.icc", pIcc);
+  bool savedDebugProfile = SaveIccProfile("WEncConv.icc", pIcc);
+  (void)savedDebugProfile;
 #endif
 
   newIcc = pIcc;
@@ -530,9 +578,7 @@ IIccEncProfileConverter *IIccEncProfileConverter::GetHandler()
 void IIccEncProfileConverter::SetEncProfileConverter(IIccEncProfileConverter *pConverter)
 {
   if (pConverter) {
-    if (g_pEncProfileConverter) {
-      delete g_pEncProfileConverter;
-    }
+    delete g_pEncProfileConverter;
     g_pEncProfileConverter = pConverter;
   }
 }

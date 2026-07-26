@@ -9,7 +9,10 @@ CIccSparseMatrix::CIccSparseMatrix(void *pMatrix, size_t nSize, icSparseMatrixTy
   m_nType = nType;
   m_Data = NULL;
 
-  if (bInitFromData) {
+  // bInitFromData dereferences the first 4 bytes of pMatrix. Callers
+  // inside IccProfLib guarantee at least 4 bytes, but this ctor is
+  // public API — external callers might pass a short buffer.
+  if (bInitFromData && pMatrix && nSize >= 2*sizeof(icUInt16Number)) {
     icUInt16Number nRows = *((icUInt16Number*)pMatrix);
     icUInt16Number nCols = *((icUInt16Number*)(m_pMatrix+sizeof(icUInt16Number)));
     Init(nRows, nCols);
@@ -28,23 +31,24 @@ CIccSparseMatrix::CIccSparseMatrix(const CIccSparseMatrix &mtx)
   m_pMatrix = mtx.m_pMatrix;
   m_nRawSize = mtx.m_nRawSize;
   m_nType = mtx.m_nType;
+  m_Data = NULL;
 
   if (mtx.m_Data) {
     switch (m_nType) {
     case icSparseMatrixUInt8:
-      m_Data = new CIccSparseMatrixUInt8();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt8();
       break;
     case icSparseMatrixUInt16:
-      m_Data = new CIccSparseMatrixUInt16();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt16();
       break;
     case icSparseMatrixFloat16:
-      m_Data = new CIccSparseMatrixFloat16();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat16();
       break;
     case icSparseMatrixFloat32:
-      m_Data = new CIccSparseMatrixFloat32();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat32();
       break;
     case icSparseMatrixFloatNum:
-      m_Data = new CIccSparseMatrixFloatNum();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloatNum();
       break;    // without this, we have a memory leak!
     default:
       m_Data = NULL;
@@ -65,8 +69,7 @@ CIccSparseMatrix::CIccSparseMatrix(const CIccSparseMatrix &mtx)
 
 CIccSparseMatrix::~CIccSparseMatrix(void)
 {
-  if (m_Data)
-    delete m_Data;
+  delete m_Data;
 }
 
 CIccSparseMatrix &CIccSparseMatrix::operator=(const CIccSparseMatrix &mtx)
@@ -75,25 +78,25 @@ CIccSparseMatrix &CIccSparseMatrix::operator=(const CIccSparseMatrix &mtx)
   m_nRawSize = mtx.m_nRawSize;
   m_nType = mtx.m_nType;
 
-  if (mtx.m_Data) {
-    if (m_Data)
-      delete m_Data;
+  delete m_Data;
+  m_Data = NULL;
 
+  if (mtx.m_Data) {
     switch (m_nType) {
     case icSparseMatrixUInt8:
-      m_Data = new CIccSparseMatrixUInt8();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt8();
       break;
     case icSparseMatrixUInt16:
-      m_Data = new CIccSparseMatrixUInt16();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt16();
       break;
     case icSparseMatrixFloat16:
-      m_Data = new CIccSparseMatrixFloat16();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat16();
       break;
     case icSparseMatrixFloat32:
-      m_Data = new CIccSparseMatrixFloat32();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat32();
       break;
     case icSparseMatrixFloatNum:
-      m_Data = new CIccSparseMatrixFloatNum();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloatNum();
       break;    // without this, we have a memory leak!
     default:
       m_Data = NULL;
@@ -114,15 +117,15 @@ CIccSparseMatrix &CIccSparseMatrix::operator=(const CIccSparseMatrix &mtx)
 
 bool CIccSparseMatrix::Reset(void *pMatrix, size_t nSize, icSparseMatrixType nType, bool bInitFromData/*=true*/)
 {
-  if (m_Data)
-    delete m_Data;
+  delete m_Data;
 
   m_pMatrix = (unsigned char*)pMatrix;
   m_nRawSize = nSize;
   m_nType = nType;
   m_Data = NULL;
 
-  if (bInitFromData) {
+  // Same guard as the ctor: don't dereference short buffers.
+  if (bInitFromData && pMatrix && nSize >= 2*sizeof(icUInt16Number)) {
     icUInt16Number nRows = *((icUInt16Number*)pMatrix);
     icUInt16Number nCols = *((icUInt16Number*)(m_pMatrix+sizeof(icUInt16Number)));
     return Init(nRows, nCols);
@@ -144,40 +147,61 @@ bool CIccSparseMatrix::Init(icUInt16Number nRows, icUInt16Number nCols, bool bSe
   if (!m_pMatrix)
     return false;
 
+  // Hard upper bound on profile-controlled dimensions to defend
+  // Union()/iteration loops against malformed sparse matrix data
+  // (CWE-400/CWE-834). Real ICC spectral matrices have ~36-95 rows
+  // (visible-spectrum sampling); 4096 is a generous ceiling.
+  const icUInt16Number kMaxSparseMatrixDim = 4096;
+  if (nRows > kMaxSparseMatrixDim || nCols > kMaxSparseMatrixDim) {
+    m_nRows = 0;
+    m_nCols = 0;
+    delete m_Data;
+    m_Data = NULL;
+    m_RowStart = NULL;
+    m_ColumnIndices = NULL;
+    m_nMaxEntries = 0;
+    return false;
+  }
+
   icUInt16Number *Dim = (icUInt16Number*)m_pMatrix;
 
-  if (m_Data)
-    delete m_Data;
+  delete m_Data;
+  m_Data = NULL;
 
   switch (m_nType) {
     case icSparseMatrixUInt8:
-      m_Data = new CIccSparseMatrixUInt8();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt8();
       break;
     case icSparseMatrixUInt16:
-      m_Data = new CIccSparseMatrixUInt16();
+      m_Data = new (std::nothrow)CIccSparseMatrixUInt16();
       break;
     case icSparseMatrixFloat16:
-      m_Data = new CIccSparseMatrixFloat16();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat16();
       break;
     case icSparseMatrixFloat32:
-      m_Data = new CIccSparseMatrixFloat32();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloat32();
       break;
     case icSparseMatrixFloatNum:
-      m_Data = new CIccSparseMatrixFloatNum();
+      m_Data = new (std::nothrow)CIccSparseMatrixFloatNum();
       break;
     default:
-      m_nRows = 0;
-      m_nCols = 0;
-      if (bSetData) {
-        Dim[0] = 0;
-        Dim[1] = 0;
-      }
       m_Data = NULL;
-      m_RowStart = NULL;
-      m_ColumnIndices = NULL;
-      m_nMaxEntries = 0;
-      return false;
+      break;
   }
+  
+  if (!m_Data) {
+    m_nRows = 0;
+    m_nCols = 0;
+    if (bSetData) {
+      Dim[0] = 0;
+      Dim[1] = 0;
+    }
+    m_RowStart = NULL;
+    m_ColumnIndices = NULL;
+    m_nMaxEntries = 0;
+    return false;
+  }
+  
   m_nRows = nRows;
   m_nCols = nCols;
   if (bSetData) {
@@ -188,13 +212,14 @@ bool CIccSparseMatrix::Init(icUInt16Number nRows, icUInt16Number nCols, bool bSe
   icUInt32Number coloffset = 2*sizeof(icUInt16Number) + (nRows+1)*sizeof(icUInt32Number);
   icUInt16Number nTypeSize = m_Data->size();
 
-  if (coloffset+(nTypeSize-1) >m_nRawSize) {
+  if (coloffset+(nTypeSize-1) > m_nRawSize || !nTypeSize) {
     m_nRows = 0;
     m_nCols = 0;
     if (bSetData) {
       Dim[0] = 0;
       Dim[1] = 0;
     }
+    delete m_Data;
     m_Data = NULL;
     m_RowStart = NULL;
     m_ColumnIndices = NULL;
@@ -227,7 +252,10 @@ bool CIccSparseMatrix::Copy(const CIccSparseMatrix &mtx)
   if (!Init(mtx.m_nRows, mtx.m_nCols))
     return false;
 
-  memcpy(m_RowStart, mtx.m_RowStart, (m_nRows+1)*sizeof(icUInt32Number));
+  // m_RowStart is a u16* pointing at (m_nRows+1) u16 slots; copying with
+  // sizeof(icUInt32Number) stomps 2× the allocated region (into the
+  // adjacent m_ColumnIndices tail).
+  memcpy(m_RowStart, mtx.m_RowStart, (m_nRows+1)*sizeof(icUInt16Number));
   icUInt32Number nEntries = m_RowStart[m_nRows];
   icUInt32Number i;
 
@@ -488,8 +516,27 @@ bool CIccSparseMatrix::IsValid()
 
   int r, i;
   for (r=0; r<(int)m_nRows; r++) {
+    // Bound every row-start against the allocated column-index capacity BEFORE
+    // m_RowStart[r+1] is used as the inner-loop bound below. A corrupt, non-
+    // monotonic m_RowStart (e.g. {0, 0xffff, 5}) otherwise drives the
+    // m_ColumnIndices[] walk out of bounds on this row before the descending-
+    // offset check on a *later* row can reject it (heap OOB read; #1792 review of
+    // the #1791 fix). m_nMaxEntries is the number of column-index slots Init()
+    // sized from the raw buffer, so any offset above it cannot be a real entry
+    // index. This also hardens every other caller of IsValid() (e.g. the XML and
+    // JSON sparse-matrix serializers), not just the one that surfaced it.
+    if (m_RowStart[r] > m_nMaxEntries || m_RowStart[r+1] > m_nMaxEntries)
+      return false;
+
     if (m_RowStart[r]>m_RowStart[r+1])
       return false;
+
+    // Empty-row case: skip both the inner loop AND the post-loop
+    // column-range check. Otherwise `i` is either uninitialised on
+    // the first outer iteration (r=0) or stale from the previous
+    // iteration, and `m_ColumnIndices[i]` reads from a garbage offset.
+    if (m_RowStart[r+1] == m_RowStart[r])
+      continue;
 
     for (i=m_RowStart[r]; i<(int)m_RowStart[r+1]-1; i++) {
       if (m_ColumnIndices[i]>=m_ColumnIndices[i+1] || m_ColumnIndices[i]>m_nCols)
@@ -508,6 +555,8 @@ icUInt32Number CIccSparseMatrix::MaxEntries(icUInt32Number nMemSize, icUInt16Num
 
 icUInt32Number CIccSparseMatrix::MemSize(icUInt32Number nMaxEntries, icUInt16Number nRows, icUInt8Number nTypeSize)
 {
+  if (nTypeSize == 0)
+    return 0;
   icUInt32Number off = ((4 + 4*(nRows+1) + 2*nMaxEntries + (nTypeSize-1))/nTypeSize)*nTypeSize;
   return off + nTypeSize*nMaxEntries;
 }

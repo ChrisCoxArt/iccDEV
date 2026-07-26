@@ -1,136 +1,373 @@
 ###############################################################
 #
-## Copyright (©) 2025 International Color Consortium. 
-##                 All rights reserved. 
-##                 https://color.org
+# Copyright (c) 2025-2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
 #
 #
-## Intent: PR Status Labeler (update-labels.yml) - Labels PRs based on CI results
+# Intent: PR Status Labeler - Labels PRs based on CI results
 #
-## Last Updated: 28-NOV-2025 2300Z by David Hoyt 
-##               Added user-controllable input (uci) checks
-## TODO: Push binary releases, tags etc.. 
-#
-## Comment: Known good and working from PatchIccMax
-#
-#
-#
+# Last Updated: 2026-04-05 23:48:22 UTC by David Hoyt
 #
 #
 ###############################################################
 
-name: PR Status Labeler
+name: ci-status-label
+
+# Existing label/status summary strings intentionally exceed the default
+# yamllint line length. Keep the disable local to this workflow.
+# yamllint disable rule:line-length
 
 on:
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'Pull request number to process manually'
-        required: false
-        default: ''
-        type: string
+  # Intentionally do not use workflow_run: this labeler has pull-requests: write
+  # and updates CI labels from schedule/manual runs instead of reacting to
+  # untrusted workflow completions.
   schedule:
     - cron: '0 */4 * * *'
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, ready_for_review]
+  pull_request_target:  # zizmor: ignore[dangerous-triggers] trusted labeler; never checks out PR head
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
-  statuses: read  # Explicitly added for clarity; required to read commit status
+  statuses: read  # Required to evaluate legacy commit statuses.
+  checks: read  # Required to evaluate GitHub Actions check runs.
+
+concurrency:
+  group: pr-status-labeler-${{ github.event.pull_request.number || 'batch' }}
+  cancel-in-progress: true
 
 jobs:
   label-status:
-    # Only allow manual runs from the repo owner; PR/schedule events still allowed
-    if: >
-      github.event_name != 'workflow_dispatch' ||
-      contains(fromJson('["xsscx","maxderhak","ChrisCoxArt","dwtza"]'), github.actor)
+    name: PR status labeler
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write  # Required to update PR status labels.
+      statuses: read  # Required to evaluate legacy commit statuses.
+      checks: read  # Required to evaluate GitHub Actions check runs.
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: |
+            .github/labels.yml
+            .github/scripts
+          persist-credentials: false
 
-      - name: Determine PR number or input
-        id: get_pr
+      # preflight: allow-token-exposure reason=pr-label-maintenance
+      # preflight: allow-pr-script-execution reason=trusted-base-label-script
+      - name: Ensure repository labels exist
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
         run: |
-          INPUT="${{ github.event.inputs.pr_number }}"
-          EVENT_PR="${{ github.event.pull_request.number }}"
-          if [[ "$INPUT" =~ ^[0-9]+$ ]] && [[ -n "$INPUT" ]]; then
-            echo "pr_number=$INPUT" >> "$GITHUB_OUTPUT"
-          elif [[ "$EVENT_PR" =~ ^[0-9]+$ ]]; then
-            echo "pr_number=$EVENT_PR" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          git config --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          .github/scripts/sync-labels.sh
+
+      # preflight: allow-token-exposure reason=pr-status-query
+      - name: Build PR list
+        id: pr_list
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$PWD"
+          git config --global credential.helper ""
+
+          EVENT_PR="${EVENT_PR_NUMBER}"
+
+          write_github_output() {
+            local key="$1"
+            local value="$2"
+
+            case "$key" in
+              prs|mode) ;;
+              *)
+                echo "Invalid output key: $key" >&2
+                exit 1
+                ;;
+            esac
+
+            if [[ "$value" == *$'\r'* || "$value" == *$'\n'* ]]; then
+              echo "Invalid multiline value for output: $key" >&2
+              exit 1
+            fi
+
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"  # elements-sanitized
+          }
+
+          if [[ "$EVENT_PR" =~ ^[0-9]+$ ]]; then
+            write_github_output prs "$EVENT_PR"
+            write_github_output mode "single"
+            echo "Processing PR from event: #$EVENT_PR"
           else
-            echo "pr_number=0" >> "$GITHUB_OUTPUT"
+            # Schedule / dispatch with no number -> scan all open PRs
+            OPEN_PRS=$(gh pr list --state open --json number -q '.[].number' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            if [[ ! "$OPEN_PRS" =~ ^[0-9[:space:]]*$ ]]; then
+              echo "Invalid PR list returned by gh" >&2
+              exit 1
+            fi
+            if [[ -z "$OPEN_PRS" ]]; then
+              write_github_output prs ""
+              write_github_output mode "none"
+              echo "No open PRs found -- nothing to do"
+            else
+              write_github_output prs "$OPEN_PRS"
+              write_github_output mode "batch"
+              echo "Processing open PRs: $OPEN_PRS"
+            fi
           fi
 
-      - name: Evaluate PR combined status
-        id: status
-        if: steps.get_pr.outputs.pr_number != '0'
+      # preflight: allow-token-exposure reason=pr-status-label-maintenance
+      - name: Evaluate and label PRs
+        id: process
+        if: steps.pr_list.outputs.prs != ''
+        shell: bash --noprofile --norc {0}
         env:
+          BASH_ENV: /dev/null
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_LIST: ${{ steps.pr_list.outputs.prs }}
         run: |
-          PR="${{ steps.get_pr.outputs.pr_number }}"
+          set -euo pipefail
+          git config --add safe.directory "$PWD"
+          git config --global credential.helper ""
 
-          # Ensure PR belongs to this repository
-          BASE_REPO=$(gh pr view "$PR" --json baseRepository -q .baseRepository.nameWithOwner 2>/dev/null || echo "")
-          if [[ -z "$BASE_REPO" || "$BASE_REPO" != "${GITHUB_REPOSITORY}" ]]; then
-            echo "status=unknown" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          RESULTS_FILE=$(mktemp)
+          PROCESSED=0
+          LABELED=0
 
-          HEAD=$(gh pr view "$PR" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
-          if [[ -z "$HEAD" ]]; then
-            echo "status=unknown" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          write_github_output() {
+            local key="$1"
+            local value="$2"
 
-          STATE=$(gh api "repos/${{ github.repository }}/commits/$HEAD/status" \
-            --jq '.state' 2>/dev/null || echo "unknown")
+            case "$key" in
+              processed|labeled) ;;
+              *)
+                echo "Invalid output key: $key" >&2
+                exit 1
+                ;;
+            esac
 
-          echo "status=$STATE" >> "$GITHUB_OUTPUT"
-          echo "Detected status: $STATE"
+            if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+              echo "Invalid numeric value for output: $key" >&2
+              exit 1
+            fi
 
-      - name: Relabel PR based on status
-        id: relabel
-        if: steps.get_pr.outputs.pr_number != '0' && steps.status.outputs.status != '' && steps.status.outputs.status != 'unknown'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR="${{ steps.get_pr.outputs.pr_number }}"
-          STATE="${{ steps.status.outputs.status }}"
-          ADDED=""
-          REMOVED=""
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"  # elements-sanitized
+          }
 
-          case "$STATE" in
-            success)
-              gh pr edit "$PR" --add-label "passed" --remove-label "failed" || true
-              ADDED="passed"
-              REMOVED="failed"
-              ;;
-            failure|error)
-              gh pr edit "$PR" --add-label "failed" --remove-label "passed" || true
-              ADDED="failed"
-              REMOVED="passed"
-              ;;
-            *)
-              echo "No label change required for status: $STATE"
-              ;;
-          esac
+          evaluate_pr() {
+            local pr="$1"
 
-          echo "added_label=$ADDED" >> "$GITHUB_OUTPUT"
-          echo "removed_label=$REMOVED" >> "$GITHUB_OUTPUT"
+            # Validate PR belongs to this repo (not a cross-repo fork PR)
+            local is_cross
+            is_cross=$(gh pr view "$pr" --json isCrossRepository -q .isCrossRepository 2>/dev/null || echo "true")
+            if [[ "$is_cross" == "true" ]]; then
+              echo "$pr|skipped|Cross-repository PR" >> "$RESULTS_FILE"
+              return
+            fi
 
+            local head
+            head=$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
+            if [[ -z "$head" ]]; then
+              echo "$pr|skipped|Could not determine HEAD SHA" >> "$RESULTS_FILE"
+              return
+            fi
+
+            # Query commit statuses API
+            local status_data state status_count
+            status_data=$(gh api "repos/${GH_REPO}/commits/$head/status" \
+              --jq '"\(.state)|\(.total_count)"' 2>/dev/null || echo "unknown|0")
+            state="${status_data%%|*}"
+            status_count="${status_data##*|}"
+            if [[ ! "$status_count" =~ ^[0-9]+$ ]]; then
+              status_count=0
+            fi
+
+            local readiness_data is_draft merge_state review_decision
+            readiness_data=$(gh pr view "$pr" \
+              --json isDraft,mergeStateStatus,reviewDecision \
+              --jq '"\(.isDraft)|\(.mergeStateStatus // "UNKNOWN")|\(.reviewDecision // "UNKNOWN")"' 2>/dev/null || echo "true|UNKNOWN|UNKNOWN")
+            is_draft="${readiness_data%%|*}"
+            readiness_data="${readiness_data#*|}"
+            merge_state="${readiness_data%%|*}"
+            review_decision="${readiness_data##*|}"
+
+            # Query Check Runs API (Actions uses this, not statuses)
+            local check_conclusion
+            # shellcheck disable=SC2016
+            check_conclusion=$(gh api "repos/${GH_REPO}/commits/$head/check-runs" \
+              --jq '
+                if (.total_count == 0) then "none"
+                else
+                  [.check_runs[]
+                    | select(.name as $name
+                        | ["PR status labeler", "label-status", "apply-labels", "mark-codeql-ready"]
+                        | index($name) | not)
+                    | if .status != "completed" then "pending"
+                      else (.conclusion // "pending") end]
+                  | if length == 0 then "none"
+                    elif any(. == "failure" or . == "timed_out" or . == "cancelled" or . == "action_required") then "failure"
+                    elif any(. == "pending" or . == "null" or . == null) then "pending"
+                    elif all(. == "success" or . == "skipped" or . == "neutral") then "success"
+                    else "unknown" end
+                end' 2>/dev/null || echo "unknown")
+
+            # Combine results
+            local combined
+            if [[ "$state" == "failure" || "$check_conclusion" == "failure" ]]; then
+              combined="failure"
+            elif [[ "$check_conclusion" == "success" ]] &&
+                 [[ "$state" == "success" || "$status_count" -eq 0 ]]; then
+              combined="success"
+            elif [[ "$state" == "success" && "$check_conclusion" == "none" ]]; then
+              combined="success"
+            elif [[ "$state" == "pending" || "$check_conclusion" == "pending" ]]; then
+              combined="pending"
+            elif [[ "$check_conclusion" == "none" && "$state" == "pending" ]]; then
+              combined="pending"
+            elif [[ "$check_conclusion" == "none" && "$state" == "unknown" ]]; then
+              # No checks at all yet -- treat as pending
+              combined="pending"
+            else
+              combined="$state"
+            fi
+
+            local merge_ready="false"
+            if [[ "$combined" == "success" ]] &&
+               [[ "$is_draft" == "false" ]] &&
+               [[ "$merge_state" == "CLEAN" ]] &&
+               [[ "$review_decision" == "APPROVED" ]]; then
+              merge_ready="true"
+            fi
+
+            # Apply label
+            local added="" removed=""
+            case "$combined" in
+              success)
+                if [[ "$merge_ready" == "true" ]]; then
+                  gh pr edit "$pr" \
+                    --add-label "passed,Merge Ready" \
+                    --remove-label "failed,pending" \
+                    2>/dev/null || true
+                  added="passed,Merge Ready"; removed="failed,pending"
+                else
+                  gh pr edit "$pr" \
+                    --add-label "passed" \
+                    --remove-label "failed,pending,Merge Ready" \
+                    2>/dev/null || true
+                  added="passed"; removed="failed,pending,Merge Ready"
+                fi
+                ;;
+              failure|error)
+                gh pr edit "$pr" \
+                  --add-label "failed" \
+                  --remove-label "passed,pending,Merge Ready" \
+                  2>/dev/null || true
+                added="failed"; removed="passed,pending,Merge Ready"
+                ;;
+              pending)
+                gh pr edit "$pr" \
+                  --add-label "pending" \
+                  --remove-label "passed,failed,Merge Ready" \
+                  2>/dev/null || true
+                added="pending"; removed="passed,failed,Merge Ready"
+                ;;
+            esac
+
+            echo "$pr|$combined|status=$state status_count=$status_count checks=$check_conclusion merge=$merge_state review=$review_decision draft=$is_draft ready=$merge_ready -> added=$added removed=$removed" >> "$RESULTS_FILE"
+            if [[ -n "$added" ]]; then
+              LABELED=$((LABELED + 1))
+            fi
+          }
+
+          for pr in ${PR_LIST}; do
+            echo "-- PR #$pr --"
+            evaluate_pr "$pr"
+            PROCESSED=$((PROCESSED + 1))
+          done
+
+          write_github_output processed "$PROCESSED"
+          write_github_output labeled "$LABELED"
+          # Pass results file path for summary step
+          cp "$RESULTS_FILE" "${GITHUB_WORKSPACE}/pr_results.txt"
+
+      # preflight: allow-pr-script-execution reason=trusted-base-summary-sanitizer
       - name: Generate summary report
+        if: always()
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_REPO: ${{ github.repository }}
+          PR_MODE: ${{ steps.pr_list.outputs.mode }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          PRS_PROCESSED: ${{ steps.process.outputs.processed || '0' }}
+          PRS_LABELED: ${{ steps.process.outputs.labeled || '0' }}
         run: |
+          set -euo pipefail
+          git config --add safe.directory "$PWD"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          SANITIZER=".github/scripts/sanitize-sed.sh"
+          if [[ -f "$SANITIZER" ]]; then
+            # shellcheck disable=SC1090
+            source "$SANITIZER"
+          else
+            escape_html() {
+              local s="$1"
+              s="${s//&/&amp;}"
+              s="${s//</&lt;}"
+              s="${s//>/&gt;}"
+              s="${s//\"/&quot;}"
+              s="${s//\'/&#39;}"
+              printf '%s' "$s"
+            }
+            sanitize_line() { escape_html "$1"; }
+          fi
+
+          MODE="${PR_MODE}"
+
           {
-            echo "### 🧾 PR Status Labeler Summary"
+            echo "### PR Status Labeler Summary"
             echo ""
-            echo "**Trigger Type:** ${{ github.event_name }}"
-            echo "**PR Number:** ${{ steps.get_pr.outputs.pr_number }}"
-            echo "**Detected Status:** ${{ steps.status.outputs.status }}"
-            echo "**Label Added:** ${{ steps.relabel.outputs.added_label }}"
-            echo "**Label Removed:** ${{ steps.relabel.outputs.removed_label }}"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Trigger | \`${GH_EVENT_NAME}\` |"
+            echo "| Mode | $MODE |"
+            echo "| PRs Processed | ${PRS_PROCESSED} |"
+            echo "| Labels Applied | ${PRS_LABELED} |"
             echo ""
-            echo "✅ Workflow completed."
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+          if [[ "$MODE" == "none" ]]; then
+            echo "No open PRs -- nothing to label." >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          elif [[ -f "${GITHUB_WORKSPACE}/pr_results.txt" ]]; then
+            {
+              echo "#### Per-PR Results"
+              echo ""
+              echo "| PR | Status | Details |"
+              echo "|----|--------|---------|"
+            } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+            while IFS='|' read -r pr status details; do
+              safe_details=$(sanitize_line "$details")
+              echo "| [#${pr}](https://github.com/${GH_REPO}/pull/${pr}) | \`${status}\` | ${safe_details} |" >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+            done < "${GITHUB_WORKSPACE}/pr_results.txt"
+            echo "" >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          fi
+
+          echo "[OK] Workflow completed." >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

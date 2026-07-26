@@ -1,0 +1,172 @@
+###############################################################
+#
+# Copyright (c) 2025-2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+# Intent: Canonical iccDEV repository label inventory.
+#
+###############################################################
+
+- name: needs-triage
+  color: fbca04
+  description: Maintainer triage required
+- name: needs-repro
+  color: fbca04
+  description: Needs a reproducible input, command, or minimal test case
+- name: requires:more-information
+  color: fbca04
+  description: More detail is needed before maintainers can act
+- name: bug
+  color: d73a4a
+  description: Confirmed or suspected defect
+- name: feature
+  color: a2eeef
+  description: Feature request or enhancement
+- name: question
+  color: d4c5f9
+  description: Question or support request
+- name: security
+  color: d73a4a
+  description: Security, sanitizer, or fuzzer-relevant report
+- name: passed
+  color: 0e8a16
+  description: All CI checks passed
+- name: failed
+  color: d93f0b
+  description: One or more CI checks failed
+- name: pending
+  color: fbca04
+  description: CI checks still running
+- name: Merge Ready
+  color: 0e8a16
+  description: Approved, mergeable, and all CI checks passed
+- name: codeql-ready
+  color: 0e8a16
+  description: Run the full CodeQL security workflow for this PR
+- name: ci:skip
+  color: b60205
+  description: Maintainer one-shot request to skip PR build jobs
+- name: ci:full
+  color: 0e8a16
+  description: Run the default long-cycle Unix, GCC 15.2 LTO, tool, Windows, and Docker matrix
+- name: ci:fast-lane
+  color: 1d76db
+  description: Run exact GCC 15.2 Release LTO and ASAN+UBSAN Release tool validation
+- name: ci:ctest-last-1
+  color: 1d76db
+  description: Fast lane runs only the most recent registered CTest
+- name: ci:ctest-last-2
+  color: 1d76db
+  description: Fast lane runs only the two most recent registered CTests
+- name: ci:ctest-last-3
+  color: 1d76db
+  description: Fast lane runs only the three most recent registered CTests
+- name: ci:ctest-last-4
+  color: 1d76db
+  description: Fast lane runs only the four most recent registered CTests
+- name: ci:ctest-last-5
+  color: 1d76db
+  description: Fast lane runs only the five most recent registered CTests
+- name: ci:ctest-last-6
+  color: 1d76db
+  description: Fast lane runs only the six most recent registered CTests
+- name: ci:ctest-last-7
+  color: 1d76db
+  description: Fast lane runs only the seven most recent registered CTests
+- name: ci:ctest-last-8
+  color: 1d76db
+  description: Fast lane runs only the eight most recent registered CTests
+- name: ci:ctest-last-9
+  color: 1d76db
+  description: Fast lane runs only the nine most recent registered CTests
+- name: ci:ctest-last-10
+  color: 1d76db
+  description: Fast lane runs only the ten most recent registered CTests
+- name: ci:docker
+  color: 0e8a16
+  description: Add Docker verification to the PR fast lane
+- name: ci:no-windows
+  color: c5def5
+  description: Keep Windows excluded from the PR fast lane
+- name: ci:warnings-fail
+  color: d93f0b
+  description: Treat compiler warnings as fast-lane failures
+- name: Source
+  color: c2e0c6
+  description: C or C++ source code changes
+- name: Documentation
+  color: 0075ca
+  description: Documentation-only or documentation-related change
+- name: Configuration
+  color: 0052cc
+  description: Repository, CMake, YAML, JSON, or tool configuration
+- name: CI
+  color: 0e8a16
+  description: Continuous integration workflow changes
+- name: Governance
+  color: 5319e7
+  description: Maintainer-owned policy, CODEOWNERS, prompts, or skills
+- name: github-actions
+  color: 0e8a16
+  description: GitHub Actions workflow or action configuration
+- name: Scripts
+  color: 0052cc
+  description: Shell, PowerShell, or repository automation scripts
+- name: CodeQL
+  color: 5319e7
+  description: CodeQL configuration, workflow, queries, or reports
+- name: SAST
+  color: 5319e7
+  description: Static analysis or source security scanning
+- name: Sanitizers
+  color: d93f0b
+  description: ASAN, UBSAN, or sanitizer test infrastructure
+- name: Build
+  color: 0052cc
+  description: Build system, CMake, compiler, or packaging
+- name: Testing
+  color: c2e0c6
+  description: CTest, regression, or test coverage
+- name: Profiles
+  color: bfdadc
+  description: ICC profile, XML, JSON, or generated profile test data
+- name: Tools
+  color: 1d76db
+  description: Command-line tool or GUI tool changes
+- name: Spec
+  color: d4c5f9
+  description: ICC specification, tag, color-space, or schema scope
+- name: Docker
+  color: 0e8a16
+  description: Dockerfile, container, or image workflow changes
+- name: WASM
+  color: 0052cc
+  description: WebAssembly or Emscripten build
+- name: Release
+  color: fbca04
+  description: Release, CPack, installer, or artifact publishing
+- name: JSON
+  color: 1d76db
+  description: ICC JSON parser, config, or round-trip behavior
+- name: Windows
+  color: c5def5
+  description: Windows, MSVC, clang-cl, or PowerShell scope
+- name: Unix
+  color: c5def5
+  description: Linux, macOS, Bash, or POSIX shell scope
+- name: macOS
+  color: c5def5
+  description: macOS, Darwin, Xcode, or Apple packaging scope
+- name: Labels
+  color: fbca04
+  description: Label taxonomy, labeler config, or label automation
+- name: vcpkg
+  color: 0052cc
+  description: vcpkg ports or dependency integration
+- name: BREW
+  color: c5def5
+  description: Homebrew packaging or dependency behavior
+- name: NPM
+  color: c5def5
+  description: npm package metadata or JavaScript dependency behavior

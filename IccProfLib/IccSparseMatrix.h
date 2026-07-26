@@ -86,10 +86,10 @@ public:
 };
 
 template <class T>
-class CIccSparseMatrixEntry : public IIccSparseMatrixEntry
+class ICCPROFLIB_API CIccSparseMatrixEntry : public IIccSparseMatrixEntry
 {
 public:
-  CIccSparseMatrixEntry<T>() {m_pData = 0;}
+  CIccSparseMatrixEntry() {m_pData = 0;}
   void init(void *pData) {m_pData = (T*)pData;}
 
   virtual icUInt8Number size() const { return sizeof(T); }
@@ -99,27 +99,34 @@ protected:
   T *m_pData;
 };
 
-class CIccSparseMatrixUInt8 : public CIccSparseMatrixEntry<icUInt8Number>
+class ICCPROFLIB_API CIccSparseMatrixUInt8 : public CIccSparseMatrixEntry<icUInt8Number>
 {
 public:
   CIccSparseMatrixUInt8() {}
 
   virtual icFloatNumber get(int index) const {return (icFloatNumber)m_pData[index]/255.0f;}
-  virtual void set(int index, icFloatNumber value) {m_pData[index] = value<0.0 ? 0 : (value > 1.0 ? 255 : (icUInt8Number)(value*255.0f+0.5f));}
+  // !(value > 0.0) rejects NaN and value<=0 (both -> 0) BEFORE the cast. A plain
+  // value<0.0 test lets a NaN fall through to (icUInt8Number)(NaN*255+0.5), which is
+  // undefined behavior on the float->int cast (CWE-681, alert #1061).
+  virtual void set(int index, icFloatNumber value) {m_pData[index] = !(value > 0.0) ? 0 : (value > 1.0 ? 255 : (icUInt8Number)(value*255.0f+0.5f));}
 
 };
 
-class CIccSparseMatrixUInt16 : public CIccSparseMatrixEntry<icUInt16Number>
+class ICCPROFLIB_API CIccSparseMatrixUInt16 : public CIccSparseMatrixEntry<icUInt16Number>
 {
 public:
   CIccSparseMatrixUInt16() {}
 
   virtual icFloatNumber get(int index) const {return (icFloatNumber)m_pData[index]/65535.0f;}
-  virtual void set(int index, icFloatNumber value) {m_pData[index] = value<0.0 ? 0 : (value > 1.0 ? 65535 : (icUInt8Number)(value*65535.0f+0.5f));}
+  // Same NaN guard as the UInt8 entry (alert #2260). Also fixes a data-loss bug: the
+  // cast is (icUInt16Number), not (icUInt8Number) -- the 8-bit cast truncated the
+  // scaled value into the 16-bit slot (e.g. 0.5 -> 32768 & 0xff == 0), breaking the
+  // set()/get() round-trip against get()'s /65535.0f above.
+  virtual void set(int index, icFloatNumber value) {m_pData[index] = !(value > 0.0) ? 0 : (value > 1.0 ? 65535 : (icUInt16Number)(value*65535.0f+0.5f));}
 
 };
 
-class CIccSparseMatrixFloat16 : public CIccSparseMatrixEntry<icFloat16Number>
+class ICCPROFLIB_API CIccSparseMatrixFloat16 : public CIccSparseMatrixEntry<icFloat16Number>
 {
 public:
   CIccSparseMatrixFloat16() {}
@@ -128,7 +135,7 @@ public:
   virtual void set(int index, icFloatNumber value) {m_pData[index] = icFtoF16(value);}
 };
 
-class CIccSparseMatrixFloat32 : public CIccSparseMatrixEntry<icFloat32Number>
+class ICCPROFLIB_API CIccSparseMatrixFloat32 : public CIccSparseMatrixEntry<icFloat32Number>
 {
 public:
   CIccSparseMatrixFloat32() {}
@@ -137,7 +144,7 @@ public:
   virtual void set(int index, icFloatNumber value) {m_pData[index] = (icFloat32Number)value;}
 };
 
-class CIccSparseMatrixFloatNum : public CIccSparseMatrixEntry<icFloatNumber>
+class ICCPROFLIB_API CIccSparseMatrixFloatNum : public CIccSparseMatrixEntry<icFloatNumber>
 {
 public:
   CIccSparseMatrixFloatNum() {}

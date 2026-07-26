@@ -1,0 +1,19 @@
+name: "iccDEV CodeQL Security Analysis"
+
+queries:
+  - uses: ./.github/codeql-queries/iccdev-security-suite.qls
+  - uses: ./.github/codeql-queries/iccdev-jsonlib-suite.qls
+
+paths:
+  - IccProfLib
+  - IccXML
+  - IccJSON
+  - IccConnect
+  - Tools
+  - examples
+
+paths-ignore:
+  - Testing
+  - contrib
+  - Build
+  - Build-AFL

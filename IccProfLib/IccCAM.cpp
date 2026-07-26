@@ -93,9 +93,12 @@ void
 CIccCamConverter::ReferenceConditions (icFloatNumber	*rgb,
 											 icFloatNumber	*rgbC)
 {
-	rgbC[0] = (icFloatNumber)((m_D * m_WhitePoint[1] / m_rgbWhite[0] + 1.0 - m_D) * rgb[0]);
-	rgbC[1] = (icFloatNumber)((m_D * m_WhitePoint[1] / m_rgbWhite[1] + 1.0 - m_D) * rgb[1]);
-	rgbC[2] = (icFloatNumber)((m_D * m_WhitePoint[1] / m_rgbWhite[2] + 1.0 - m_D) * rgb[2]);
+	for (int i=0; i<3; i++) {
+		if (m_rgbWhite[i] == 0.0f)
+			rgbC[i] = 0.0f;
+		else
+			rgbC[i] = (icFloatNumber)((m_D * m_WhitePoint[1] / m_rgbWhite[i] + 1.0 - m_D) * rgb[i]);
+	}
 }
 
 /*---------------------------------------------------------------------------------*/
@@ -104,9 +107,15 @@ void
 CIccCamConverter::ReferenceConditionsInv (icFloatNumber *rgbC,
 												 icFloatNumber *rgb)
 {
-	rgb[0] = (icFloatNumber)(rgbC[0] / (m_D * m_WhitePoint[1] / m_rgbWhite[0] + 1.0 - m_D));
-	rgb[1] = (icFloatNumber)(rgbC[1] / (m_D * m_WhitePoint[1] / m_rgbWhite[1] + 1.0 - m_D));
-	rgb[2] = (icFloatNumber)(rgbC[2] / (m_D * m_WhitePoint[1] / m_rgbWhite[2] + 1.0 - m_D));
+	for (int i=0; i<3; i++) {
+		if (m_rgbWhite[i] == 0.0f) {
+			rgb[i] = 0.0f;
+		}
+		else {
+			icFloatNumber denom = (icFloatNumber)(m_D * m_WhitePoint[1] / m_rgbWhite[i] + 1.0 - m_D);
+			rgb[i] = (denom == 0.0f) ? 0.0f : (icFloatNumber)(rgbC[i] / denom);
+		}
+	}
 }
 
 /*---------------------------------------------------------------------------------------*/
@@ -138,7 +147,38 @@ CIccCamConverter::H_FunctionInv (icFloatNumber	y)
 {
 	icFloatNumber	x;
 
-	x = (icFloatNumber) (pow (27.13*y / (400.0-y), 1.0/m_exp));
+	// H_Function above maps [0,inf) onto [0,400), so its inverse is only defined
+	// for 0 <= y < 400. Outside that interval the expression below is not merely
+	// inaccurate, it is undefined: y == 400 makes the denominator zero, and y < 0
+	// or y > 400 makes the base negative, which pow() with a fractional exponent
+	// answers with NaN. Both then propagate through HyperbolicInv() into the whole
+	// XYZ triplet.
+	//
+	// The domain has to be enforced rather than assumed because y is derived from
+	// profile-supplied viewing conditions: JabToXYZ() feeds rgbP[] into
+	// HyperbolicInv(), which scales by H_Function(m_Fl), and m_Fl comes from m_La.
+	// A large m_Fl makes H_Function(m_Fl) round to exactly 400.0f in float, so a
+	// crafted profile lands the argument precisely on the pole (#1817 -- UBSan
+	// reported "division by zero" here via iccApplyNamedCmm).
+	//
+	// m_exp is guarded for the same reason: 1.0/m_exp would divide by zero. It is
+	// a fixed constant today, but operator= copies it, so a degenerate source
+	// object can carry a zero in.
+	//
+	// Degenerate input resolves to 0.0f, matching how the rest of this converter
+	// already handles a degenerate state -- see the m_cc and F_Function guards in
+	// Hyperbolic()/HyperbolicInv() and the denominator guard in
+	// ReferenceConditionsInv(). The true limit as y -> 400 is +infinity, but
+	// returning an infinity here would poison every downstream channel, whereas a
+	// finite zero keeps the result consistent with those neighbouring guards and
+	// with the degenerate-state contract the CAM regression already pins.
+	double dy = (double)y;
+	double denom = 400.0 - dy;
+	if (!std::isfinite(dy) || dy < 0.0 || denom <= 0.0 ||
+	    !std::isfinite((double)m_exp) || m_exp == 0.0f)
+		return 0.0f;
+
+	x = (icFloatNumber) (pow (27.13*dy / denom, 1.0/m_exp));
 
 	return x;
 }
@@ -149,6 +189,7 @@ icFloatNumber
 CIccCamConverter::Hyperbolic (icFloatNumber	x)
 {
 	icFloatNumber	y;
+	icFloatNumber hFl = H_Function (m_Fl);
 
 	if (x < 0)
 	{
@@ -158,7 +199,8 @@ CIccCamConverter::Hyperbolic (icFloatNumber	x)
 		}
 		else
 		{
-			y = - ((1 + m_alfa) * H_Function (-x) / H_Function (m_Fl) - m_alfa) * F_Function (m_Fl);
+			y = (hFl == 0.0f) ? 0.0f :
+				- ((1 + m_alfa) * H_Function (-x) / hFl - m_alfa) * F_Function (m_Fl);
 		}
 	}
 	else
@@ -169,7 +211,8 @@ CIccCamConverter::Hyperbolic (icFloatNumber	x)
 		}
 		else
 		{
-			y = ((1 + m_alfa) * H_Function (x) / H_Function (m_Fl) - m_alfa) * F_Function (m_Fl);
+			y = (hFl == 0.0f) ? 0.0f :
+				((1 + m_alfa) * H_Function (x) / hFl - m_alfa) * F_Function (m_Fl);
 		}
 	}
 
@@ -187,11 +230,14 @@ CIccCamConverter::HyperbolicInv (icFloatNumber y)
 	{
 		if (-y <= (m_cc * m_x0))
 		{
-			x = y / m_cc;
+			x = (m_cc == 0.0f) ? 0.0f : y / m_cc;
 		}
 		else
 		{
-			h_y = (- y / F_Function (m_Fl) + m_alfa) / (1 + m_alfa) * H_Function (m_Fl);
+			icFloatNumber fFl = F_Function (m_Fl);
+			if (fFl == 0.0f)
+				return 0.0f;
+			h_y = (- y / fFl + m_alfa) / (1 + m_alfa) * H_Function (m_Fl);
 			x = - H_FunctionInv (h_y);
 		}
 	}
@@ -199,11 +245,14 @@ CIccCamConverter::HyperbolicInv (icFloatNumber y)
 	{
 		if (y <= (m_cc * m_x0))
 		{
-			x = y / m_cc;
+			x = (m_cc == 0.0f) ? 0.0f : y / m_cc;
 		}
 		else
 		{
-			h_y = (y / F_Function (m_Fl) + m_alfa) / (1 + m_alfa) * H_Function (m_Fl);
+			icFloatNumber fFl = F_Function (m_Fl);
+			if (fFl == 0.0f)
+				return 0.0f;
+			h_y = (y / fFl + m_alfa) / (1 + m_alfa) * H_Function (m_Fl);
 			x = H_FunctionInv (h_y);
 		}
 	}
@@ -259,11 +308,34 @@ CIccCamConverter::CalcCoefficients ()
 	La5 = 5.0f * m_La;
 	m_Fl = (icFloatNumber)(0.2 * k * La5 + 0.1 * (1 - k) * (1 - k) * pow ((double)La5, 0.333333));
 
+	// CFL-077: Guard against division by zero when m_WhitePoint[1] == 0
+	if (m_WhitePoint[1] == 0.0f) {
+		m_n = 0.0f;
+		m_factor = 0.0f;
+		m_Nbb = 0.0f;
+		m_z = 0.0f;
+		m_x0 = 0.0f;
+		m_cc = 0.0f;
+		m_AWhite = 0.0f;
+		return;
+	}
+
 	m_n = m_Yb / m_WhitePoint[1];
 
 	m_factor = (icFloatNumber) pow (1.64 - pow (0.29, (double) m_n), 0.73);
 
-	m_Nbb = (icFloatNumber)(0.725 / pow ((double)(m_n), 0.2));
+	// CFL-077: Guard against division by zero when m_n == 0 (pow(0,0.2)==0)
+	double n_pow = pow ((double)(m_n), 0.2);
+	if (n_pow == 0.0) {
+		m_Nbb = 0.0f;
+		m_z = 0.0f;
+		m_x0 = 0.0f;
+		m_cc = 0.0f;
+		m_AWhite = 0.0f;
+		return;
+	}
+
+	m_Nbb = (icFloatNumber)(0.725 / n_pow);
 
 	m_z = (icFloatNumber)(1.48 + sqrt (m_n));
 
@@ -280,7 +352,19 @@ CIccCamConverter::CalcCoefficients ()
 //	m_x0 = (icFloatNumber) (m_Fl * 0.25 / 255.0);
 // m_x0 = (icFloatNumber) (m_Fl * 1.00 / 255.0)
 	m_x0 = (icFloatNumber) (m_Fl * 4.00 / 255.0);
-	m_cc = ((1 + m_alfa) * H_Function (m_x0) / H_Function (m_Fl) - m_alfa) * F_Function (m_Fl) / m_x0;
+
+	// CFL-077: Guard against division by zero when m_Fl==0 or m_x0==0
+	double x0 = (double)m_x0;
+	double h_fl = (double)H_Function (m_Fl);
+	double h_x0 = std::isfinite(x0) ? (double)H_Function ((icFloatNumber)x0) : 0.0;
+	double f_fl = (double)F_Function (m_Fl);
+	if (!std::isfinite(x0) || x0 == 0.0 ||
+	    !std::isfinite(h_fl) || h_fl == 0.0 ||
+	    !std::isfinite(h_x0) || !std::isfinite(f_fl)) {
+		m_cc = 0.0f;
+	} else {
+		m_cc = (icFloatNumber)(((1.0 + (double)m_alfa) * h_x0 / h_fl - (double)m_alfa) * f_fl / x0);
+	}
 
 	rgbP[0] = Hyperbolic (m_Fl * rgbP[0] / 100) + 0.1f;
 	rgbP[1] = Hyperbolic (m_Fl * rgbP[1] / 100) + 0.1f;
@@ -481,8 +565,20 @@ CIccCamConverter::XYZToJab (const icFloatNumber*	xyz,
 	h_xyz = xyz;
 	h_jab = jab;
 
+	const bool validCam = std::isfinite((double)m_AWhite) && m_AWhite != 0.0f;
+
 	for (k=0;k<nbr;k++)
 	{
+		if (!validCam) {
+			h_jab[0] = 0.0f;
+			h_jab[1] = 0.0f;
+			h_jab[2] = 0.0f;
+
+			h_xyz += 3;
+			h_jab += 3;
+			continue;
+		}
+
 		Multiply_vect_by_mx (h_xyz, rgb, m_mFor);
 
 		// clipping to the HPE triangle
@@ -505,7 +601,15 @@ CIccCamConverter::XYZToJab (const icFloatNumber*	xyz,
 
 		A = (icFloatNumber)((2.0 * rgbP[0] + rgbP[1] + rgbP[2] / 20.0 - 0.305) * m_Nbb);
 
-		J = (icFloatNumber)(100.0 * pow (A / m_AWhite, m_c * m_z));
+		double camWhite = (double)m_AWhite;
+		double responseA = (double)A;
+		if (!std::isfinite(camWhite) || camWhite == 0.0) {
+			J = 0.0f;
+		} else if (!std::isfinite(responseA)) {
+			J = 0.0f;
+		} else {
+			J = (icFloatNumber)(100.0 * pow (responseA / camWhite, (double)m_c * (double)m_z));
+		}
 
 		et = (icFloatNumber)((cos(lhr + 2.0) + 3.8) / 4.0);
 		t = (icFloatNumber)(50.0 * lchroma * 100 * et  * 10.0/13.0 * m_Nc * m_Nbb / (rgbP[0]+rgbP[1]+21.0/20.0*rgbP[2]));
@@ -542,8 +646,25 @@ CIccCamConverter::JabToXYZ (const icFloatNumber*	jab,
 	h_jab = jab;
 	h_xyz = xyz;
 
+	const bool validCam = std::isfinite((double)m_AWhite) &&
+	                      std::isfinite((double)m_Fl) && m_Fl != 0.0f &&
+	                      std::isfinite((double)m_factor) && m_factor != 0.0f &&
+	                      std::isfinite((double)m_Nbb) && m_Nbb != 0.0f &&
+	                      std::isfinite((double)m_c) && m_c != 0.0f &&
+	                      std::isfinite((double)m_z) && m_z != 0.0f;
+
 	for (i=0;i<nbr;i++)
 	{
+		if (!validCam) {
+			h_xyz[0] = 0.0f;
+			h_xyz[1] = 0.0f;
+			h_xyz[2] = 0.0f;
+
+			h_jab += 3;
+			h_xyz += 3;
+			continue;
+		}
+
 		if (h_jab[0] < 1.0e-5)
 		{
 			rgbP[0] = 0.1f;
@@ -573,7 +694,7 @@ CIccCamConverter::JabToXYZ (const icFloatNumber*	jab,
 
 				et = (icFloatNumber)((cos ((double)lhr + 2.0) + 3.8) / 4.0);
 
-				p1 = (icFloatNumber)((50000.0f / 13.0f) * m_Nc * m_Nbb * et / t);
+				p1 = (icFloatNumber)((50000.0 / 13.0) * (double)m_Nc * (double)m_Nbb * (double)et / (double)t);
 				p3 = 21.0f / 20.0f;
 
 				numerator = p2 * (2.0f + p3);

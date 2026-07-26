@@ -5,7 +5,7 @@
 
     Version:    V1
 
-    Copyright:  � see ICC Software License
+    Copyright:  (c) see ICC Software License
 */
 
 /*
@@ -74,6 +74,7 @@
 #include "IccUtil.h"
 #include "IccProfile.h"
 #include <map>
+#include <new>
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -85,10 +86,12 @@ static icTagSigToNameMap g_TagSigToNameMap;
 typedef std::map<std::string, icTagSignature> icTagNameToSigMap;
 static icTagNameToSigMap g_TagNameToSigMap;
 
-struct {
+typedef struct {
   icTagSignature sig;
   const icChar *szName;
-} g_icTagNameTable[] = {
+} icSigNamePair;
+
+icSigNamePair g_icTagNameTable[] = {
   {icSigAToB0Tag, "AToB0Tag"},
   {icSigAToB1Tag, "AToB1Tag"},
   {icSigAToB2Tag, "AToB2Tag"},
@@ -139,6 +142,8 @@ struct {
   {icSigDateTimeTag, "dateTimeTag"},
   {icSigDeviceMfgDescTag, "deviceMfgDescTag"},
   {icSigDeviceModelDescTag, "deviceModelDescTag"},
+  {icSigDevicePccTag, "devicePccTag"},
+  {icSigDeviceSpectralRangeTag, "deviceSpectralRangeTag"},
   {icSigMetaDataTag, "metaDataTag"},
   {icSigDToB0Tag, "DToB0Tag"},
   {icSigDToB1Tag, "DToB1Tag"},
@@ -210,9 +215,21 @@ struct {
   {icSigColorEncodingParamsTag, "colorEncodingParamsTag"},
   {icSigColorSpaceNameTag, "colorSpaceNameTag"},
   {icSigReferenceNameTag, "referenceNameTag"},
-  {icSigMaterialTypeArrayTag, "materialTypeArrayTag"},
-  {icSigMaterialDefaultValuesTag, "materialDefaultValuesTag"},
+  {icSigMultiplexTypeArrayTag, "multiplexTypeArrayTag"},
+  {icSigMultiplexDefaultValuesTag, "multiplexDefaultValuesTag"},
   {icSigEmbeddedV5ProfileTag, "embeddedV5ProfileTag"},
+  {icSigAppleAltBlueTRC, "altBlueTRC"},
+  {icSigAppleAltGreenTRC, "altGreenTRC"},
+  {icSigAppleAltRedTRC, "altRedTRC"},
+  {icSigAppleDescriptionMulti, "altDescriptionMulti"},
+
+  {(icTagSignature)0,""},
+};
+
+icSigNamePair g_icAltTagNameTable[] = {
+  // Legacy names for backward compatibility with older XML/JSON files
+  {icSigMultiplexTypeArrayTag, "materialTypeArrayTag"},
+  {icSigMultiplexDefaultValuesTag, "materialDefaultValuesTag"},
   {(icTagSignature)0,""},
 };
 
@@ -256,6 +273,7 @@ struct {
   {icSigScreeningType, "screeningType"},
   {icSigSignatureType, "signatureType"},
   {icSigSpectralDataInfoType, "spectralDataInfoType"},
+  {icSigSpectralRangeType, "spectralRangeType"},
   {icSigSpectralViewingConditionsType, "spectralViewingConditionsType"},
   {icSigTextType, "textType"},
   {icSigTextDescriptionType, "textDescriptionType"},
@@ -308,158 +326,161 @@ CIccTag* CIccSpecTagFactory::CreateTag(icTagTypeSignature tagSig)
 {
   switch(tagSig) {
     case icSigSignatureType:
-      return new CIccTagSignature;
+      return new(std::nothrow) CIccTagSignature;
 
     case icSigTextType:
-      return new CIccTagText;
+      return new(std::nothrow) CIccTagText;
 
     case icSigXYZArrayType:
-      return new CIccTagXYZ;
+      return new(std::nothrow) CIccTagXYZ;
 
     case icSigCicpType:
-      return new CIccTagCicp;
+      return new(std::nothrow) CIccTagCicp;
 
     case icSigUInt8ArrayType:
-      return new CIccTagUInt8;
+      return new(std::nothrow) CIccTagUInt8;
 
     case icSigUInt16ArrayType:
-      return new CIccTagUInt16;
+      return new(std::nothrow) CIccTagUInt16;
 
     case icSigUInt32ArrayType:
-      return new CIccTagUInt32;
+      return new(std::nothrow) CIccTagUInt32;
 
     case icSigUInt64ArrayType:
-      return new CIccTagUInt64;
+      return new(std::nothrow) CIccTagUInt64;
 
     case icSigS15Fixed16ArrayType:
-      return new CIccTagS15Fixed16;
+      return new(std::nothrow) CIccTagS15Fixed16;
 
     case icSigU16Fixed16ArrayType:
-      return new CIccTagU16Fixed16;
+      return new(std::nothrow) CIccTagU16Fixed16;
 
     case icSigFloat16ArrayType:
-      return new CIccTagFloat16;
+      return new(std::nothrow) CIccTagFloat16;
 
     case icSigFloat32ArrayType:
-      return new CIccTagFloat32;
+      return new(std::nothrow) CIccTagFloat32;
 
     case icSigFloat64ArrayType:
-      return new CIccTagFloat64;
+      return new(std::nothrow) CIccTagFloat64;
 
     case icSigGamutBoundaryDescType:
-      return new CIccTagGamutBoundaryDesc;
+      return new(std::nothrow) CIccTagGamutBoundaryDesc;
 
     case icSigCurveType:
-      return new CIccTagCurve;
+      return new(std::nothrow) CIccTagCurve;
 
     case icSigSegmentedCurveType:
-      return new CIccTagSegmentedCurve;
+      return new(std::nothrow) CIccTagSegmentedCurve;
 
     case icSigMeasurementType:
-      return new CIccTagMeasurement;
+      return new(std::nothrow) CIccTagMeasurement;
 
     case icSigMultiLocalizedUnicodeType:
-      return new CIccTagMultiLocalizedUnicode;
+      return new(std::nothrow) CIccTagMultiLocalizedUnicode;
 
     case icSigMultiProcessElementType:
-      return new CIccTagMultiProcessElement();
+      return new(std::nothrow) CIccTagMultiProcessElement();
 
     case icSigParametricCurveType:
-      return new CIccTagParametricCurve;
+      return new(std::nothrow) CIccTagParametricCurve;
 
     case icSigLutAtoBType:
-      return new CIccTagLutAtoB;
+      return new(std::nothrow) CIccTagLutAtoB;
 
     case icSigLutBtoAType:
-      return new CIccTagLutBtoA;
+      return new(std::nothrow) CIccTagLutBtoA;
 
     case icSigLut16Type:
-      return new CIccTagLut16;
+      return new(std::nothrow) CIccTagLut16;
 
     case icSigLut8Type:
-      return new CIccTagLut8;
+      return new(std::nothrow) CIccTagLut8;
 
     case icSigTextDescriptionType:
-      return new CIccTagTextDescription;
+      return new(std::nothrow) CIccTagTextDescription;
 
     case icSigNamedColor2Type:
-      return new CIccTagNamedColor2;
+      return new(std::nothrow) CIccTagNamedColor2;
 
     case icSigChromaticityType:
-      return new CIccTagChromaticity;
+      return new(std::nothrow) CIccTagChromaticity;
 
     case icSigDataType:
-      return new CIccTagData;
+      return new(std::nothrow) CIccTagData;
 
     case icSigDateTimeType:
-      return new CIccTagDateTime;
+      return new(std::nothrow) CIccTagDateTime;
 
 #ifndef ICC_UNSUPPORTED_TAG_DICT
     case icSigDictType:
-      return new CIccTagDict;
+      return new(std::nothrow) CIccTagDict;
 #endif
 
     case icSigColorantOrderType:
-      return new CIccTagColorantOrder;
+      return new(std::nothrow) CIccTagColorantOrder;
 
     case icSigColorantTableType:
-      return new CIccTagColorantTable;
+      return new(std::nothrow) CIccTagColorantTable;
 
     case icSigSparseMatrixArrayType:
-      return new CIccTagSparseMatrixArray;
+      return new(std::nothrow) CIccTagSparseMatrixArray;
 
     case icSigViewingConditionsType:
-      return new CIccTagViewingConditions;
+      return new(std::nothrow) CIccTagViewingConditions;
 
     case icSigSpectralDataInfoType:
-      return new CIccTagSpectralDataInfo;
+      return new(std::nothrow) CIccTagSpectralDataInfo;
+
+    case icSigSpectralRangeType:
+      return new(std::nothrow) CIccTagSpectralRange;
 
     case icSigSpectralViewingConditionsType:
-      return new CIccTagSpectralViewingConditions;
+      return new(std::nothrow) CIccTagSpectralViewingConditions;
 
     case icSigProfileSequenceDescType:
-      return new CIccTagProfileSeqDesc;
+      return new(std::nothrow) CIccTagProfileSeqDesc;
 
     case icSigResponseCurveSet16Type:
-      return new CIccTagResponseCurveSet16;
+      return new(std::nothrow) CIccTagResponseCurveSet16;
 
     case icSigProfileSequceIdType:
-      return new CIccTagProfileSequenceId;
+      return new(std::nothrow) CIccTagProfileSequenceId;
 
     case icSigUtf8TextType:
-      return new CIccTagUtf8Text;
+      return new(std::nothrow) CIccTagUtf8Text;
 
     case icSigZipUtf8TextType:
-      return new CIccTagZipUtf8Text;
+      return new(std::nothrow) CIccTagZipUtf8Text;
 
     case icSigZipXmlType:
     case icSigZipXMLType:
-      return new CIccTagZipXml;
+      return new(std::nothrow) CIccTagZipXml;
 
     case icSigUtf16TextType:
-      return new CIccTagUtf16Text;
+      return new(std::nothrow) CIccTagUtf16Text;
 
     case icSigTagArrayType:
-      return new CIccTagArray;
+      return new(std::nothrow) CIccTagArray;
 
     case icSigTagStructType:
-      return new CIccTagStruct;
+      return new(std::nothrow) CIccTagStruct;
 
     case icSigEmbeddedProfileType:
-      return new CIccTagEmbeddedProfile;
+      return new(std::nothrow) CIccTagEmbeddedProfile;
 
     case icSigEmbeddedHeightImageType:
-      return new CIccTagEmbeddedHeightImage;
+      return new(std::nothrow) CIccTagEmbeddedHeightImage;
 
     case icSigEmbeddedNormalImageType:
-      return new CIccTagEmbeddedNormalImage;
+      return new(std::nothrow) CIccTagEmbeddedNormalImage;
 
     case icSigScreeningType:
     case icSigUcrBgType:
     case icSigCrdInfoType:
 
     default:
-      return new CIccTagUnknown;
+      return new(std::nothrow) CIccTagUnknown;
   }
 }
 
@@ -478,9 +499,14 @@ const icChar* CIccSpecTagFactory::GetTagSigName(icTagSignature tagSig)
 
 icTagSignature CIccSpecTagFactory::GetTagNameSig(const icChar *szName)
 {
-  if (g_TagSigToNameMap.empty()) {
+  if (!szName || !szName[0])
+    return icSigUnknownTag;
+
+  if (g_TagNameToSigMap.empty()) {
     for (int i = 0; g_icTagNameTable[i].sig; i++)
       g_TagNameToSigMap[g_icTagNameTable[i].szName] = g_icTagNameTable[i].sig;
+    for (int i = 0; g_icAltTagNameTable[i].sig; i++)
+      g_TagNameToSigMap[g_icAltTagNameTable[i].szName] = g_icAltTagNameTable[i].sig;
   }
   icTagNameToSigMap::iterator sig = g_TagNameToSigMap.find(szName);
   if (sig != g_TagNameToSigMap.end())
@@ -504,6 +530,9 @@ const icChar* CIccSpecTagFactory::GetTagTypeSigName(icTagTypeSignature typeSig)
 
 icTagTypeSignature CIccSpecTagFactory::GetTagTypeNameSig(const icChar *szName)
 {
+  if (!szName || !szName[0])
+    return icSigUnknownType;
+
   if (g_TagTypeNameToSigMap.empty()) {
     for (int i = 0; g_icTagTypeNameTable[i].sig; i++)
       g_TagTypeNameToSigMap[g_icTagTypeNameTable[i].szName] = g_icTagTypeNameTable[i].sig;
@@ -576,6 +605,9 @@ const icChar* CIccTagCreator::DoGetTagSigName(icTagSignature tagSig)
 
 icTagSignature CIccTagCreator::DoGetTagNameSig(const icChar *szName)
 {
+  if (!szName || !szName[0])
+    return icSigUnknownTag;
+
   CIccTagFactoryList::iterator i;
   icTagSignature rv;
 
@@ -605,6 +637,9 @@ const icChar* CIccTagCreator::DoGetTagTypeSigName(icTagTypeSignature tagTypeSig)
 
 icTagTypeSignature CIccTagCreator::DoGetTagTypeNameSig(const icChar* szName)
 {
+  if (!szName || !szName[0])
+    return icSigUnknownType;
+
   CIccTagFactoryList::iterator i;
   icTagTypeSignature rv;
 

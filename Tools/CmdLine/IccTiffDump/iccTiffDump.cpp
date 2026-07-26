@@ -70,12 +70,19 @@
 
 
 #include <cstdio>
+#include <string>
 #include "IccCmm.h"
 #include "IccUtil.h"
 #include "IccDefs.h"
 #include "IccProfLibVer.h"
 #include "IccApplyBPC.h"
 #include "TiffImg.h"
+#include "../IccCmdLineUtil.h"
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 typedef struct {
   unsigned long nId;
@@ -96,6 +103,7 @@ IdList photo_types[] = {
   {PHOTO_CIELAB,     "CIELab"},
   {PHOTO_ICCLAB,     "IccLab"},
   {PHOTO_RGB,        "RGB"},
+  {PHOTO_PALETTE,    "Palette"},
   {UNKNOWNID,        "Unknown"},
 };
 
@@ -103,6 +111,7 @@ IdList compression_types[] = {
   {COMPRESSION_NONE,         "None"},
   {COMPRESSION_LZW,          "LZW"},
   {COMPRESSION_JPEG,         "JPEG"},
+  {COMPRESSION_PACKBITS,     "PackBits"},
   {COMPRESSION_DEFLATE,      "Deflate"},
   {COMPRESSION_ADOBE_DEFLATE,"Deflate"},
   {UNKNOWNID,                "Unknown"},
@@ -120,13 +129,24 @@ void Usage()
   printf("Usage: iccTiffDump tiff_file {exported_icc_file}\n\n");
 }
 
-void DumpProfileInfo(CIccProfile* pProfile, std::string prefix)
+void DumpProfileInfo(CIccProfile* pProfile, std::string prefix, int level = 1)
 {
   icHeader* pHdr = &pProfile->m_Header;
   CIccInfo Fmt;
+  const int profileRecursionLimit = 4;
+  const size_t bufSize = 64;
+  char buf[bufSize];
+
+  if (level > profileRecursionLimit) {
+    printf("%sSubprofile recursion halted\n", prefix.c_str());
+    return;
+  }
 
   printf("%sVersion:          %s\n", prefix.c_str(), Fmt.GetVersionName(pHdr->version));
 
+  printf("%sClass:            %s\n", prefix.c_str(), Fmt.GetProfileClassSigName(pHdr->deviceClass) );
+  if (pHdr->deviceSubClass)
+    printf("%sSubClass:         %s\n", prefix.c_str(), icGetSig(buf, bufSize, pHdr->deviceSubClass));
   if (pHdr->colorSpace)
     printf("%sColor Space:      %s\n", prefix.c_str(), Fmt.GetColorSpaceSigName(pHdr->colorSpace));
   if (pHdr->pcs)
@@ -151,7 +171,8 @@ void DumpProfileInfo(CIccProfile* pProfile, std::string prefix)
   if (pDesc) {
     if (pDesc->GetType() == icSigTextDescriptionType) {
       CIccTagTextDescription* pText = (CIccTagTextDescription*)pDesc;
-      printf("%sDescription:      %s\n", prefix.c_str(), pText->GetText());
+      std::string desc = icSanitizeConsoleText(pText->GetText());
+      printf("%sDescription:      %s\n", prefix.c_str(), desc.c_str());
     }
     else if (pDesc->GetType() == icSigMultiLocalizedUnicodeType) {
       CIccTagMultiLocalizedUnicode* pStrs = (CIccTagMultiLocalizedUnicode*)pDesc;
@@ -160,7 +181,8 @@ void DumpProfileInfo(CIccProfile* pProfile, std::string prefix)
         if (text != pStrs->m_Strings->end()) {
           std::string line;
           text->GetText(line);
-          printf("%sDescription:      %s\n", prefix.c_str(), line.c_str());
+          std::string desc = icSanitizeConsoleText(line);
+          printf("%sDescription:      %s\n", prefix.c_str(), desc.c_str());
         }
       }
     }
@@ -173,10 +195,46 @@ void DumpProfileInfo(CIccProfile* pProfile, std::string prefix)
       CIccTagEmbeddedProfile* pEmbeddedTag = (CIccTagEmbeddedProfile*)pEmbedded;
       if (pEmbeddedTag->GetProfile()) {
         printf("%sSub-Profile:      Embedded\n", prefix.c_str());
-        DumpProfileInfo(pEmbeddedTag->GetProfile(), prefix + " ");
+        DumpProfileInfo(pEmbeddedTag->GetProfile(), prefix + " ", level+1 );
       }
     }
   }
+}
+
+//===================================================
+
+static
+const char *GetSampleFormatDescription( unsigned int format )
+{
+  const int bufSize = 256;
+  static char buf[ bufSize ];
+
+  switch( format ) {
+    case SAMPLEFORMAT_UINT:
+      return "unsigned integer";
+      break;
+    case SAMPLEFORMAT_INT:
+      return "signed integer";
+      break;
+    case SAMPLEFORMAT_IEEEFP:
+      return "floating point";
+      break;
+    case SAMPLEFORMAT_VOID:
+      return "undefined";
+      break;
+    case SAMPLEFORMAT_COMPLEXINT:
+      return "complex integer";
+      break;
+    case SAMPLEFORMAT_COMPLEXIEEEFP:
+      return "complex floating point";
+      break;
+    default:
+      snprintf(buf,bufSize,"Unknown format: %u = 0x%8.8X", format, format );
+      return buf;
+      break;
+  }
+
+// unreachable
 }
 
 //===================================================
@@ -188,20 +246,28 @@ int main(int argc, icChar* argv[])
     Usage();
     return 0;
   }
+  else if (argc > 3) {
+    Usage();
+    return -1;
+  }
+
+  std::string srcName = icSanitizeConsoleText(argv[1]);
 
   CTiffImg SrcImg;
   if (!SrcImg.Open(argv[1])) {
-    printf("\nFile [%s] cannot be opened.\n", argv[1]);
+    printf("\nFile [%s] cannot be opened.\n", srcName.c_str());
     return -1;
   }
 
   printf("-------------------->Tiff Image Dump<---------------------------\n");
-  printf("Filename:          %s\n", argv[1]);
+  printf("Filename:          %s\n", srcName.c_str());
   printf("Size:              (%d x %d) pixels, (%.2lf\" x %.2lf\")\n",
     SrcImg.GetWidth(), SrcImg.GetHeight(),
     SrcImg.GetWidthIn(), SrcImg.GetHeightIn());
   printf("Planar:            %s\n", GetId(SrcImg.GetPlanar(), planar_types));
-  printf("BitsPerSample:     %d\n", SrcImg.GetBitsPerSample());
+  printf("BitsPerSample:     %d (%s)\n", SrcImg.GetBitsPerSample(),
+            GetSampleFormatDescription( SrcImg.GetSampleFormat()) );
+
   printf("SamplesPerPixel:   %d\n", SrcImg.GetSamples());
   int nExtra = SrcImg.GetExtraSamples();
   if (nExtra)
@@ -216,35 +282,50 @@ int main(int argc, icChar* argv[])
   if (SrcImg.GetIccProfile(pProfMem, nLen)) {
     printf("Profile:           Embedded\n");
 
-    // Optional profile export
-    if (argc > 2 && pProfMem && nLen > 0) {
-      FILE *fp = fopen(argv[2], "wb");
-      if (fp) {
-        fwrite(pProfMem, 1, nLen, fp);
-        fclose(fp);
-        printf("ICC profile saved to: %s\n", argv[2]);
-      } else {
-        fprintf(stderr, "Failed to write ICC profile to %s\n", argv[2]);
-      }
-    }
-
     // Profile description and metadata
     CIccProfile *pProfile = OpenIccProfile(pProfMem, nLen);
-    if (pProfile) {
-      DumpProfileInfo(pProfile, " ");
-      if (argc > 2) {
-        pProfile->ReadTags(pProfile);
-        if (SaveIccProfile(argv[2], pProfile)) {
-          printf("\nProfile extracted to: %s\n", argv[1]);
-        }
-        else {
-          printf("\nUnable to extract profile\n");
-        }
-      }
-      delete pProfile;
+    if (!pProfile) {
+      printf("\nUnable to open embedded ICC profile\n");
+      SrcImg.Close();
+      return 1;
     }
+
+    std::string validateReport;
+    if (!pProfile->ReadTags(pProfile)) {
+      printf("\nUnable to read embedded ICC profile\n");
+      delete pProfile;
+      SrcImg.Close();
+      return 1;
+    }
+    else if (pProfile->Validate(validateReport) > icValidateWarning) {
+      printf("\nEmbedded ICC profile violates the ICC specification:\n%s",
+             validateReport.c_str());
+      delete pProfile;
+      SrcImg.Close();
+      return 1;
+    }
+
+    DumpProfileInfo(pProfile, " ");
+    if (argc > 2) {
+      std::string dstName = icSanitizeConsoleText(argv[2]);
+      if (SaveIccProfile(argv[2], pProfile)) {
+        printf("\nProfile extracted to: %s\n", dstName.c_str());
+      }
+      else {
+        printf("\nUnable to extract profile\n");
+        delete pProfile;
+        SrcImg.Close();
+        return -1;
+      }
+    }
+    delete pProfile;
   } else {
     printf("Profile:           None\n");
+    if (argc > 2) {
+      printf("\nNo embedded ICC profile to extract\n");
+      SrcImg.Close();
+      return -1;
+    }
   }
 
   SrcImg.Close();

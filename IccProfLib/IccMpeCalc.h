@@ -84,19 +84,40 @@ namespace iccDEV {
 class CIccMpeCurveSet;
 class CIccMpeMatrix;
 class CIccMpeCLUT;
-class CIccMpeCalculator;
-class CIccApplyMpeCalculator;
+class ICCPROFLIB_API CIccMpeCalculator;
+class ICCPROFLIB_API CIccApplyMpeCalculator;
 class IIccOpDef;
 
 #define icMaxDataStackSize 65535
+
+// Defensive upper bound on the number of elements parsed from a calc-based
+// multiProcessElement. ICC.2 stores every one of these as a 32-bit count with
+// NO maximum imposed by the specification: the calculator sub-element count
+// (m_nSubElem) and operation count (m_nOps) inside a calcElement, plus the
+// processing-element count (m_nProcElements) of a multiProcessElementType tag.
+// This cap exists solely to bound memory and loop iteration against corrupt or
+// hostile counts; it is an arbitrary round 2^16 ceiling (orders of magnitude
+// larger than any real-world profile) and is deliberately NOT derived from any
+// field width. It is applied uniformly as a ">= reject": a valid count is
+// strictly less than MAX_CALC_ELEMENTS (i.e. at most 65535). Centralised here
+// so every load, copy, serialise, describe and validate path shares one value
+// and one boundary. NB: this is the element-COUNT cap and is distinct from the
+// temporary-variable memory size (icMaxDataStackSize + 1 = 65536 slots) used by
+// the calc variable-addressing checks, which happens to share the same number.
+#define MAX_CALC_ELEMENTS 65536
 
 
 
 /************************************************************************
  * Channel Function signature
  ************************************************************************/
-typedef enum {
+typedef enum : uint32_t {
+  icSigChannelNullDataOp            = 0x00000000,  /* not valid, used for data range */
+  
   icSigChannelFunction              = 0x66756e63,  /* 'func' */
+  
+  // useful value that is not defined by the spec.
+  icSigChannelRangeOp               = 0xffffffff,  /* not valid, used for data range */
 } icChannelFuncSignature;
 
 
@@ -246,7 +267,7 @@ public:
 #endif
     } select;
   }data;
-  unsigned long extra;
+  icUInt32Number extra;
   IIccOpDef *def;
 
   void Describe(std::string &desc, int nVerboseness=100);
@@ -353,7 +374,7 @@ protected:
   bool m_bUseRefs;
 };
 
-class CIccApplyMpeCalculator;
+class ICCPROFLIB_API CIccApplyMpeCalculator;
 
 /**
 ****************************************************************************
@@ -407,7 +428,7 @@ protected:
   void InsertBlanks(std::string &sDescription, int nBlanks);
   void DescribeSequence(std::string &sDescription,
                         icUInt32Number nOps, SIccCalcOp *op, int nBlanks);
-  bool ApplySequence(CIccApplyMpeCalculator *pApply, icUInt32Number nOps, SIccCalcOp *op) const;
+  bool ApplySequence(CIccApplyMpeCalculator *pApply, icUInt32Number nOps, SIccCalcOp *op, int nDepth = 0) const;
 
   const char *ParseFuncDef(const char *szFuncDef, CIccCalcOpList &m_list, std::string &sReport);
 
@@ -426,7 +447,7 @@ class ICCPROFLIB_API CIccSubCalcApply
 {
 public:
   CIccSubCalcApply(CIccApplyMpe *pApplyMpe) { m_pApply = pApplyMpe; }
-  ~CIccSubCalcApply() { if (m_pApply) delete m_pApply; }
+  ~CIccSubCalcApply() { delete m_pApply; }
 
   icUInt16Number NumInputChannels() { return m_pApply->GetElem()->NumInputChannels(); }
   icUInt16Number NumOutputChannels() { return m_pApply->GetElem()->NumOutputChannels(); }
@@ -503,7 +524,7 @@ protected:
 * Purpose: The Calculator process element apply data
 *****************************************************************************
 */
-class CIccApplyMpeCalculator : public CIccApplyMpe
+class ICCPROFLIB_API CIccApplyMpeCalculator : public CIccApplyMpe
 {
   friend class CIccMpeCalculator;
 public:
@@ -563,7 +584,7 @@ public:
 
 //CIccMPElements support  
 #ifdef USEICCDEVNAMESPACE
-}
+} //namespace iccDEV
 #endif
 
 #endif //_ICCMPECALC_H
