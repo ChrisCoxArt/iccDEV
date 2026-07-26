@@ -33,10 +33,7 @@ Testing/*/*.icc
 Testing/private/**
 
 # Xcode build files
-/Build/XCBuildData
 **/*.noindex
-**/Build
-!/Build
 !.github/ci/build
 !.github/ci/build/**
 **/xcuserdata
@@ -118,7 +115,8 @@ __pycache__/
 *.egg-info/
 *.egg
 dist/
-build/
+# DANGER - this overfilters and excludes all changes inside the /Build directory!
+#build/
 *.pyd
 python/iccdev/_iccdev.cpp
 python/iccdev/_iccdev.c
