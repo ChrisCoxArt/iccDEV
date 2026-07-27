@@ -526,12 +526,12 @@ bool describe3DLUT( CIccMBB *curve, CIccProfile *pIcc, std::string &description,
   std::string path(":");
   path += sigDesc;
   std::string report;
+  description = "MBBLut";
   if (curve->Validate(path, report, pIcc ) > icValidateWarning) {
     LogAnError(stderr,"%s: WARNING - 3D table failed validation:\n%s\n", filename.c_str(), report.c_str() );
-    description = "MBBLut";
     return true;
   }
-  curve->Describe( description, 100 );
+  //curve->Describe( description, 100 );    // no longer used, and SLOW
   return false;
 }
 
