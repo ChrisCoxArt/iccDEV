@@ -94,8 +94,7 @@ enum predictor_type {
     PREDICTOR_TYPE_1DITER = 4,  // likely going to be worse than 1D
 };
 
-// TODO - rowstep, colstep, planestep
-typedef void func_predictor( const uint8_t *input, uint8_t *output, uint8_t depth, size_t size1, size_t size2, size_t size3 );
+typedef void func_predictor( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t size2, size_t size3 );
 
 struct predictor_desc {
     const char *name;
@@ -119,13 +118,15 @@ std::vector<predictor_desc> predictorList =
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
  { "Prev", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
 
+// byte shuffle, forward 1D
 
 // TODO - WRITE ME!
 // up, 2D
 // Paeth, 2D
 // MED, 2D
 
-// prevIter, 1DIterated
+// prevIter, 1DIterated - calls prev
+
 };
 
 /******************************************************************************/
@@ -203,6 +204,89 @@ void LogAnError(FILE *stream, const char* format, ...)
 /******************************************************************************/
 
 static
+bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes )
+{
+  int zstat;
+  z_stream zstr;
+  memset(&zstr, 0, sizeof(zstr));
+
+  zstat = inflateInit(&zstr);
+  if (zstat != Z_OK) {
+    return false;
+  }
+
+  zstat = inflateReset(&zstr);
+  if (zstat != Z_OK) {
+    inflateEnd(&zstr);
+    return false;
+  }
+
+  zstr.next_in = input;
+  zstr.avail_in = (uInt) in_bytes;
+
+  do {
+    zstr.next_out = output;
+    zstr.avail_out = (uInt) out_bytes;
+
+    zstat = inflate(&zstr, Z_SYNC_FLUSH);
+    if (zstat != Z_OK && zstat != Z_STREAM_END) {
+      inflateEnd(&zstr);
+      return false;
+    }
+
+  } while (zstat != Z_STREAM_END && zstr.avail_in > 0);
+
+  inflateEnd(&zstr);
+
+  return true;
+}
+
+/******************************************************************************/
+
+static
+bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes, int level = 9 )
+{
+  int zstat;
+  z_stream zstr;
+  memset(&zstr, 0, sizeof(zstr));
+
+  zstat = deflateInit(&zstr, level);
+  if (zstat != Z_OK) {
+    return false;
+  }
+
+  zstat = deflateReset(&zstr);
+  if (zstat != Z_OK) {
+    deflateEnd(&zstr);
+    return false;
+  }
+
+  zstr.next_in = input;
+  zstr.avail_in = (uInt) in_bytes;
+
+  do {
+    zstr.next_out = output;
+    zstr.avail_out = (uInt) out_bytes;
+
+    zstat = deflate(&zstr, Z_SYNC_FLUSH);
+    if (zstat != Z_OK && zstat != Z_STREAM_END) {
+      inflateEnd(&zstr);
+      return false;
+    }
+
+  } while (zstat != Z_STREAM_END && zstr.avail_in > 0);
+
+  out_bytes = zstr.total_out;
+
+  deflateEnd(&zstr);
+
+  return true;
+}
+
+/******************************************************************************/
+/******************************************************************************/
+
+static
 uint8_t ClipU8( const icFloatNumber &input )
 {
   if (std::isnan(input))
@@ -247,23 +331,25 @@ icFloatNumber ClipFloat( const icFloatNumber &input )
 /******************************************************************************/
 /******************************************************************************/
 
-void apply1DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uint8_t */*output*/,
-                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/, size_t /*clutSize*/,
-                        bool reverse )
+void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
+                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, int depth,
+                        uint8_t channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
     predFunc = pred.reverse;
 
-
 // WRITE ME!
+// temp, 1D simple case
+  predFunc( input, output, depth, channels, pixelCount, 0, 0 );
+
 }
 
 /******************************************************************************/
 
 void apply1DIteratedPredictor( const predictor_desc &pred, const uint8_t */*input*/, uint8_t */*output*/,
-                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/, size_t /*clutSize*/,
-                        bool reverse )
+                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/,
+                        uint8_t /*channels*/, size_t /*pixelCount*/, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -274,8 +360,8 @@ void apply1DIteratedPredictor( const predictor_desc &pred, const uint8_t */*inpu
 /******************************************************************************/
 
 void apply2DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uint8_t */*output*/,
-                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/, size_t /*clutSize*/,
-                        bool reverse )
+                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/,
+                        uint8_t /*channels*/, size_t /*pixelCount*/, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -286,8 +372,8 @@ void apply2DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uin
 /******************************************************************************/
 
 void apply3DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uint8_t */*output*/,
-                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/, size_t /*clutSize*/,
-                        bool reverse )
+                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, uint8_t /*depth*/,
+                        uint8_t /*channels*/, size_t /*pixelCount*/, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -300,8 +386,8 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uin
 // call different wrapper functions based on each type
 static
 void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
-                        uint32_t *dimArray, uint8_t nDimensions, uint8_t depth, size_t totalSize,
-                        bool reverse = false )
+                        uint32_t *dimArray, uint8_t nDimensions, int depth, uint8_t channels,
+                        size_t pixelCount, bool reverse = false )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -309,26 +395,26 @@ void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_
 
   switch (pred.type) {
     case PREDICTOR_TYPE_NULL:
-      predFunc(input,output,depth,totalSize,0,0);      // needs no wrapper, just copy the whole array
+      predFunc(input,output,depth,channels,pixelCount,0,0);      // needs no wrapper, just copy the whole array
       break;
 
     case PREDICTOR_TYPE_1D:
-      apply1DPredictor( pred, input, output, dimArray, nDimensions, depth, totalSize, reverse );
+      apply1DPredictor( pred, input, output, dimArray, nDimensions, depth, channels, pixelCount, reverse );
       break;
 
     case PREDICTOR_TYPE_2D:
       if (nDimensions > 1)
-        apply2DPredictor( pred, input, output, dimArray, nDimensions, depth, totalSize, reverse );
+        apply2DPredictor( pred, input, output, dimArray, nDimensions, depth, channels, pixelCount, reverse );
       break;
 
     case PREDICTOR_TYPE_3D:
       if (nDimensions > 2)
-        apply3DPredictor( pred, input, output, dimArray, nDimensions, depth, totalSize, reverse );
+        apply3DPredictor( pred, input, output, dimArray, nDimensions, depth, channels, pixelCount, reverse );
       break;
 
     case PREDICTOR_TYPE_1DITER:
       if (nDimensions > 1)
-        apply1DIteratedPredictor( pred, input, output, dimArray, nDimensions, depth, totalSize, reverse );
+        apply1DIteratedPredictor( pred, input, output, dimArray, nDimensions, depth, channels, pixelCount, reverse );
       break;
     
     default:
@@ -341,40 +427,84 @@ void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_
 /******************************************************************************/
 
 static
-void null_forward( const uint8_t *input, uint8_t *output, uint8_t depth, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void null_forward( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
-  memcpy( output, input, size1*(depth/8) );
+  memcpy( output, input, size1*(depth/8)*channels );
 }
 
 static
-void null_reverse( const uint8_t *input, uint8_t *output, uint8_t depth, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void null_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
-  memcpy( output, input, size1*(depth/8) );
+  memcpy( output, input, size1*(depth/8)*channels );
 }
 
 /******************************************************************************/
 
 static
-void prev_forward( const uint8_t *input, uint8_t *output, uint8_t depth, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void prev_forward( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
-  memcpy( output, input, size1*(depth/8) );
   if (depth == 8) {
-    // WRITE ME!
+    for (int c = 0; c < channels; ++c) {
+      output[c] = input[c];
+    }
+    for (size_t i = 1; i < size1; ++i) {
+      const uint8_t *in = input + i*channels;
+      const uint8_t *prev = input + (i-1)*channels;
+      uint8_t *out = output + i*channels;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] - prev[c];   // overflow/underflow is intentional
+      }
+    }
   }
+  
   if (depth == 16) {
-    // WRITE ME!
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {
+      output16[c] = input16[c];
+    }
+    for (size_t i = 1; i < size1; ++i) {
+      const uint16_t *in = input16 + i*channels;
+      const uint16_t *prev = input16 + (i-1)*channels;
+      uint16_t *out = output16 + i*channels;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] - prev[c];   // overflow/underflow is intentional
+      }
+    }
   }
 }
 
 static
-void prev_reverse( const uint8_t *input, uint8_t *output, uint8_t depth, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void prev_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
-  memcpy( output, input, size1*(depth/8) );
   if (depth == 8) {
-    // WRITE ME!
+    for (int c = 0; c < channels; ++c) {
+      output[c] = input[c];
+    }
+    for (size_t i = 1; i < size1; ++i) {
+      const uint8_t *in = input + i*channels;
+      const uint8_t *prev = output + (i-1)*channels;
+      uint8_t *out = output + i*channels;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] + prev[c];   // overflow/underflow is intentional
+      }
+    }
   }
+  
   if (depth == 16) {
-    // WRITE ME!
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {
+      output16[c] = input16[c];
+    }
+    for (size_t i = 1; i < size1; ++i) {
+      const uint16_t *in = input16 + i*channels;
+      const uint16_t *prev = output16 + (i-1)*channels;
+      uint16_t *out = output16 + i*channels;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] + prev[c];   // overflow/underflow is intentional
+      }
+    }
   }
 }
 
@@ -462,8 +592,8 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     input[i] = ClipU16( value * 256.0 );
   }
   
-  // print name of the data object
-  printf("%s", name.c_str() );
+  // print name of the data object and base size
+  printf("%s\t%u", name.c_str(), steps*2 );
 
   uint32_t dimensionArray[2] = {(uint32_t)steps,0};
   
@@ -472,23 +602,31 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     
     // apply forward predictor
     applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
-                       dimensionArray, 1, 16, steps, false );
+                       dimensionArray, 1, 16, 1, steps, false );
 
 #if 1
-    // apply reverse for verification
+    // apply reverse predictor for verification
     applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
-                       dimensionArray, 1, 16, steps, true );
+                       dimensionArray, 1, 16, 1, steps, true );
     if ( memcmp(input,verify,steps*2) != 0 ) {
         LogAnError(stderr, "%s: WARNING - %s predictor reverse failed %s\n",
                     name.c_str(), pred.name, description.c_str() );
     }
 #endif
 
-    size_t outSize = steps*2;
-    // compress and report size
-// WRITE ME!
+    // allow extra room just in case
+    std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
+    uint16_t *compressed = compressedBuffer.get();
 
-    printf("\t%zu", outSize );
+    // compress
+    size_t inSize = steps*2;
+    size_t outBytes = steps*4;
+    if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, 9 ) ) {
+      LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
+    }
+
+    // report size
+    printf("\t%zu", outBytes );
   }
 
   printf("\n"); // and finish the line of results
@@ -755,6 +893,14 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 {
   const size_t bufSize = 64;
   char buf1[bufSize];
+  
+  
+  printf("name\toriginal"); // start label line
+  for (const auto &pred : predictorList) {
+    printf("\t%s", pred.name );
+  }
+  printf("\n"); // and finish the labels line
+  
 
   for ( auto &tag: pIcc->m_Tags ) {
     icTagSignature sig = tag.TagInfo.sig;
@@ -797,7 +943,6 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         std::string sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
         process3DLUT(pIcc, pTag, sigDesc, basename );
-// TODO - plot gamut from A2B and B2A tags into xy and LAB plots
         }
         break;
 
@@ -809,6 +954,62 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
   }   // end loop over tags
 
 }   // end processProfile()
+
+/******************************************************************************/
+
+// sanity check!
+static
+void unitTestPredictors(void)
+{
+  const uint32_t testLen = 5;
+  const uint32_t testDim2 = 3;
+  const uint32_t testDim3 = 8;
+  uint32_t dimensionArray1[2] = {testLen,0};
+  uint32_t dimensionArray2[testDim2] = {testLen,testLen,testLen};
+  uint32_t dimensionArray3[testDim3] = {testLen,testLen,testLen,testLen,testLen,testLen,testLen,testLen};
+  
+  uint32_t pixelCount1 = testLen;
+  uint32_t pixelCount2 = 125; // (uint32_t) pow( testLen, 3 )
+  uint32_t pixelCount3 = 390625; // (uint32_t) pow( testLen, 8 )
+  
+  std::unique_ptr<uint16_t[]> inputBuffer( new uint16_t[ pixelCount3 ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ pixelCount3 ] );
+  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ pixelCount3 ] );
+  uint16_t *input = inputBuffer.get();
+  uint16_t *output = outputBuffer.get();
+  uint16_t *verify = verifyBuffer.get();
+
+
+  // iterate over all predictors, 8 and 16 bit
+  for (const auto &pred : predictorList) {
+  
+    memset( output, 0, pixelCount1*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimensionArray1, 1, 8, 1, pixelCount1, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimensionArray1, 1, 8, 1, pixelCount1, true );
+    if ( memcmp(input,verify,pixelCount1) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse8 failed unit test1\n",
+                    pred.name );
+    }
+  
+    memset( output, 0, pixelCount1*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimensionArray1, 1, 16, 1, pixelCount1, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimensionArray1, 1, 16, 1, pixelCount1, true );
+    if ( memcmp(input,verify,pixelCount1*2) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse16 failed unit test1\n",
+                    pred.name );
+    }
+    
+// TODO - full 3 dimension test
+// TODO - full 8 dimension test
+  }
+
+
+
+}
 
 /******************************************************************************/
 
@@ -875,13 +1076,10 @@ int main(int argc, char* argv[])
     return 0;
   }
   
-
   filename_list fileList = parse_arguments(argc,argv);
   
+  unitTestPredictors();
   
-// TODO - unit test all predictors forward and reverse
-  
-
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
 
