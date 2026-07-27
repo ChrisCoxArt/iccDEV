@@ -144,7 +144,6 @@ enum predictor_type {
     PREDICTOR_TYPE_3D = 3,      // may be too much hassle for small benefit
 };
 
-
 typedef void func_predictor( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                             size_t size1, size_t size2, size_t size3,
                             size_t colStep, size_t rowStep, size_t planeStep );
@@ -361,6 +360,7 @@ std::vector<predictor_desc> predictorList =
  { "MinGradSplit", PREDICTOR_TYPE_2D, false, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
  { "MinGradSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
 
+// byte shuffle, forward 1D
 
  { "Min3D", PREDICTOR_TYPE_3D, false, min3D_forward, min3D_reverse },
  { "Max3D", PREDICTOR_TYPE_3D, false, max3D_forward, max3D_reverse },
@@ -375,7 +375,6 @@ std::vector<predictor_desc> predictorList =
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
 // TODO - next2D
-
 };
 
 /******************************************************************************/
@@ -462,7 +461,6 @@ void LogAnError(FILE *stream, const char* format, ...)
 static
 bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes )
 {
-
 #ifndef ICC_USE_ZLIB
   return false;
 #else
@@ -509,7 +507,6 @@ bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
 static
 bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes, int level = 9 )
 {
-
 #ifndef ICC_USE_ZLIB
   return false;
 #else
@@ -659,6 +656,7 @@ inline T median( std::vector<T> p ) {
     std::nth_element(p.begin(), p.begin()+half-1, p.end());
     return (p[half-1]+val1)/2;
   }
+
 }
 
 /******************************************************************************/
@@ -793,7 +791,7 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
 static
 void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
                         uint32_t *dimArray, uint8_t nDimensions, int bitDepth, int channels,
-                        size_t pixelCount, bool reverse = false )
+                        int pixelCount, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -3991,6 +3989,14 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 {
   const size_t bufSize = 64;
   char buf1[bufSize];
+  
+  
+  printf("name\toriginal"); // start label line
+  for (const auto &pred : predictorList) {
+    printf("\t%s", pred.name );
+  }
+  printf("\n"); // and finish the labels line
+  
 
   printf("name\toriginal"); // start label line
   for (const auto &pred : predictorList) {
@@ -4120,10 +4126,10 @@ void unitTestPredictors(void)
   std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
+
   uint16_t *input = inputBuffer.get();
   uint16_t *output = outputBuffer.get();
   uint16_t *verify = verifyBuffer.get();
-
 
   // fill the input with an odd pattern
 #if 0
