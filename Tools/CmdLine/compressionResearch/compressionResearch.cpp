@@ -724,7 +724,6 @@ void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
     input += increment;
     output += increment;
   }
-
 }
 
 /******************************************************************************/
@@ -755,7 +754,6 @@ void apply2DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
     input += increment;
     output += increment;
   }
-
 }
 
 /******************************************************************************/
@@ -3565,7 +3563,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     auto value = *( curve->GetData(i) );
     input[i] = ClipU16( value * 256.0 );
   }
-  
+
   // print name of the data object and base size
   printf("%s\t%u", name.c_str(), steps*2 );
   
@@ -3576,7 +3574,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
   
   // iterate over all predictors
   for (const auto &pred : predictorList) {
-    
+
     size_t outBytes = steps*2;  // aka no compression
     
     // 1D LUTs never use the gamut predictors
@@ -3693,7 +3691,6 @@ std::string channelName(int index, bool isInputMatrix, icColorSpaceSignature inp
 
 /******************************************************************************/
 
-
 static
 void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
                 const std::string &basename, bool isGamut = false )
@@ -3808,7 +3805,6 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
   printf("\n"); // and finish the line of results
   printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
   statsND[ minPred.name ] += 1;
-
 }
 
 /******************************************************************************/
@@ -3995,14 +3991,12 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 {
   const size_t bufSize = 64;
   char buf1[bufSize];
-  
-  
+
   printf("name\toriginal"); // start label line
   for (const auto &pred : predictorList) {
     printf("\t%s", pred.name );
   }
   printf("\n"); // and finish the labels line
-  
 
   for ( auto &tag: pIcc->m_Tags ) {
     icTagSignature sig = tag.TagInfo.sig;
@@ -4345,7 +4339,6 @@ filename_list parse_arguments( int argc, char *argv[] )
 
 int main(int argc, char* argv[])
 {
-
 #ifndef ICC_USE_ZLIB
   printf("ERROR - %s requires ZLIB!\n", argv[0] );
   return 1;
@@ -4355,7 +4348,7 @@ int main(int argc, char* argv[])
     printUsage();
     return 0;
   }
-  
+
   filename_list fileList = parse_arguments(argc,argv);
 
 #if 0
@@ -4393,7 +4386,6 @@ int main(int argc, char* argv[])
     // NOTE - consume error logs here if needed, so exceptions are included
 
   } // end for file list
-
 
   // report statistics
   if (gTest1DLUT) {
