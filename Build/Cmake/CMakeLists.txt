@@ -1671,6 +1671,7 @@ IF(ENABLE_TOOLS)
   ENDIF()
   ADD_SUBDIRECTORY(Tools/IccProfileVisualize)
   ADD_SUBDIRECTORY(Tools/IccProfilePlot)
+  ADD_SUBDIRECTORY(Tools/compressionResearch)
 
   # Ensure IccXML-dependent tools are built after IccXML library (safety net)
   IF(ENABLE_ICCXML)
@@ -1787,6 +1788,7 @@ IF(ENABLE_TOOLS)
       iccTiffDump
       iccDumpProfileGui
       iccProfileVisualize
+      compressionResearch
   )
   foreach(_iccdev_tool_target IN LISTS _iccdev_tool_targets)
     iccdev_fixup_msvc_compile_pdb(${_iccdev_tool_target})
