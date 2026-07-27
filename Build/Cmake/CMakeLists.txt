@@ -1169,7 +1169,7 @@ endif()
 if(ENABLE_FUZZING)
   message(STATUS ">>> Fuzzing instrumentation enabled (libFuzzer + ASan + UBSan)")
   message(STATUS ">>> Fuzzer harnesses live on the CFL branch")
-  # DO NOT apply fuzzer flags globally - causes linker conflicts with regular tools
+  # DO NOT apply fuzzer flags globally - causes linker 4cts with regular tools
   # Fuzzer targets get flags via target_compile_options/target_link_options
 elseif(ENABLE_SANITIZERS)
   if(MSVC)
@@ -2096,9 +2096,10 @@ IF(ENABLE_TOOLS)
   ADD_SUBDIRECTORY(Tools/IccApplyToLink)
   IF(TARGET_LIB_ICCCONNECT)
     ADD_SUBDIRECTORY(Tools/IccApplySearch)
-    ENDIF()
-    ADD_SUBDIRECTORY(Tools/IccProfileVisualize)
-    ADD_SUBDIRECTORY(Tools/IccProfilePlot)
+  ENDIF()
+  ADD_SUBDIRECTORY(Tools/IccProfileVisualize)
+  ADD_SUBDIRECTORY(Tools/IccProfilePlot)
+  ADD_SUBDIRECTORY(Tools/compressionResearch)
 
     # Ensure IccXML-dependent tools are built after IccXML library (safety net)
   IF(ENABLE_ICCXML)
@@ -2219,6 +2220,7 @@ IF(ENABLE_TOOLS)
       iccTiffDump
       iccDumpProfileGui
       iccProfileVisualize
+      compressionResearch
   )
   foreach(_iccdev_tool_target IN LISTS _iccdev_tool_targets)
     iccdev_fixup_msvc_compile_pdb(${_iccdev_tool_target})
