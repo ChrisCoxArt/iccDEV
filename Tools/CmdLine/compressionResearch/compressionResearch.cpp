@@ -94,6 +94,7 @@ enum predictor_type {
     PREDICTOR_TYPE_1DITER = 4,  // likely going to be worse than 1D
 };
 
+// TODO - colStep, rowStep, planeStep
 typedef void func_predictor( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t size2, size_t size3 );
 
 struct predictor_desc {
@@ -118,9 +119,9 @@ std::vector<predictor_desc> predictorList =
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
  { "Prev", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
 
-// byte shuffle, forward 1D
 
 // TODO - WRITE ME!
+// byte shuffle, forward 1D
 // up, 2D
 // Paeth, 2D
 // MED, 2D
@@ -332,16 +333,40 @@ icFloatNumber ClipFloat( const icFloatNumber &input )
 /******************************************************************************/
 
 void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
-                        uint32_t */*dimArray*/, uint8_t /*nDimensions*/, int depth,
+                        uint32_t *dimArray, uint8_t nDimensions, int depth,
                         uint8_t channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
     predFunc = pred.reverse;
-
-// WRITE ME!
+  
 // temp, 1D simple case
-  predFunc( input, output, depth, channels, pixelCount, 0, 0 );
+  if (nDimensions == 1) {
+    predFunc( input, output, depth, channels, pixelCount, 0, 0 );
+    return;
+  }
+  
+  std::vector<size_t> loopSteps(nDimensions);
+  
+  size_t tiles = 1;
+  for (int i = (int)nDimensions-1; i > 0; --i) {
+    size_t temp = dimArray[i];
+    tiles *= temp;
+  }
+
+  size_t pixels = dimArray[ 0 ];
+
+  if (tiles * pixels != pixelCount) {
+    LogAnError(stderr,"ERROR - tile and pixel counts do not match (%zu, %zu)\n", pixelCount, tiles*pixels );
+  }
+  
+  size_t increment = pixels * (depth/8) * channels;
+
+  for (size_t k = 0; k < tiles; ++k) {
+    predFunc( input, output, depth, channels, pixels, 0, 0 );
+    input += increment;
+    output += increment;
+  }
 
 }
 
@@ -957,57 +982,103 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 
 /******************************************************************************/
 
+static
+void unitTestPredictorInner( const predictor_desc &pred,
+                        uint16_t *input, uint16_t *output, uint16_t *verify,
+                        size_t pixelCount, uint8_t dimensions, uint32_t *dimArray )
+{
+    // 1 channel, 8 bit
+    memset( output, 0, pixelCount*2 );
+    memset( verify, 2, pixelCount*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimArray, dimensions, 8, 1, pixelCount, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimArray, dimensions, 8, 1, pixelCount, true );
+    if ( memcmp(input,verify,pixelCount) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+                    pred.name, 8, 1, dimensions );
+    }
+
+    // 1 channel, 16 bit
+    memset( output, 0, pixelCount*2 );
+    memset( verify, 2, pixelCount*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimArray, dimensions, 16, 1, pixelCount, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimArray, dimensions, 16, 1, pixelCount, true );
+    if ( memcmp(input,verify,pixelCount*2) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+                    pred.name, 16, 1, dimensions );
+    }
+
+
+    // 3 channels, 8 bit
+    memset( output, 0, pixelCount*3*2 );
+    memset( verify, 2, pixelCount*3*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimArray, dimensions, 8, 3, pixelCount, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimArray, dimensions, 8, 3, pixelCount, true );
+    if ( memcmp(input,verify,3*pixelCount) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+                    pred.name, 8, 3, dimensions );
+    }
+
+    // 3 channels, 16 bit
+    memset( output, 0, pixelCount*3*2 );
+    memset( verify, 2, pixelCount*3*2 );
+    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                       dimArray, dimensions, 16, 3, pixelCount, false );
+    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                       dimArray, dimensions, 16, 3, pixelCount, true );
+    if ( memcmp(input,verify,3*pixelCount*2) != 0 ) {
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+                    pred.name, 16, 3, dimensions );
+    }
+
+}
+
+/******************************************************************************/
+
 // sanity check!
 static
 void unitTestPredictors(void)
 {
   const uint32_t testLen = 5;
-  const uint32_t testDim2 = 3;
-  const uint32_t testDim3 = 8;
-  uint32_t dimensionArray1[2] = {testLen,0};
-  uint32_t dimensionArray2[testDim2] = {testLen,testLen,testLen};
-  uint32_t dimensionArray3[testDim3] = {testLen,testLen,testLen,testLen,testLen,testLen,testLen,testLen};
+  const uint32_t testDim2 = 2;
+  const uint32_t testDim3 = 3;
+  const uint32_t testDim4 = 8;
+  const uint32_t testMaxChannels = 3;
+  uint32_t dimensionArray1[1] = {testLen};
+  uint32_t dimensionArray2[testDim2] = {testLen,testLen};
+  uint32_t dimensionArray3[testDim3] = {testLen,testLen,testLen};
+  uint32_t dimensionArray4[testDim4] = {testLen,testLen,testLen,testLen,testLen,testLen,testLen,testLen};
   
   uint32_t pixelCount1 = testLen;
-  uint32_t pixelCount2 = 125; // (uint32_t) pow( testLen, 3 )
-  uint32_t pixelCount3 = 390625; // (uint32_t) pow( testLen, 8 )
+  uint32_t pixelCount2 = (uint32_t) pow( testLen, testDim2 );   // 25
+  uint32_t pixelCount3 = (uint32_t) pow( testLen, testDim3 );   // 125
+  uint32_t pixelCount4 = (uint32_t) pow( testLen, testDim4 );    // 390625
   
-  std::unique_ptr<uint16_t[]> inputBuffer( new uint16_t[ pixelCount3 ] );
-  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ pixelCount3 ] );
-  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ pixelCount3 ] );
+  std::unique_ptr<uint16_t[]> inputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
+  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
   uint16_t *input = inputBuffer.get();
   uint16_t *output = outputBuffer.get();
   uint16_t *verify = verifyBuffer.get();
 
 
-  // iterate over all predictors, 8 and 16 bit
-  for (const auto &pred : predictorList) {
-  
-    memset( output, 0, pixelCount1*2 );
-    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
-                       dimensionArray1, 1, 8, 1, pixelCount1, false );
-    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
-                       dimensionArray1, 1, 8, 1, pixelCount1, true );
-    if ( memcmp(input,verify,pixelCount1) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse8 failed unit test1\n",
-                    pred.name );
-    }
-  
-    memset( output, 0, pixelCount1*2 );
-    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
-                       dimensionArray1, 1, 16, 1, pixelCount1, false );
-    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
-                       dimensionArray1, 1, 16, 1, pixelCount1, true );
-    if ( memcmp(input,verify,pixelCount1*2) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse16 failed unit test1\n",
-                    pred.name );
-    }
-    
-// TODO - full 3 dimension test
-// TODO - full 8 dimension test
+  // fill the input with an odd pattern
+  for (uint32_t i = 0; i < pixelCount4; ++i) {
+    input[i] = (uint16_t)((41*i) & 0xFFFF);
   }
 
-
+  // iterate over all predictors, 8 and 16 bit
+  for (const auto &pred : predictorList) {
+    unitTestPredictorInner( pred, input, output, verify, pixelCount1, 1, dimensionArray1 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount2, 2, dimensionArray2 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount3, 3, dimensionArray3 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount4, 8, dimensionArray4 );
+  }
 
 }
 
