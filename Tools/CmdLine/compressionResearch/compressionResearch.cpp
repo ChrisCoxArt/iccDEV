@@ -360,7 +360,6 @@ std::vector<predictor_desc> predictorList =
  { "MinGradSplit", PREDICTOR_TYPE_2D, false, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
  { "MinGradSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
 
-// byte shuffle, forward 1D
 
  { "Min3D", PREDICTOR_TYPE_3D, false, min3D_forward, min3D_reverse },
  { "Max3D", PREDICTOR_TYPE_3D, false, max3D_forward, max3D_reverse },
@@ -791,7 +790,7 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
 static
 void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
                         uint32_t *dimArray, uint8_t nDimensions, int bitDepth, int channels,
-                        int pixelCount, bool reverse )
+                        size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
