@@ -790,7 +790,7 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
 static
 void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
                         uint32_t *dimArray, uint8_t nDimensions, int bitDepth, int channels,
-                        size_t pixelCount, bool reverse )
+                        size_t pixelCount, bool reverse = false )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
@@ -996,6 +996,7 @@ void bytesplitPrev_forward( const uint8_t *input, uint8_t *output, int bitDepth,
       LogAnError(stderr,"ERROR - bytesplit reverse cannot be used on non-linear steps\n" );
       // at least not without a lot more code and testing...
     }
+
     // rearrange bytes: assumes little endian byte order, reorganized into big endian (sort of)
     // NOTE - this operation cannot be done inplace
     //          because prev is not designed to run inplace (else we could write to output)
@@ -1124,7 +1125,6 @@ void next_forward( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 }
 
 /******************************************************************************/
-
 static
 void next_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
@@ -3474,7 +3474,6 @@ void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
 }
 
 /******************************************************************************/
-/******************************************************************************/
 
 static
 bool describe1DLUT( CIccTagCurve *curve, std::string &description,
@@ -4117,11 +4116,11 @@ void unitTestPredictors(void)
   uint32_t pixelCount2 = (uint32_t) pow( testLen, testDim2 );   // 25
   uint32_t pixelCount3 = (uint32_t) pow( testLen, testDim3 );   // 125
   uint32_t pixelCount4 = (uint32_t) pow( testLen, testDim4 );   // 390625
+
   uint32_t pixelCount5 = 1; // 120
   for (uint32_t i = 0; i < testDim5; ++i)
     pixelCount5 *= dimensionArray5[i];
-  
-  
+
   std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
