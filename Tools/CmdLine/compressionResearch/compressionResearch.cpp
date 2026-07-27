@@ -95,7 +95,7 @@ enum predictor_type {
 };
 
 // TODO - colStep, rowStep, planeStep
-typedef void func_predictor( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t size2, size_t size3 );
+typedef void func_predictor( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t size2, size_t size3 );
 
 struct predictor_desc {
     const char *name;
@@ -111,6 +111,8 @@ static func_predictor null_forward;
 static func_predictor null_reverse;
 static func_predictor prev_forward;
 static func_predictor prev_reverse;
+static func_predictor byteshuffle_forward;
+static func_predictor byteshuffle_reverse;
 
 /******************************************************************************/
 
@@ -118,7 +120,7 @@ std::vector<predictor_desc> predictorList =
 {
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
  { "Prev", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
-
+ { "ByteShufflePrev", PREDICTOR_TYPE_1D, byteshuffle_forward, byteshuffle_reverse },
 
 // TODO - WRITE ME!
 // byte shuffle, forward 1D
@@ -334,20 +336,19 @@ icFloatNumber ClipFloat( const icFloatNumber &input )
 
 void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
                         uint32_t *dimArray, uint8_t nDimensions, int depth,
-                        uint8_t channels, size_t pixelCount, bool reverse )
+                        int channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = pred.forward;
   if (reverse)
     predFunc = pred.reverse;
   
-// temp, 1D simple case
+  // shortcut the simplest case
   if (nDimensions == 1) {
     predFunc( input, output, depth, channels, pixelCount, 0, 0 );
     return;
   }
-  
-  std::vector<size_t> loopSteps(nDimensions);
-  
+
+
   size_t tiles = 1;
   for (int i = (int)nDimensions-1; i > 0; --i) {
     size_t temp = dimArray[i];
@@ -359,7 +360,7 @@ void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
   if (tiles * pixels != pixelCount) {
     LogAnError(stderr,"ERROR - tile and pixel counts do not match (%zu, %zu)\n", pixelCount, tiles*pixels );
   }
-  
+
   size_t increment = pixels * (depth/8) * channels;
 
   for (size_t k = 0; k < tiles; ++k) {
@@ -411,7 +412,7 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t */*input*/, uin
 // call different wrapper functions based on each type
 static
 void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
-                        uint32_t *dimArray, uint8_t nDimensions, int depth, uint8_t channels,
+                        uint32_t *dimArray, uint8_t nDimensions, int depth, int channels,
                         size_t pixelCount, bool reverse = false )
 {
   func_predictor *predFunc = pred.forward;
@@ -452,13 +453,7 @@ void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_
 /******************************************************************************/
 
 static
-void null_forward( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
-{
-  memcpy( output, input, size1*(depth/8)*channels );
-}
-
-static
-void null_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void null_forward( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
   memcpy( output, input, size1*(depth/8)*channels );
 }
@@ -466,7 +461,15 @@ void null_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t cha
 /******************************************************************************/
 
 static
-void prev_forward( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void null_reverse( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+{
+  memcpy( output, input, size1*(depth/8)*channels );
+}
+
+/******************************************************************************/
+
+static
+void prev_forward( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
   if (depth == 8) {
     for (int c = 0; c < channels; ++c) {
@@ -499,8 +502,10 @@ void prev_forward( const uint8_t *input, uint8_t *output, int depth, uint8_t cha
   }
 }
 
+/******************************************************************************/
+
 static
-void prev_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+void prev_reverse( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
   if (depth == 8) {
     for (int c = 0; c < channels; ++c) {
@@ -533,6 +538,55 @@ void prev_reverse( const uint8_t *input, uint8_t *output, int depth, uint8_t cha
   }
 }
 
+/******************************************************************************/
+
+static
+void byteshuffle_forward( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+{
+  if (depth == 8) {
+    prev_forward(input,output,8,channels,size1,0,0);
+    return;
+  }
+
+  if (depth == 16) {
+    // rearrange bytes: assumes little endian byte order, reorganized into big endian (sort of)
+    // NOTE - this operation cannot be done inplace
+    //          because prev is not designed to run inplace (else we could write to output)
+    size_t half = size1*channels;
+    std::vector<uint8_t> temp( 2*half );
+    for (size_t i = 0; i < half; ++i)
+      temp[i] = input[2*i+1];
+    for (size_t i = 0; i < half; ++i)
+      temp[half+i] = input[2*i+0];
+    prev_forward( &temp[0],output,8,channels,2*size1,0,0);
+  }
+}
+
+/******************************************************************************/
+
+static
+void byteshuffle_reverse( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
+{
+  if (depth == 8) {
+    prev_reverse(input,output,8,channels,size1,0,0);
+    return;
+  }
+
+  if (depth == 16) {
+    // NOTE - this operation cannot be done inplace
+    //          because prev is not designed to run inplace (else we could write to output)
+    size_t half = size1*channels;
+    std::vector<uint8_t> temp( 2*half );
+    prev_reverse(input,&temp[0],8,channels,2*size1,0,0);
+    // rearrange bytes: assumes little endian byte order, reorganized from big endian (sort of)
+    for (size_t i = 0; i < half; ++i) {
+      output[2*i+0] = temp[half+i];
+      output[2*i+1] = temp[i];
+    }
+  }
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 static
@@ -995,7 +1049,7 @@ void unitTestPredictorInner( const predictor_desc &pred,
     applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                        dimArray, dimensions, 8, 1, pixelCount, true );
     if ( memcmp(input,verify,pixelCount) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %ddimensions failed unit test\n",
                     pred.name, 8, 1, dimensions );
     }
 
@@ -1007,7 +1061,7 @@ void unitTestPredictorInner( const predictor_desc &pred,
     applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                        dimArray, dimensions, 16, 1, pixelCount, true );
     if ( memcmp(input,verify,pixelCount*2) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %ddimensions failed unit test\n",
                     pred.name, 16, 1, dimensions );
     }
 
@@ -1020,7 +1074,7 @@ void unitTestPredictorInner( const predictor_desc &pred,
     applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                        dimArray, dimensions, 8, 3, pixelCount, true );
     if ( memcmp(input,verify,3*pixelCount) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %ddimensions failed unit test\n",
                     pred.name, 8, 3, dimensions );
     }
 
@@ -1032,7 +1086,7 @@ void unitTestPredictorInner( const predictor_desc &pred,
     applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                        dimArray, dimensions, 16, 3, pixelCount, true );
     if ( memcmp(input,verify,3*pixelCount*2) != 0 ) {
-        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %dimensions failed unit test\n",
+        LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %ddimensions failed unit test\n",
                     pred.name, 16, 3, dimensions );
     }
 
@@ -1045,11 +1099,12 @@ static
 void unitTestPredictors(void)
 {
   const uint32_t testLen = 5;
+  const uint32_t testDim1 = 1;
   const uint32_t testDim2 = 2;
   const uint32_t testDim3 = 3;
   const uint32_t testDim4 = 8;
   const uint32_t testMaxChannels = 3;
-  uint32_t dimensionArray1[1] = {testLen};
+  uint32_t dimensionArray1[testDim1] = {testLen};
   uint32_t dimensionArray2[testDim2] = {testLen,testLen};
   uint32_t dimensionArray3[testDim3] = {testLen,testLen,testLen};
   uint32_t dimensionArray4[testDim4] = {testLen,testLen,testLen,testLen,testLen,testLen,testLen,testLen};
@@ -1057,9 +1112,9 @@ void unitTestPredictors(void)
   uint32_t pixelCount1 = testLen;
   uint32_t pixelCount2 = (uint32_t) pow( testLen, testDim2 );   // 25
   uint32_t pixelCount3 = (uint32_t) pow( testLen, testDim3 );   // 125
-  uint32_t pixelCount4 = (uint32_t) pow( testLen, testDim4 );    // 390625
+  uint32_t pixelCount4 = (uint32_t) pow( testLen, testDim4 );   // 390625
   
-  std::unique_ptr<uint16_t[]> inputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
+  std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
   std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ testMaxChannels * pixelCount4 ] );
   uint16_t *input = inputBuffer.get();
@@ -1074,10 +1129,10 @@ void unitTestPredictors(void)
 
   // iterate over all predictors, 8 and 16 bit
   for (const auto &pred : predictorList) {
-    unitTestPredictorInner( pred, input, output, verify, pixelCount1, 1, dimensionArray1 );
-    unitTestPredictorInner( pred, input, output, verify, pixelCount2, 2, dimensionArray2 );
-    unitTestPredictorInner( pred, input, output, verify, pixelCount3, 3, dimensionArray3 );
-    unitTestPredictorInner( pred, input, output, verify, pixelCount4, 8, dimensionArray4 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount1, testDim1, dimensionArray1 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount2, testDim2, dimensionArray2 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount3, testDim3, dimensionArray3 );
+    unitTestPredictorInner( pred, input, output, verify, pixelCount4, testDim4, dimensionArray4 );
   }
 
 }
