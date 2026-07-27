@@ -90,19 +90,12 @@ enum predictor_type {
     PREDICTOR_TYPE_NULL = 0,
     PREDICTOR_TYPE_1D = 1,
     PREDICTOR_TYPE_2D = 2,
-    PREDICTOR_TYPE_3D = 3,      // may be too much hassle
+    PREDICTOR_TYPE_3D = 3,      // may be too much hassle for small benefit
     PREDICTOR_TYPE_1DITER = 4,  // likely going to be worse than 1D
 };
 
 // TODO - colStep, rowStep, planeStep
 typedef void func_predictor( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t size2, size_t size3 );
-
-struct predictor_desc {
-    const char *name;
-    predictor_type type;
-    func_predictor *forward;
-    func_predictor *reverse;
-};
 
 /******************************************************************************/
 
@@ -116,6 +109,14 @@ static func_predictor byteshuffle_reverse;
 
 /******************************************************************************/
 
+struct predictor_desc {
+    const char *name;
+    predictor_type type;
+    func_predictor *forward;
+    func_predictor *reverse;
+};
+
+
 std::vector<predictor_desc> predictorList =
 {
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
@@ -123,7 +124,6 @@ std::vector<predictor_desc> predictorList =
  { "ByteShufflePrev", PREDICTOR_TYPE_1D, byteshuffle_forward, byteshuffle_reverse },
 
 // TODO - WRITE ME!
-// byte shuffle, forward 1D
 // up, 2D
 // Paeth, 2D
 // MED, 2D
@@ -472,7 +472,7 @@ static
 void prev_forward( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
   if (depth == 8) {
-    for (int c = 0; c < channels; ++c) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
       output[c] = input[c];
     }
     for (size_t i = 1; i < size1; ++i) {
@@ -488,7 +488,7 @@ void prev_forward( const uint8_t *input, uint8_t *output, int depth, int channel
   if (depth == 16) {
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
-    for (int c = 0; c < channels; ++c) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
       output16[c] = input16[c];
     }
     for (size_t i = 1; i < size1; ++i) {
@@ -508,7 +508,7 @@ static
 void prev_reverse( const uint8_t *input, uint8_t *output, int depth, int channels, size_t size1, size_t /*size2*/, size_t /*size3*/ )
 {
   if (depth == 8) {
-    for (int c = 0; c < channels; ++c) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
       output[c] = input[c];
     }
     for (size_t i = 1; i < size1; ++i) {
@@ -524,7 +524,7 @@ void prev_reverse( const uint8_t *input, uint8_t *output, int depth, int channel
   if (depth == 16) {
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
-    for (int c = 0; c < channels; ++c) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
       output16[c] = input16[c];
     }
     for (size_t i = 1; i < size1; ++i) {
@@ -574,7 +574,7 @@ void byteshuffle_reverse( const uint8_t *input, uint8_t *output, int depth, int 
 
   if (depth == 16) {
     // NOTE - this operation cannot be done inplace
-    //          because prev is not designed to run inplace (else we could write to output)
+    //          because prev is not designed to run inplace (else we could write to input)
     size_t half = size1*channels;
     std::vector<uint8_t> temp( 2*half );
     prev_reverse(input,&temp[0],8,channels,2*size1,0,0);
@@ -625,12 +625,12 @@ bool describe3DLUT( CIccMBB *curve, CIccProfile *pIcc, std::string &description,
   std::string path(":");
   path += sigDesc;
   std::string report;
+  description = "MBBLut";
   if (curve->Validate(path, report, pIcc ) > icValidateWarning) {
     LogAnError(stderr,"%s: WARNING - 3D table failed validation:\n%s\n", filename.c_str(), report.c_str() );
-    description = "MBBLut";
     return true;
   }
-  curve->Describe( description, 100 );
+//  curve->Describe( description, 100 );     // no longer used, and SLOW
   return false;
 }
 
@@ -693,7 +693,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     }
 #endif
 
-    // allow extra room just in case
+    // allow extra room, just in case
     std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
     uint16_t *compressed = compressedBuffer.get();
 
@@ -1098,6 +1098,7 @@ void unitTestPredictorInner( const predictor_desc &pred,
 static
 void unitTestPredictors(void)
 {
+#if defined(_DEBUG) || defined(DEBUG)
   const uint32_t testLen = 5;
   const uint32_t testDim1 = 1;
   const uint32_t testDim2 = 2;
@@ -1134,6 +1135,8 @@ void unitTestPredictors(void)
     unitTestPredictorInner( pred, input, output, verify, pixelCount3, testDim3, dimensionArray3 );
     unitTestPredictorInner( pred, input, output, verify, pixelCount4, testDim4, dimensionArray4 );
   }
+
+#endif      // DEBUG
 
 }
 
