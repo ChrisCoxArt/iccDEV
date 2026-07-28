@@ -117,6 +117,8 @@ static func_predictor prev2D_reverse;
 
 static func_predictor prev2Dsplit_forward;
 static func_predictor prev2Dsplit_reverse;
+static func_predictor upsplit_forward;
+static func_predictor upsplit_reverse;
 
 /******************************************************************************/
 
@@ -133,6 +135,7 @@ std::vector<predictor_desc> predictorList =
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
 
 #if 0 && !defined(NDEBUG)
+// these test the outer loops of the predictors
  { "None1", PREDICTOR_TYPE_1D, null_forward, null_reverse },
  { "None2", PREDICTOR_TYPE_2D, null_forward, null_reverse },
  { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
@@ -145,8 +148,8 @@ std::vector<predictor_desc> predictorList =
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
 
-// { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
-// { "UpByteSplit", PREDICTOR_TYPE_2D, upsplit_forward, upsplit_reverse },
+ { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
+ { "UpByteSplit", PREDICTOR_TYPE_2D, upsplit_forward, upsplit_reverse },
 
 
 // TODO - WRITE ME!
@@ -267,6 +270,8 @@ bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     }
 
   } while (zstat != Z_STREAM_END && zstr.avail_in > 0);
+
+  out_bytes = zstr.total_out;
 
   inflateEnd(&zstr);
 
@@ -960,6 +965,88 @@ void prev2D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
 }
 
 /******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void prev2Dsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    prev2D_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    prev2D_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void prev2Dsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    prev2D_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    prev2D_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void upsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    up_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    up_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void upsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+   up_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    up_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 static
@@ -1613,9 +1700,31 @@ void unitTestPredictors(void)
 
 
   // fill the input with an odd pattern
+#if 0
+  memset( input, 0xA5, 2*pixelCount4 ); // pattern for DEBUGGING
+#else
   for (uint32_t i = 0; i < pixelCount4; ++i) {
     input[i] = (uint16_t)((41*i) & 0xFFFF);
   }
+#endif
+
+
+  // simple compress and decompress to validate zlib
+  size_t compSize = pixelCount3*2;
+  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, 9 )) {
+    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
+  }
+  size_t fullSize = pixelCount3*2;
+  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
+    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
+  }
+  if (fullSize != pixelCount3) {
+    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
+  }
+  if (memcmp( input, verify, pixelCount3) != 0) {
+    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
+  }
+
 
   // iterate over all predictors, 8 and 16 bit
   for (const auto &pred : predictorList) {
