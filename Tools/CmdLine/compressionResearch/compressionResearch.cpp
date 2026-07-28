@@ -109,6 +109,8 @@ static func_predictor byteshuffle_forward;
 static func_predictor byteshuffle_reverse;
 static func_predictor up_forward;
 static func_predictor up_reverse;
+static func_predictor prev2D_forward;
+static func_predictor prev2D_reverse;
 
 /******************************************************************************/
 
@@ -124,7 +126,7 @@ std::vector<predictor_desc> predictorList =
 {
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
 
-#ifndef NDEBUG
+#if 0 && !defined(NDEBUG)
  { "None1", PREDICTOR_TYPE_1D, null_forward, null_reverse },
  { "None2", PREDICTOR_TYPE_2D, null_forward, null_reverse },
  { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
@@ -133,6 +135,7 @@ std::vector<predictor_desc> predictorList =
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
  { "ByteShufflePrev", PREDICTOR_TYPE_1D, byteshuffle_forward, byteshuffle_reverse },
 
+ { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
 
 // TODO - WRITE ME!
@@ -484,7 +487,8 @@ void null_forward( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 {
   size2 = size2 ? size2 : 1;
   size3 = size3 ? size3 : 1;
-  memcpy( output, input, size1*size2*size3*(bitDepth/8)*channels );
+  size_t totalBytes = size1*size2*size3*(bitDepth/8)*channels;
+  memcpy( output, input, totalBytes );
 }
 
 /******************************************************************************/
@@ -496,7 +500,8 @@ void null_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 {
   size2 = size2 ? size2 : 1;
   size3 = size3 ? size3 : 1;
-  memcpy( output, input, size1*size2*size3*(bitDepth/8)*channels );
+  size_t totalBytes = size1*size2*size3*(bitDepth/8)*channels;
+  memcpy( output, input, totalBytes );
 }
 
 /******************************************************************************/
@@ -738,6 +743,137 @@ void up_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channe
 }
 
 /******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void prev2D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    for (size_t y = 0; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // up diff first pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c];
+      }
+      else {
+        const uint8_t *prevY = input + (y-1)*step2;
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c] - prevY[c];   // overflow/underflow is intentional
+      }
+      
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = inY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 0; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // up diff first pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c];
+      }
+      else {
+        const uint16_t *prevY = input16 + (y-1)*step2;
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c] - prevY[c];   // overflow/underflow is intentional
+      }
+      
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = inY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void prev2D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    for (size_t y = 0; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // up diff first pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c];
+      }
+      else {
+        const uint8_t *prevY = output + (y-1)*step2;
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c] + prevY[c];   // overflow/underflow is intentional
+      }
+      
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = outY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 0; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // up diff first pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c];
+      }
+      else {
+        const uint16_t *prevY = output16 + (y-1)*step2;
+        for (int c = 0; c < channels; ++c)
+          outY[c] = inY[c] + prevY[c];   // overflow/underflow is intentional
+      }
+      
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = outY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 static
@@ -932,14 +1068,145 @@ std::string channelName(int index, bool isInputMatrix, icColorSpaceSignature inp
 /******************************************************************************/
 
 static
-void testCLUT(CIccProfile */*pIcc*/, CIccCLUT */*clut*/, const std::string &/*sigDesc*/,
-                const std::string &/*basename*/ )
+void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
+                const std::string &basename )
 {
-// WRITE ME!
-    // iterate over all predictors, compress, report size
+  int inputChannels = clut->GetInputDim();
+  int outputChannels = clut->GetOutputChannels();
+  
+  int bytes = clut->GetPrecision();    // currently only 1 or 2
+  if (bytes > 2 || bytes < 1) {
+    LogAnError(stderr,"%s: ERROR - bad clut precision for tag '%s'\n",
+              basename.c_str(), sigDesc.c_str() );
+    return;
+  }
 
+  int gridPoints = clut->GridPoints(); // gridSize[0]
+  int tiles = gridPoints;
+  if (gridPoints <= 0) {
+    LogAnError(stderr, "%s: Skipping %s: invalid CLUT grid\n", basename.c_str(), sigDesc.c_str());
+    return;
+  }
+  
+  int tileWidth = 1;
+  int tileHeight = 1;
 
-    // optionally reverse for testing?      or do unit tests on all predictors beforehand?
+  if (inputChannels >= 2) {
+    tileWidth = clut->GridPoint(1);
+    if (tileWidth <= 0) {
+      LogAnError(stderr, "%s: Skipping %s: invalid CLUT width\n", basename.c_str(), sigDesc.c_str());
+      return;
+    }
+  }
+
+  if (inputChannels >= 3) {
+    tileHeight = clut->GridPoint(2);
+    if (tileHeight <= 0) {
+      LogAnError(stderr, "%s: Skipping %s: invalid CLUT height\n", basename.c_str(), sigDesc.c_str());
+      return;
+    }
+  }
+
+  if (inputChannels > 3) {
+    for (int i = 3; i < inputChannels; ++i) {
+      int extraGridPoints = clut->GridPoint(i);
+      if (extraGridPoints <= 0) {
+        LogAnError(stderr, "%s: Skipping %s: invalid CLUT tile count\n", basename.c_str(), sigDesc.c_str());
+        return;
+      }
+      tiles *= extraGridPoints;
+    }
+  }
+
+  // special case for single dimensional LUT
+  if (inputChannels == 1) {
+    tileWidth = tiles;
+    tiles = 1;
+    tileHeight = 1;
+  }
+
+  // special case for 2 dimensional LUT
+  if (inputChannels == 2) {
+    tileHeight = tiles;
+    tiles = 1;
+  }
+
+  if (tiles <= 0) {
+    LogAnError(stderr,"%s: WARNING - tile count overflow.\n", basename.c_str() );
+    tiles = 1;
+  }
+
+  icUInt32Number numPoints = clut->NumPoints();
+  size_t byteSize = outputChannels * numPoints * bytes;
+  
+  std::unique_ptr<uint8_t[]> inputBuffer( new uint8_t[ byteSize ] );
+  std::unique_ptr<uint8_t[]> outputBuffer( new uint8_t[ byteSize ] );
+  uint8_t *input8 = inputBuffer.get();
+  uint16_t *input16 = (uint16_t*)inputBuffer.get();
+  uint8_t *output = outputBuffer.get();
+
+#if 1
+  std::unique_ptr<uint8_t[]> verifyBuffer( new uint8_t[ byteSize ] );
+  uint8_t *verify = verifyBuffer.get();
+#endif
+
+  // convert float buffer to int
+  for (uint32_t i = 0; i < numPoints; ++i ) {
+    // bitDepth is always 8.8
+    // but stored as float
+    auto value = *( clut->GetData(i) );
+    if (bytes == 1)
+      input8[i] = ClipU8( value * 255.0 );
+    else
+      input16[i] = ClipU16( value * 65535.0 );
+  }
+  
+  // print name of the data object and base size
+  printf("%s\t%zu", sigDesc.c_str(), byteSize );
+
+  uint32_t dimensionArray[16];
+  int i;
+  for (i = 0; i < inputChannels; ++i) {
+    dimensionArray[i] = clut->GridPoint(i);
+  }
+  for (; i < 16; ++i) {
+    dimensionArray[i] = 0;
+  }
+
+  // iterate over all predictors
+  for (const auto &pred : predictorList) {
+    
+    // apply forward predictor
+    applyOnePredictor( pred, input8, output,
+                       dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, false );
+
+#if 1
+    // apply reverse predictor for verification
+    applyOnePredictor( pred, output, verify,
+                       dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, true );
+    if ( memcmp(input8,verify,byteSize) != 0 ) {
+        LogAnError(stderr, "%s: WARNING - %s predictor reverse failed\n",
+                    sigDesc.c_str(), pred.name );
+    }
+#endif
+
+    // allow extra room, just in case
+    std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*byteSize ] );
+    uint8_t *compressed = compressedBuffer.get();
+
+    // compress
+    size_t inSize = byteSize;
+    size_t outBytes = 2*byteSize;
+    if ( !deflateBuffer( output, compressed, inSize, outBytes, 9 ) ) {
+      LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
+    }
+
+    // report size
+    printf("\t%zu", outBytes );
+  }
+
+  printf("\n"); // and finish the line of results
+
 }
 
 /******************************************************************************/
@@ -1042,7 +1309,7 @@ void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
   // validate is called back before the Describe call
   clut->Begin();  // initialize some grid information
 
-  testCLUT( pIcc, clut, sigDesc, basename );
+  testCLUT( pIcc, clut, sigDesc + " table", basename );
 
 }
 
