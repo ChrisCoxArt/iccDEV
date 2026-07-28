@@ -103,6 +103,7 @@ typedef void func_predictor( const uint8_t *input, uint8_t *output, int bitDepth
 // forward declarations of predictor functions
 static func_predictor null_forward;
 static func_predictor null_reverse;
+
 static func_predictor prev_forward;
 static func_predictor prev_reverse;
 static func_predictor bytesplit_forward;
@@ -114,11 +115,19 @@ static func_predictor up_forward;
 static func_predictor up_reverse;
 static func_predictor prev2D_forward;
 static func_predictor prev2D_reverse;
+static func_predictor min3_forward;
+static func_predictor min3_reverse;
+static func_predictor avgUpLeft_forward;
+static func_predictor avgUpLeft_reverse;
 
 static func_predictor prev2Dsplit_forward;
 static func_predictor prev2Dsplit_reverse;
 static func_predictor upsplit_forward;
 static func_predictor upsplit_reverse;
+static func_predictor min3split_forward;
+static func_predictor min3split_reverse;
+static func_predictor avgUpLeftsplit_forward;
+static func_predictor avgUpLeftsplit_reverse;
 
 /******************************************************************************/
 
@@ -142,25 +151,30 @@ std::vector<predictor_desc> predictorList =
 #endif
 
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
- { "ByteSplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
- { "PrevByteSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
+ { "SplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
 
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
+ { "Min3", PREDICTOR_TYPE_2D, min3_forward, min3_reverse },
+ { "AvgUpLeft", PREDICTOR_TYPE_2D, avgUpLeft_forward, avgUpLeft_reverse },
 
- { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
  { "UpByteSplit", PREDICTOR_TYPE_2D, upsplit_forward, upsplit_reverse },
+ { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
+ { "Min3ByteSplit", PREDICTOR_TYPE_2D, min3split_forward, min3split_reverse },
+ { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, avgUpLeftsplit_forward, avgUpLeftsplit_reverse },
 
 
 // TODO - WRITE ME!
-// on old notes - pred then bytesplit usually compresses better
+// on old notes: pred then bytesplit usually compresses better
+// except on floating point data (32 bit integer diff fails)
 
-// averageUpLeft, 2D
-// upLeftMinusMed, 2D
+// Median3, 2D
 // MED, 2D
-// Min3, 2D
 // Paeth, 2D
 // minGrad, 2D
+
+// TODO - should bytesplit reorder data to planar?
 
 };
 
@@ -366,6 +380,30 @@ icFloatNumber ClipFloat( const icFloatNumber &input )
 }
 
 /******************************************************************************/
+
+// sort so y is the media
+template <typename T>
+T median3( T x, T y, T z )
+{
+#if 1
+  if (x > y)
+    std::swap(x,y);
+
+  // now y >= x
+  if (y > z) {
+    std::swap(y,z);
+
+    // now z >= y  (but we changed y, so recompare with x)
+    if (x > y)
+      std::swap(x,y);
+  }
+  return y;
+#else
+  return std::max(std::min(x, y), std::min(std::max(x, y), z));
+#endif
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t *output,
@@ -506,7 +544,6 @@ static
 void bytesplit16( const uint8_t *input, uint8_t *output, size_t count )
 {
   // rearrange bytes: assumes little endian byte order, reorganized to big endian (sort of)
-  size_t half = count/2;
   for (size_t i = 0; i < count; ++i)
     output[i] = input[2*i+1];
   for (size_t i = 0; i < count; ++i)
@@ -1042,6 +1079,354 @@ void upsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
     std::vector<uint8_t> temp( 2*half );
     byteunsplit16( input, &temp[0], half );
     up_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void min3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_forward( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = input + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = inY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint8_t minVal = std::min( upX[c], std::min( upXP[c], prevX[c] ) );
+          outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_forward( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = input16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = inY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint16_t minVal = std::min( upX[c], std::min( upXP[c], prevX[c] ) );
+          outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void min3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_reverse( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = output + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = outY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint8_t minVal = std::min( upX[c], std::min( upXP[c], prevX[c] ) );
+          outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_reverse( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = output16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = outY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint16_t minVal = std::min( upX[c], std::min( upXP[c], prevX[c] ) );
+          outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void min3split_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    min3_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    min3_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void min3split_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+   min3_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    min3_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void avgUpLeft_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_forward( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = input + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = inY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint8_t avgVal = (uint8_t)(((uint16_t)upX[c] + (uint16_t)prevX[c]) / 2);
+          outX[c] = inX[c] - avgVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_forward( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = input16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = inY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint16_t avgVal = (uint16_t)(((uint32_t)upX[c] + (uint32_t)prevX[c]) / 2);
+          outX[c] = inX[c] - avgVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void avgUpLeft_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_reverse( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = output + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = outY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint8_t avgVal = (uint8_t)(((uint16_t)upX[c] + (uint16_t)prevX[c]) / 2);
+          outX[c] = inX[c] + avgVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_reverse( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = output16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = outY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          uint16_t avgVal = (uint16_t)(((uint32_t)upX[c] + (uint32_t)prevX[c]) / 2);
+          outX[c] = inX[c] + avgVal;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void avgUpLeftsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    avgUpLeft_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    avgUpLeft_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void avgUpLeftsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+   avgUpLeft_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    avgUpLeft_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
   } // end 16 bit
 
 }
