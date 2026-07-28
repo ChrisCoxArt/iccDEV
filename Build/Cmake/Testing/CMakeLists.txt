@@ -197,6 +197,68 @@ function(iccdev_add_iccconnect_config_parser_test)
   endif()
 endfunction()
 
+function(iccdev_add_cmmsearch_init_pcc_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCmmSearchInitPccTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/cmmsearch-init-pcc.cpp"
+  )
+  target_link_libraries(iccCmmSearchInitPccTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+
+  add_dependencies(check iccCmmSearchInitPccTest)
+
+  # sRGB_D65_MAT.icc is the regression case: a tracked v5 profile carrying an
+  # 'svcn' tag that declares D65, so a PCC that fails to resolve falls back to
+  # the D50 default and a spurious adaptation is spliced in (issue #1860).
+  # sRGB_v4_ICC_preference.icc is the control: it has no 'svcn', both ends of the
+  # chain default to D50 either way, and its results must not move.
+  set(_cmmsearch_init_pcc_cases
+    "d65-svcn=${ICCDEV_TESTING_DIR}/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc"
+    "v4-no-svcn=${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+  )
+
+  foreach(_case IN LISTS _cmmsearch_init_pcc_cases)
+    string(REGEX REPLACE "=.*$" "" _case_name "${_case}")
+    string(REGEX REPLACE "^[^=]*=" "" _case_profile "${_case}")
+
+    if(WIN32)
+      add_test(
+        NAME iccdev.cmmsearch-init-pcc.${_case_name}
+        COMMAND "$<TARGET_FILE:iccCmmSearchInitPccTest>" "${_case_profile}"
+      )
+    else()
+      add_test(
+        NAME iccdev.cmmsearch-init-pcc.${_case_name}
+        COMMAND
+          "${CMAKE_COMMAND}" -E env
+          ${ICCDEV_TEST_ENV}
+          "$<TARGET_FILE:iccCmmSearchInitPccTest>"
+          "${_case_profile}"
+      )
+    endif()
+    set_tests_properties(iccdev.cmmsearch-init-pcc.${_case_name} PROPERTIES
+      WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+      TIMEOUT 120
+      LABELS "iccdev;iccprofLib;cmmsearch;pcc;regression"
+    )
+    if(WIN32)
+      set(_cmmsearch_init_pcc_windows_env_mods
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCmmSearchInitPccTest>"
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      )
+      foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+        list(APPEND _cmmsearch_init_pcc_windows_env_mods
+          "PATH=path_list_prepend:${_runtime_path}")
+      endforeach()
+      set_tests_properties(iccdev.cmmsearch-init-pcc.${_case_name} PROPERTIES
+        ENVIRONMENT_MODIFICATION "${_cmmsearch_init_pcc_windows_env_mods}"
+      )
+    endif()
+  endforeach()
+endfunction()
+
 function(iccdev_add_embedio_read8_bounds_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -888,6 +950,92 @@ function(iccdev_add_gbd_zero_pcs_test)
   endif()
 endfunction()
 
+# #1809: a multiProcessElementType tag with zero processing elements and equal input and
+# output channel counts is the identity transform -- Read()/Write()/Begin()/Apply() all
+# treat it as a defined state, and Apply() memcpy()s source to destination. Validate()
+# alone reported it at warning level, putting 79 reference profiles (148 messages, mostly
+# the PCC, ICS and mcs fixtures that author DToB3/BToD3 as identity on purpose) into the
+# warning cohort. The test pins the information-level reporting, the unchanged critical
+# error for unequal channel counts, and the runtime behaviour that justifies the split.
+function(iccdev_add_mpe_empty_identity_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMpeEmptyIdentityTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/mpe-empty-identity.cpp"
+  )
+  target_link_libraries(iccMpeEmptyIdentityTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccMpeEmptyIdentityTest)
+
+  add_test(
+    NAME iccdev.mpe-empty-identity
+    COMMAND "$<TARGET_FILE:iccMpeEmptyIdentityTest>"
+  )
+  set_tests_properties(iccdev.mpe-empty-identity PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;validation;tag;issue-1809;regression"
+  )
+  if(WIN32)
+    set(_mpe_empty_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMpeEmptyIdentityTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _mpe_empty_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.mpe-empty-identity PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_mpe_empty_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #1748: CIccPcsXform::ConnectFirst()/ConnectLast() build the PCS transforms at the two
+# outer edges of a CMM chain, and CheckPCSConnections() pushes them onto the xform list
+# like any other xform. Unlike Connect(), they left m_srcSpace/m_nSrcSamples/m_dstSpace/
+# m_nDstSamples at the CIccXform defaults, so the guard in CIccCmm::Begin() that compares
+# the last xform's output count against GetDestSamples() read 0 and rejected the chain
+# with icCmmStatBadSpaceLink. The test pins the four fields on both entry points and then
+# drives whole CMMs whose PCS edge space differs from the fixture's own PCS, checking that
+# the XYZ route agrees numerically with the Lab route. It uses a tracked fixture and no
+# LUT interpolation of any size, so it is fast.
+function(iccdev_add_pcs_edge_metadata_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccPcsEdgeMetadataTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/pcs-edge-metadata.cpp"
+  )
+  target_link_libraries(iccPcsEdgeMetadataTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccPcsEdgeMetadataTest)
+
+  add_test(
+    NAME iccdev.pcs-edge-metadata
+    COMMAND "$<TARGET_FILE:iccPcsEdgeMetadataTest>"
+  )
+  set_tests_properties(iccdev.pcs-edge-metadata PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;pcs;issue-1748;regression"
+  )
+  if(WIN32)
+    set(_pcs_edge_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccPcsEdgeMetadataTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _pcs_edge_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.pcs-edge-metadata PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_pcs_edge_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # #1808: a negative Z in an XYZNumber is legal (it arises from chromatic adaptation,
 # e.g. the custom-observer -> D50 PCC in iccV5DspObsToV4Dsp) and must validate as a
 # Warning, while a negative X or Y stays NonCompliant. The test drives
@@ -994,6 +1142,49 @@ function(iccdev_add_extended_device_colorspace_test)
     endforeach()
     set_tests_properties(iccdev.extended-device-colorspace PROPERTIES
       ENVIRONMENT_MODIFICATION "${_extdevcs_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #1843: the round-trip and PRMG evaluators accept only the four device classes that
+# carry a device<->PCS transform pair, and used to refuse every other class with
+# icCmmStatInvalidProfile -- so iccRoundTrip called a cleanly-validating abstract or
+# namedColor profile "Invalid profile", and no caller could tell a damaged profile from
+# an inapplicable one. Both now return icCmmStatUnsupportedProfileClass. The test drives
+# the CIccProfile* overloads directly, which needs no fixture and is the only way to
+# reach CIccPRMG's copy of the class test (every tool runs it after the round-trip
+# evaluation has already succeeded). Header + IccProfLib only.
+function(iccdev_add_unsupported_profile_class_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccUnsupportedProfileClassTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/unsupported-profile-class-status.cpp"
+  )
+  target_link_libraries(iccUnsupportedProfileClassTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccUnsupportedProfileClassTest)
+
+  add_test(
+    NAME iccdev.unsupported-profile-class-status
+    COMMAND "$<TARGET_FILE:iccUnsupportedProfileClassTest>"
+  )
+  set_tests_properties(iccdev.unsupported-profile-class-status PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;status;issue-1843;regression"
+  )
+  if(WIN32)
+    set(_unsupclass_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccUnsupportedProfileClassTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _unsupclass_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.unsupported-profile-class-status PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_unsupclass_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -1819,6 +2010,61 @@ function(iccdev_add_json_sparsematrix_huaf_test)
   endif()
 endfunction()
 
+# Guards the XML writer's failure policy (#1779): a single tag whose serialize
+# returned false made CIccProfileXml::ToXml abandon the ENTIRE document, so
+# iccToXml wrote no file at all where iccToJson -- which skips the offending tag
+# and keeps going -- produced one. Top-level tags and struct members are now
+# skipped with an XML comment in their place; array elements and the MPE tint
+# array stay strict, because an array position cannot be left empty in this
+# format and the JSON writer is equally strict there. The test also pins a
+# pre-existing markup defect the fix exposed: privateStruct/privateArray were
+# written self-closed while still emitting a matching end tag, which is why the
+# assertions parse the output back with libxml2 rather than only checking that a
+# document appeared. Needs IccXML (CIccProfileXml) + IccProfLib; skipped where
+# IccXML is not built.
+function(iccdev_add_xml_writer_graceful_degrade_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccXmlWriterGracefulDegradeTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/xml-writer-graceful-degrade.cpp"
+  )
+  target_compile_features(iccXmlWriterGracefulDegradeTest PRIVATE cxx_std_17)
+  target_include_directories(iccXmlWriterGracefulDegradeTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccXmlWriterGracefulDegradeTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccXmlWriterGracefulDegradeTest)
+
+  add_test(
+    NAME iccdev.xml-writer-graceful-degrade
+    COMMAND "$<TARGET_FILE:iccXmlWriterGracefulDegradeTest>"
+  )
+  set_tests_properties(iccdev.xml-writer-graceful-degrade PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;writer;issue-1779;regression"
+  )
+  if(WIN32)
+    set(_xml_degrade_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccXmlWriterGracefulDegradeTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _xml_degrade_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.xml-writer-graceful-degrade PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_xml_degrade_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # #1830: the JSON BCD version parser used atoi() per component, which accepts a
 # leading '-'; "-1" produced 0xFFFFFFFF and wrapped both the "<< 8" in
 # icJsonParseBCDVersionStr and the caller's "<< 16" (UBSan: "left shift of
@@ -1939,6 +2185,55 @@ function(iccdev_add_encoding_surround_test)
     endforeach()
     set_tests_properties(iccdev.encoding-surround-ratio-divzero PROPERTIES
       ENVIRONMENT_MODIFICATION "${_encsurround_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# CIccPRMG::GetChroma normalized an arbitrary hue angle into [0, 360) with
+# "while (h < 0.0) h += 360.0;" / "while (h >= 360.0) h -= 360.0;". Those loops do
+# not terminate once |h| is large enough that 360 falls below the float's ULP
+# (around 1e20): the addition rounds back to the original value and the condition
+# never changes. The isfinite() guard at the top of the function does not catch it
+# because such values are finite. fmod performs the same reduction exactly and in
+# one step. The test drives the public GetChroma with hues that hang the old
+# loops, so the unfixed code fails by TIMEOUT; the value checks additionally
+# confirm the reduction matches an independently computed fmod, and that the
+# NaN/infinity/L-range rejections are unchanged. IccProfLib only.
+function(iccdev_add_prmg_hue_normalization_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccPrmgHueNormalizationTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/prmg-hue-normalization.cpp"
+  )
+  target_compile_features(iccPrmgHueNormalizationTest PRIVATE cxx_std_17)
+  target_include_directories(iccPrmgHueNormalizationTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccPrmgHueNormalizationTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccPrmgHueNormalizationTest)
+
+  add_test(
+    NAME iccdev.prmg-hue-normalization
+    COMMAND "$<TARGET_FILE:iccPrmgHueNormalizationTest>"
+  )
+  set_tests_properties(iccdev.prmg-hue-normalization PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofLib;prmg;regression"
+  )
+  if(WIN32)
+    set(_prmghue_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccPrmgHueNormalizationTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _prmghue_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.prmg-hue-normalization PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_prmghue_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -2154,6 +2449,7 @@ if(WIN32)
 
   iccdev_add_iccconnect_thread_test()
   iccdev_add_iccconnect_config_parser_test()
+  iccdev_add_cmmsearch_init_pcc_test()
   iccdev_add_embedio_read8_bounds_test()
   iccdev_add_fileio_getlength_position_test()
   iccdev_add_profile_write_failure_test()
@@ -2163,6 +2459,7 @@ if(WIN32)
   iccdev_add_compression_describe_labels_test()
   iccdev_add_pawg_compression_paths_test()
   iccdev_add_json_sparsematrix_huaf_test()
+  iccdev_add_xml_writer_graceful_degrade_test()
   iccdev_add_json_bcd_version_test()
   iccdev_add_datetime_parse_test()
   iccdev_add_encoding_surround_test()
@@ -2182,9 +2479,12 @@ if(WIN32)
   iccdev_add_colorimetry_methods_test()
   iccdev_add_getvalues_nstart_test()
   iccdev_add_gbd_zero_pcs_test()
+  iccdev_add_mpe_empty_identity_test()
+  iccdev_add_pcs_edge_metadata_test()
   iccdev_add_xyz_negative_z_test()
   iccdev_add_utf8_textarray_test()
   iccdev_add_extended_device_colorspace_test()
+  iccdev_add_unsupported_profile_class_test()
   iccdev_add_dpcc_pcc_replacement_test()
   iccdev_add_iccviz_metrics_test()
   iccdev_add_iccviz_degenerate_test()
@@ -2194,6 +2494,7 @@ if(WIN32)
   iccdev_add_iccprofileplot_exitcode_test()
   iccdev_add_applytolink_invalid_arg_test()
   iccdev_add_applytolink_v4_missing_desc_test()
+  iccdev_add_prmg_hue_normalization_test()
   iccdev_add_windows_iccdevcmm_smoke_test()
 
   return()
@@ -2369,6 +2670,7 @@ set(ICCDEV_TEST_ENV
 
 iccdev_add_iccconnect_thread_test()
 iccdev_add_iccconnect_config_parser_test()
+iccdev_add_cmmsearch_init_pcc_test()
 iccdev_add_embedio_read8_bounds_test()
 iccdev_add_fileio_getlength_position_test()
 iccdev_add_profile_write_failure_test()
@@ -2378,6 +2680,7 @@ iccdev_add_ziputf8_settext_contract_test()
 iccdev_add_compression_describe_labels_test()
 iccdev_add_pawg_compression_paths_test()
 iccdev_add_json_sparsematrix_huaf_test()
+iccdev_add_xml_writer_graceful_degrade_test()
 iccdev_add_json_bcd_version_test()
 iccdev_add_datetime_parse_test()
 iccdev_add_encoding_surround_test()
@@ -2397,9 +2700,12 @@ iccdev_add_reflectance_observer_illum_range_test()
 iccdev_add_colorimetry_methods_test()
 iccdev_add_getvalues_nstart_test()
 iccdev_add_gbd_zero_pcs_test()
+iccdev_add_mpe_empty_identity_test()
+iccdev_add_pcs_edge_metadata_test()
 iccdev_add_xyz_negative_z_test()
 iccdev_add_utf8_textarray_test()
 iccdev_add_extended_device_colorspace_test()
+iccdev_add_unsupported_profile_class_test()
 iccdev_add_dpcc_pcc_replacement_test()
 iccdev_add_iccviz_metrics_test()
 iccdev_add_iccviz_degenerate_test()
@@ -2407,6 +2713,7 @@ iccdev_add_iccviz_pdf_axis_test()
 iccdev_add_iccprofileplot_clut_oob_test()
 iccdev_add_iccprofileplot_pdf_leak_test()
 iccdev_add_iccprofileplot_exitcode_test()
+iccdev_add_prmg_hue_normalization_test()
 
 function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
   if(NOT EXISTS "${SCRIPT}")
@@ -2865,6 +3172,14 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-fromcube-cli-args-regression.sh"
 )
 
+iccdev_add_script_test(
+  iccdev.issue-1843-fromcube-clut-order
+  60
+  "iccdev;tools;fromcube;clut;issue-1843;asan;regression"
+  "${ICCDEV_REPO_ROOT}"
+  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1843-fromcube-clut-order-regression.sh"
+)
+
 if(TARGET iccApplyNamedCmm AND TARGET iccDumpProfile)
   iccdev_add_script_test(
     iccdev.calculator-regressions
@@ -3045,6 +3360,25 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1810-ricc-header-signatures.sh"
 )
 
+# #1853: plain <TextData> silently dropped by the compressed-text XML readers.
+# CIccTagXmlZipUtf8Text::ParseXml and CIccTagXmlZipXml::ParseXml scanned the
+# sibling list for <HexCompressedData> and, on falling out of that loop, passed
+# the now-NULL walking pointer to the plain-text reader.  icXmlParseTextString()
+# starts with its own `while (pNode)`, so it did not crash -- it returned true
+# having read nothing, and the tag became SetText("").  Fail-open data loss:
+# iccFromXml reported success and wrote an empty tag.  Case A covers zut8, case
+# B the separate copy of the same code in zxml, and case C closes the loop
+# through iccToXml, which re-emits both in the hex form.  A HexCompressedData
+# control runs first so over-rejection or a no-zlib build is reported as a skip
+# rather than as a #1853 regression.  No sanitizer required.
+iccdev_add_script_test(
+  iccdev.issue-1853-zip-text-plaintext-regression
+  60
+  "iccdev;xml;compression;roundtrip;issue-1853;regression"
+  "${ICCDEV_REPO_ROOT}"
+  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1853-zip-text-plaintext-regression.sh"
+)
+
 # #1356: XML serializer corrupts a zero (NoData) header colour-space signature
 # on round-trip.  iccToXml wrote the literal "NULL" for a 0x00000000 data
 # colour space / PCS; iccFromXml then reparsed "NULL" to 0x4E554C4C, so the
@@ -3086,6 +3420,27 @@ iccdev_add_script_test(
   "iccdev;xml;signature;roundtrip;issue-1361;regression"
   "${ICCDEV_REPO_ROOT}"
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1361-header-sig-roundtrip-regression.sh"
+)
+
+# #1843: carries #1356/#1361 past the profile header into the tag and element
+# writers that had the same unguarded icGetSig*(0) -> "NULL" -> 0x4E554C4C hole
+# on BOTH the XML and JSON sides -- profileSequenceDescType's manufacturer/model/
+# technology, signatureType tags, and BAcs/EAcs elements.  The pseq case is what
+# made #1843 look like an iccFromCube defect: iccFromCube leaves the technology
+# as icSigUndefined, so every profile it wrote came back NonCompliant with
+# "Unknown 'NULL' = 4E554C4C".  The signatureType case is silent -- four payload
+# bytes change and the profile still validates -- so that section asserts a
+# byte-exact round trip rather than a clean validation report.  Note the two
+# earlier tests only had to cover XML: for those header fields JSON already
+# guarded the zero case, which is exactly the asymmetry the companion CodeQL
+# query keys off.  Here neither serializer guarded, so both are exercised.
+# Plain functional test -- skips cleanly if the tools/fixtures are absent.
+iccdev_add_script_test(
+  iccdev.issue-1843-zero-signature-roundtrip
+  90
+  "iccdev;xml;json;signature;roundtrip;issue-1843;regression"
+  "${ICCDEV_REPO_ROOT}"
+  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1843-zero-signature-roundtrip-regression.sh"
 )
 
 # #1355 - matrix/TRC (PCSXYZ) profiles must round-trip near-exactly. Guards the
