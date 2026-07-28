@@ -123,6 +123,10 @@ static func_predictor median3_forward;
 static func_predictor median3_reverse;
 static func_predictor MED_forward;
 static func_predictor MED_reverse;
+static func_predictor Paeth_forward;
+static func_predictor Paeth_reverse;
+static func_predictor MinGrad_forward;
+static func_predictor MinGrad_reverse;
 
 static func_predictor prev2Dsplit_forward;
 static func_predictor prev2Dsplit_reverse;
@@ -136,6 +140,10 @@ static func_predictor median3split_forward;
 static func_predictor median3split_reverse;
 static func_predictor MEDsplit_forward;
 static func_predictor MEDsplit_reverse;
+static func_predictor Paethsplit_forward;
+static func_predictor Paethsplit_reverse;
+static func_predictor MinGradsplit_forward;
+static func_predictor MinGradsplit_reverse;
 
 /******************************************************************************/
 
@@ -159,8 +167,6 @@ std::vector<predictor_desc> predictorList =
 #endif
 
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
- { "SplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
- { "PrevSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
 
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
@@ -168,24 +174,30 @@ std::vector<predictor_desc> predictorList =
  { "AvgUpLeft", PREDICTOR_TYPE_2D, avgUpLeft_forward, avgUpLeft_reverse },
  { "Median3", PREDICTOR_TYPE_2D, median3_forward, median3_reverse },
  { "MED", PREDICTOR_TYPE_2D, MED_forward, MED_reverse },
+ { "Paeth", PREDICTOR_TYPE_2D, Paeth_forward, Paeth_reverse },
+ { "MinGrad", PREDICTOR_TYPE_2D, MinGrad_forward, MinGrad_reverse },
 
+// should only be used if depth > 8
+ { "SplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
  { "UpByteSplit", PREDICTOR_TYPE_2D, upsplit_forward, upsplit_reverse },
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
  { "Min3ByteSplit", PREDICTOR_TYPE_2D, min3split_forward, min3split_reverse },
  { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, avgUpLeftsplit_forward, avgUpLeftsplit_reverse },
  { "Median3Split", PREDICTOR_TYPE_2D, median3split_forward, median3split_reverse },
  { "MEDSplit", PREDICTOR_TYPE_2D, MEDsplit_forward, MEDsplit_reverse },
+ { "PaethSplit", PREDICTOR_TYPE_2D, Paethsplit_forward, Paethsplit_reverse },
+ { "MinGradSplit", PREDICTOR_TYPE_2D, MinGradsplit_forward, MinGradsplit_reverse },
 
 
-// TODO - WRITE ME!
+
 // on old notes: pred then bytesplit usually compresses better
 // except on floating point data (32 bit integer diff fails)
 
-// Paeth, 2D
-// minGrad, 2D
-
 // TODO - should bytesplit reorder data to planar?
-// TODO - gamut specific binary encoding?
+// TODO - gamut specific binary encoding?  LZ should already do that.
+
+// TODO - 3D extension of predictors
 
 };
 
@@ -1802,6 +1814,426 @@ void MEDsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
     std::vector<uint8_t> temp( 2*half );
     byteunsplit16( input, &temp[0], half );
     MED_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void Paeth_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_forward( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = input + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = inY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int p = VX + VY - VZ;
+          int pa = std::abs(p - VX);	// y - z, horizontal gradient
+          int pb = std::abs(p - VY);	// x - z, vertical gradient
+          int pc = std::abs(p - VZ);	// x + y - 2*z, (x-z)+(y-z), sum of vert and horiz gradients
+          if (pa <= pb && pa <= pc)
+            p = VX;		// horizontal gradient is smallest
+          else if (pb <= pc)
+            p = VY;		// vertical gradient is smallest
+          else
+            p = VZ;		// diagonal gradient is smallest
+          outX[c] = inX[c] - p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_forward( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = input16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = inY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int p = VX + VY - VZ;
+          int pa = std::abs(p - VX);	// y - z, horizontal gradient
+          int pb = std::abs(p - VY);	// x - z, vertical gradient
+          int pc = std::abs(p - VZ);	// x + y - 2*z, (x-z)+(y-z), sum of vert and horiz gradients
+          if (pa <= pb && pa <= pc)
+            p = VX;		// horizontal gradient is smallest
+          else if (pb <= pc)
+            p = VY;		// vertical gradient is smallest
+          else
+            p = VZ;		// diagonal gradient is smallest
+          outX[c] = inX[c] - p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void Paeth_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_reverse( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = output + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = outY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int p = VX + VY - VZ;
+          int pa = std::abs(p - VX);	// y - z, horizontal gradient
+          int pb = std::abs(p - VY);	// x - z, vertical gradient
+          int pc = std::abs(p - VZ);	// x + y - 2*z, (x-z)+(y-z), sum of vert and horiz gradients
+          if (pa <= pb && pa <= pc)
+            p = VX;		// horizontal gradient is smallest
+          else if (pb <= pc)
+            p = VY;		// vertical gradient is smallest
+          else
+            p = VZ;		// diagonal gradient is smallest
+          outX[c] = inX[c] + p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_reverse( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = output16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = outY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int p = VX + VY - VZ;
+          int pa = std::abs(p - VX);	// y - z, horizontal gradient
+          int pb = std::abs(p - VY);	// x - z, vertical gradient
+          int pc = std::abs(p - VZ);	// x + y - 2*z, (x-z)+(y-z), sum of vert and horiz gradients
+          if (pa <= pb && pa <= pc)
+            p = VX;		// horizontal gradient is smallest
+          else if (pb <= pc)
+            p = VY;		// vertical gradient is smallest
+          else
+            p = VZ;		// diagonal gradient is smallest
+          outX[c] = inX[c] + p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void Paethsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    Paeth_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    Paeth_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void Paethsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+   Paeth_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    Paeth_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void MinGrad_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_forward( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = input + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = inY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int pa = std::abs(VY-VZ);	// horizontal gradient
+          int pb = std::abs(VX-VZ);	// vertical gradient
+          int p = (pa < pb) ? VX : VY;
+          outX[c] = inX[c] - p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_forward( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = input16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] - upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = inY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int pa = std::abs(VY-VZ);	// horizontal gradient
+          int pb = std::abs(VX-VZ);	// vertical gradient
+          int p = (pa < pb) ? VX : VY;
+          outX[c] = inX[c] - p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void MinGrad_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    // forward diff first row
+    prev_reverse( input, output, 8, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 1; y < size2; ++y) {
+      const uint8_t *inY = input + y*step2;
+      const uint8_t *upY = output + (y-1)*step2;
+      uint8_t *outY = output + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint8_t *inX = inY + x*step1;
+        const uint8_t *prevX = outY + (x-1)*step1;
+        const uint8_t *upX = upY + x*step1;
+        const uint8_t *upXP = upY + (x-1)*step1;
+        uint8_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int pa = std::abs(VY-VZ);	// horizontal gradient
+          int pb = std::abs(VX-VZ);	// vertical gradient
+          int p = (pa < pb) ? VX : VY;
+          outX[c] = inX[c] + p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // forward diff first row
+    prev_reverse( input, output, 16, channels, size1, 0, 0, step1, 0, 0 );
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 1; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*step2;
+      const uint16_t *upY = output16 + (y-1)*step2;
+      uint16_t *outY = output16 + y*step2;
+      
+      // first pixel just does up
+      for (int c = 0; c < channels; ++c) {
+          outY[c] = inY[c] + upY[c];   // overflow/underflow is intentional
+      }
+      for (size_t x = 1; x < size1; ++x) {
+        const uint16_t *inX = inY + x*step1;
+        const uint16_t *prevX = outY + (x-1)*step1;
+        const uint16_t *upX = upY + x*step1;
+        const uint16_t *upXP = upY + (x-1)*step1;
+        uint16_t *outX = outY + x*step1;
+        for (int c = 0; c < channels; ++c) {
+          int VX = prevX[c];
+          int VY = upX[c];
+          int VZ = upXP[c];
+          int pa = std::abs(VY-VZ);	// horizontal gradient
+          int pb = std::abs(VX-VZ);	// vertical gradient
+          int p = (pa < pb) ? VX : VY;
+          outX[c] = inX[c] + p;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: step1 = channels, step2 = size1*channels, step3 = size1*size2*channels
+static
+void MinGradsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+    MinGrad_forward(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    MinGrad_forward(input,&temp[0],16,channels,size1,size2,0,step1,step2,0);
+    bytesplit16( &temp[0], output, half );
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void MinGradsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t step1, size_t step2, size_t /*step3*/ )
+{
+  if (bitDepth == 8) {
+   MinGrad_reverse(input,output,8,channels,size1,size2,0,step1,step2,0);
+  }
+
+  if (bitDepth == 16) {
+    size_t half = size1*size2*channels;
+    std::vector<uint8_t> temp( 2*half );
+    byteunsplit16( input, &temp[0], half );
+    MinGrad_reverse(&temp[0],output,16,channels,size1,size2,0,step1,step2,0);
   } // end 16 bit
 
 }
