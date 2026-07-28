@@ -433,6 +433,13 @@ bool CIccTagXmlUtf8Text::ParseXml(xmlNode *pNode, std::string &parseStr)
 
 bool CIccTagXmlZipUtf8Text::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
+  // The scan below consumes pNode: it only falls out of the loop once pNode is
+  // NULL (the <HexCompressedData> match returns from inside the loop), so the
+  // plain-text fallback after it cannot reuse the walking pointer.  Keep the
+  // head of the sibling list for icXmlParseTextString(), which does its own
+  // walk and would otherwise be handed a guaranteed-NULL list.
+  xmlNode *pFirstNode = pNode;
+
   while (pNode) {
     if (pNode->type==XML_ELEMENT_NODE) {
       if (!icXmlStrCmp(pNode->name, "HexCompressedData") && pNode->children && pNode->children->content) {
@@ -452,7 +459,7 @@ bool CIccTagXmlZipUtf8Text::ParseXml(xmlNode *pNode, std::string &parseStr)
   }
 
   std::string outStr;
-  if( !icXmlParseTextString(pNode, parseStr, outStr, false) )
+  if( !icXmlParseTextString(pFirstNode, parseStr, outStr, false) )
     return false;
 
   return SetText(outStr.c_str());
@@ -460,6 +467,11 @@ bool CIccTagXmlZipUtf8Text::ParseXml(xmlNode *pNode, std::string &parseStr)
 
 bool CIccTagXmlZipXml::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
+  // Same consumed-pointer problem as CIccTagXmlZipUtf8Text::ParseXml above; see
+  // the note there.  This is a separate copy of the code rather than a shared
+  // helper, so it needed the same correction.
+  xmlNode *pFirstNode = pNode;
+
   while (pNode) {
     if (pNode->type==XML_ELEMENT_NODE) {
       if (!icXmlStrCmp(pNode->name, "HexCompressedData") && pNode->children && pNode->children->content) {
@@ -479,7 +491,7 @@ bool CIccTagXmlZipXml::ParseXml(xmlNode *pNode, std::string &parseStr)
   }
 
   std::string outStr;
-  if( !icXmlParseTextString(pNode, parseStr, outStr, false) )
+  if( !icXmlParseTextString(pFirstNode, parseStr, outStr, false) )
     return false;
 
   return SetText(outStr.c_str());
@@ -767,7 +779,17 @@ bool CIccTagXmlSignature::ToXml(std::string &xml, std::string blanks/* = ""*/)
   const size_t lineSize = 256;
   char line[lineSize];
 
-  snprintf(line, lineSize, "<Signature>%s</Signature>\n", icFixXml(fix, icGetSigStr(buf, 40, m_nSig)));
+  // A signatureType tag holds one four-character signature and zero is a legal
+  // value for it -- the technologyTag of a profile with no recorded technology is
+  // icSigUndefined, which is 0.  icGetSigStr(0) returns the literal text "NULL" as
+  // a display convention, but the inverse used by ParseXml() below,
+  // icGetSigVal("NULL"), packs the ASCII bytes into 0x4E554C4C.  Writing "NULL"
+  // here therefore silently rewrites the tag's four payload bytes on round trip,
+  // and because 0x4E554C4C is merely an unrecognised signature rather than a
+  // malformed one the validator still reports the profile as valid, so the
+  // corruption is invisible (#1843).  Emit an empty element for zero: ParseXml()
+  // passes empty content to icGetSigVal(), which returns 0.
+  snprintf(line, lineSize, "<Signature>%s</Signature>\n", m_nSig ? icFixXml(fix, icGetSigStr(buf, 40, m_nSig)) : "");
 
   xml += blanks + line;
   return true;
@@ -2619,10 +2641,21 @@ bool icProfDescToXml(std::string &xml, CIccProfileDescStruct &p, std::string bla
   snprintf(buf, bufSize, "<ProfileDesc>\n");
   xml += blanks + buf;
 
-  snprintf(buf, bufSize, "<DeviceManufacturerSignature>%s</DeviceManufacturerSignature>\n", icFixXml(fix, icGetSigStr(data, bufSize, p.m_deviceMfg)));
+  // Each profileSequenceDescType entry carries three four-character signatures,
+  // and all three are legitimately zero for a profile whose origin is unrecorded
+  // -- a technology of zero is the named value icSigUndefined.  icGetSigStr(0)
+  // returns the literal text "NULL", which is a *display* convention: the inverse
+  // icGetSigVal("NULL") packs the ASCII bytes 'N','U','L','L' into 0x4E554C4C, so
+  // a zero written here comes back as a bogus signature and the reparsed profile
+  // fails validation ("Unknown technology") even though the original was clean
+  // (#1843).  Emit an empty element for zero instead -- the reader below runs the
+  // content through icXmlStrToSig(), and icGetSigVal("") returns 0, restoring the
+  // original value.  Commit 751a0c6b (PR #1365) applied this same guard to the
+  // header signatures; the profileSequenceDesc struct was missed.
+  snprintf(buf, bufSize, "<DeviceManufacturerSignature>%s</DeviceManufacturerSignature>\n", p.m_deviceMfg ? icFixXml(fix, icGetSigStr(data, bufSize, p.m_deviceMfg)) : "");
   xml += blanks + blanks + buf;
 
-  snprintf(buf, bufSize, "<DeviceModelSignature>%s</DeviceModelSignature>\n", icFixXml(fix, icGetSigStr(data, bufSize, p.m_deviceModel)));
+  snprintf(buf, bufSize, "<DeviceModelSignature>%s</DeviceModelSignature>\n", p.m_deviceModel ? icFixXml(fix, icGetSigStr(data, bufSize, p.m_deviceModel)) : "");
   xml += blanks + blanks + buf;
 
   std::string szAttributes = icGetDeviceAttrName(p.m_attributes);
@@ -2630,7 +2663,10 @@ bool icProfDescToXml(std::string &xml, CIccProfileDescStruct &p, std::string bla
   //xml += buf;
   xml += blanks + blanks + icGetDeviceAttrName(p.m_attributes);
 
-  snprintf(buf, bufSize, "<Technology>%s</Technology>\n", icFixXml(fix, icGetSigStr(data, bufSize, p.m_technology)));
+  // Guard the zero case as above.  This is the field the round trip actually trips
+  // over in practice: iccFromCube leaves the technology as icSigUndefined, so every
+  // profile it writes used to acquire a 0x4E554C4C technology on the way back in.
+  snprintf(buf, bufSize, "<Technology>%s</Technology>\n", p.m_technology ? icFixXml(fix, icGetSigStr(data, bufSize, p.m_technology)) : "");
   xml += blanks + blanks + buf;
 
   CIccTag *pTag = p.m_deviceMfgDesc.GetTag();
@@ -5005,7 +5041,11 @@ bool CIccTagXmlStruct::ToXml(std::string &xml, std::string blanks/* = ""*/)
    }
    else {
      // print out the struct signature
-     snprintf(line, bufSize, "<privateStruct StructSignature=\"%s\"/> <MemberTags>\n", icFixXml(fix, icGetSigStr(buf,bufSize, m_sigStructType)));
+     // No "/>" here: this element is closed by the matching "</privateStruct>"
+     // emitted at the end of this function, so writing it self-closed produced a
+     // start tag with no body and an end tag with no start, i.e. malformed XML
+     // that no parser would accept back (#1779).
+     snprintf(line, bufSize, "<privateStruct StructSignature=\"%s\"> <MemberTags>\n", icFixXml(fix, icGetSigStr(buf,bufSize, m_sigStructType)));
      structName = "privateStruct";
    }
 
@@ -5026,6 +5066,10 @@ bool CIccTagXmlStruct::ToXml(std::string &xml, std::string blanks/* = ""*/)
           std::string tagName = ((pStruct!=NULL) ? pStruct->GetElemName((icSignature)i->TagInfo.sig) : "");
           if (prevTag == offsetTags.end()) {
             const icChar* tagSig = icGetTagSigTypeName(pTag->GetType());
+
+            // Start of this member's markup, kept so the skip path below can
+            // rewind the opening elements that are appended before ToXml() runs.
+            const size_t nTagStart = xml.size();
 
             if (tagName.size() && strncmp(tagName.c_str(), "PrivateSubTag", 13)) {
               snprintf(line, bufSize, "  <%s>", icFixXml(fix, tagName.c_str()));
@@ -5067,8 +5111,31 @@ bool CIccTagXmlStruct::ToXml(std::string &xml, std::string blanks/* = ""*/)
 #endif
             //convert the rest of the tag to xml
             if (!pTagXml->ToXml(xml, blanks + "    ")) {
-              printf("Unable to output sub-tag with type %s\n", icGetSigStr(buf, bufSize, i->TagInfo.sig));
-              return false;
+              // Qualified for the same reason as the profile-level message: the
+              // struct still serializes and the tool still exits 0, so the bare
+              // "Unable to output ..." wording would now overstate the outcome.
+              printf("Unable to output sub-tag with type %s - sub-tag skipped\n", icGetSigStr(buf, bufSize, i->TagInfo.sig));
+
+              // Drop just this member instead of failing the enclosing struct,
+              // which previously propagated all the way up and cost the whole
+              // document (#1779).  Struct members are addressed by name --
+              // CIccTagXmlStruct::ParseXml walks <MemberTags> and resolves each
+              // child element by its own name, with no positional count and no
+              // "every member must be present" sweep afterwards -- so an omitted
+              // member re-parses cleanly as simply absent.  This mirrors the JSON
+              // struct writer, which likewise continues past a member whose
+              // ToJson() fails (IccTagJson.cpp).
+              std::string sigFix, typeFix;
+              xml.resize(nTagStart);
+              snprintf(line, bufSize, "  <!-- sub-tag %s (type %s): unable to serialize, skipped -->\n",
+                       icFixXmlComment(sigFix, icGetSigStr(buf, bufSize, i->TagInfo.sig)),
+                       icFixXmlComment(typeFix, tagSig ? tagSig : ""));
+              xml += blanks + line;
+
+              // As at profile level, not recorded in offsetTags so that a later
+              // member at the same offset does not emit a SameAs reference to a
+              // member that was dropped.
+              continue;
             }
             snprintf(line, bufSize, "  </%s> </%s>\n", tagSig, tagName.c_str());
             xml += blanks + line;
@@ -5410,7 +5477,13 @@ bool CIccTagXmlArray::ToXml(std::string &xml, std::string blanks/* = ""*/)
   }
   else {
     // print out the struct signature
-    snprintf(line, bufSize, "<privateArray StructSignature=\"%s\"/> ", icFixXml(fix, icGetSigStr(buf, bufSize, m_sigArrayType)));
+    // Same defect as the privateStruct case above: the closing tag written at the
+    // end of this function is "</privateArray>", so the start tag must not be
+    // self-closed.  Left unfixed, every profile carrying an unregistered array
+    // signature serialized to XML that libxml2 rejects with "Opening and ending
+    // tag mismatch" -- which only became observable once the writer stopped
+    // discarding such documents wholesale (#1779).
+    snprintf(line, bufSize, "<privateArray StructSignature=\"%s\"> ", icFixXml(fix, icGetSigStr(buf, bufSize, m_sigArrayType)));
     arrayName = "privateArray";
   }
   
@@ -5433,6 +5506,19 @@ bool CIccTagXmlArray::ToXml(std::string &xml, std::string blanks/* = ""*/)
         xml += blanks + arrayBlanks + line; 				
 
         //convert the rest of the tag to xml
+        // Unlike the profile-level and struct-member loops, this one deliberately
+        // still fails the whole tag rather than skipping the bad element (#1779).
+        // Array elements are positional, and the XML array format cannot express
+        // a hole: CIccTagXmlArray::ParseXml sizes the array by counting the
+        // XML_ELEMENT_NODE children of <ArrayTags> and then rejects the profile
+        // outright if any slot is left unfilled ("Undefined Array Tag at index").
+        // Emitting only a comment would therefore silently shrink the array and
+        // renumber every later element, and a placeholder element would not
+        // re-parse.  Failing here is contained rather than fatal: the caller at
+        // profile level now skips just this one array tag and still writes the
+        // document, which is the outcome #1779 asked for.  (The JSON writer can
+        // keep the element because JSON *can* represent the hole -- it stores a
+        // null "type" placeholder -- which XML has no equivalent for here.)
         if (!pTagXml->ToXml(xml, blanks + arrayBlanks + " ")) {
           printf("Unable to output tag with type %s\n", icGetSigStr(buf, bufSize, pTag->GetType()));
           return false;
