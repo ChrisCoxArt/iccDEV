@@ -117,10 +117,8 @@ static func_predictor null_forward;
 static func_predictor null_reverse;
 static func_predictor prev_forward;
 static func_predictor prev_reverse;
-static func_predictor bytesplit_forward;
-static func_predictor bytesplit_reverse;
-static func_predictor prevsplit_forward;
-static func_predictor prevsplit_reverse;
+static func_predictor bytesplitPrev_forward;
+static func_predictor bytesplitPrev_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -147,6 +145,7 @@ static func_predictor min3D_reverse;
 // utilities
 static void bytesplit16( const uint8_t *input, uint8_t *output, size_t count );
 static void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count );
+void LogAnError(FILE *stream, const char* format, ...);
 
 /******************************************************************************/
 
@@ -159,6 +158,10 @@ void splitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels
         fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
 
     if (bitDepth == 16) {
+      if ((int)colStep != channels) {
+        LogAnError(stderr,"ERROR - split forward cannot be used on non-linear steps\n" );
+        // at least not without a lot more code and testing...
+      }
       size2 = size2 ? size2 : 1;
       size3 = size3 ? size3 : 1;
       size_t half = size1*size2*size3*channels;
@@ -177,6 +180,9 @@ void unsplitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channe
         fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
 
     if (bitDepth == 16) {
+      if ((int)colStep != channels) {
+        LogAnError(stderr,"ERROR - split reverse cannot be used on non-linear steps\n" );
+      }
       size2 = size2 ? size2 : 1;
       size3 = size3 ? size3 : 1;
       size_t half = size1*size2*size3*channels;
@@ -218,8 +224,8 @@ std::vector<predictor_desc> predictorList =
  { "MinGrad", PREDICTOR_TYPE_2D, MinGrad_forward, MinGrad_reverse },
 
 // splits should only be used if depth > 8
- { "SplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
- { "PrevSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
+ { "SplitPrev", PREDICTOR_TYPE_1D, bytesplitPrev_forward, bytesplitPrev_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
  { "UpByteSplit", PREDICTOR_TYPE_2D, splitwrap<up_forward>, unsplitwrap<up_reverse> },
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
  { "MinByteSplit", PREDICTOR_TYPE_2D, splitwrap<min_forward>, unsplitwrap<min_reverse> },
@@ -744,7 +750,7 @@ void prev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 /******************************************************************************/
 
 static
-void bytesplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+void bytesplitPrev_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
@@ -771,7 +777,7 @@ void bytesplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
 /******************************************************************************/
 
 static
-void bytesplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+void bytesplitPrev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
@@ -790,59 +796,6 @@ void bytesplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     std::vector<uint8_t> temp( 2*half );
     prev_reverse(input,&temp[0],8,channels,2*size1,0,0,colStep,0,0);
     byteunsplit16( &temp[0], output, half );
-  }
-}
-
-/******************************************************************************/
-
-static
-void prevsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t /*size2*/, size_t /*size3*/,
-                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    prev_forward(input,output,8,channels,size1,0,0,colStep,0,0);
-    return;
-  }
-
-  if (bitDepth == 16) {
-    if ((int)colStep != channels) {
-      LogAnError(stderr,"ERROR - prevsplit reverse cannot be used on non-linear steps\n" );
-      // at least not without a lot more code and testing...
-    }
-
-    // rearrange bytes: assumes little endian byte order, reorganized into big endian (sort of)
-    // NOTE - this operation cannot be done inplace
-    //          because prev is not designed to run inplace (else we could write to output)
-    size_t half = size1*channels;
-    std::vector<uint8_t> temp( 2*half );
-    prev_forward( input,&temp[0],16,channels,size1,0,0,colStep,0,0);
-    bytesplit16( &temp[0], output, half );
-  }
-}
-
-/******************************************************************************/
-
-static
-void prevsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t /*size2*/, size_t /*size3*/,
-                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    prev_reverse(input,output,8,channels,size1,0,0,colStep,0,0);
-    return;
-  }
-
-  if (bitDepth == 16) {
-    if ((int)colStep != channels) {
-      LogAnError(stderr,"ERROR - prevsplit reverse cannot be used on non-linear steps\n" );
-    }
-    // NOTE - this operation cannot be done inplace
-    //          because prev is not designed to run inplace (else we could write to input)
-    size_t half = size1*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    prev_reverse(&temp[0],output,16,channels,size1,0,0,colStep,0,0);
   }
 }
 
