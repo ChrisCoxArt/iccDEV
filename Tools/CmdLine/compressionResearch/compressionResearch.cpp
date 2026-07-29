@@ -87,6 +87,11 @@ NOTE
 Profiling: 94.8% in deflate
             3.0% in all predictors
             1.9% in FindTag/LoadTag
+            
+NEXT: test on many, many profiles, find best predictors
+
+FUTURE: test LZMA compressor
+
  */
 
 /******************************************************************************/
@@ -107,9 +112,9 @@ typedef void func_predictor( const uint8_t *input, uint8_t *output, int bitDepth
 /******************************************************************************/
 
 // forward declarations of predictor functions
+// 1D
 static func_predictor null_forward;
 static func_predictor null_reverse;
-
 static func_predictor prev_forward;
 static func_predictor prev_reverse;
 static func_predictor bytesplit_forward;
@@ -117,12 +122,13 @@ static func_predictor bytesplit_reverse;
 static func_predictor prevsplit_forward;
 static func_predictor prevsplit_reverse;
 
+// 2D
 static func_predictor up_forward;
 static func_predictor up_reverse;
 static func_predictor prev2D_forward;
 static func_predictor prev2D_reverse;
-static func_predictor min3_forward;
-static func_predictor min3_reverse;
+static func_predictor min_forward;
+static func_predictor min_reverse;
 static func_predictor avgUpLeft_forward;
 static func_predictor avgUpLeft_reverse;
 static func_predictor median3_forward;
@@ -134,22 +140,51 @@ static func_predictor Paeth_reverse;
 static func_predictor MinGrad_forward;
 static func_predictor MinGrad_reverse;
 
-static func_predictor prev2Dsplit_forward;
-static func_predictor prev2Dsplit_reverse;
-static func_predictor upsplit_forward;
-static func_predictor upsplit_reverse;
-static func_predictor min3split_forward;
-static func_predictor min3split_reverse;
-static func_predictor avgUpLeftsplit_forward;
-static func_predictor avgUpLeftsplit_reverse;
-static func_predictor median3split_forward;
-static func_predictor median3split_reverse;
-static func_predictor MEDsplit_forward;
-static func_predictor MEDsplit_reverse;
-static func_predictor Paethsplit_forward;
-static func_predictor Paethsplit_reverse;
-static func_predictor MinGradsplit_forward;
-static func_predictor MinGradsplit_reverse;
+// 3D
+static func_predictor min3D_forward;
+static func_predictor min3D_reverse;
+
+// utilities
+static void bytesplit16( const uint8_t *input, uint8_t *output, size_t count );
+static void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count );
+
+/******************************************************************************/
+
+template<func_predictor fun>
+void splitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep)
+{
+    if (bitDepth == 8)
+        fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
+
+    if (bitDepth == 16) {
+      size2 = size2 ? size2 : 1;
+      size3 = size3 ? size3 : 1;
+      size_t half = size1*size2*size3*channels;
+      std::vector<uint8_t> temp( 2*half );
+      fun(input,&temp[0],16,channels,size1,size2,size3,colStep,rowStep,planeStep);
+      bytesplit16( &temp[0], output, half );
+    }
+}
+
+template<func_predictor fun>
+void unsplitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep)
+{
+    if (bitDepth == 8)
+        fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
+
+    if (bitDepth == 16) {
+      size2 = size2 ? size2 : 1;
+      size3 = size3 ? size3 : 1;
+      size_t half = size1*size2*size3*channels;
+      std::vector<uint8_t> temp( 2*half );
+      byteunsplit16( input, &temp[0], half );
+      fun(&temp[0],output,16,channels,size1,size2,size3,colStep,rowStep,planeStep);
+    }
+}
 
 /******************************************************************************/
 
@@ -159,7 +194,6 @@ struct predictor_desc {
     func_predictor *forward;
     func_predictor *reverse;
 };
-
 
 std::vector<predictor_desc> predictorList =
 {
@@ -176,25 +210,34 @@ std::vector<predictor_desc> predictorList =
 
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
- { "Min3", PREDICTOR_TYPE_2D, min3_forward, min3_reverse },
+ { "Min", PREDICTOR_TYPE_2D, min_forward, min_reverse },
  { "AvgUpLeft", PREDICTOR_TYPE_2D, avgUpLeft_forward, avgUpLeft_reverse },
- { "Median3", PREDICTOR_TYPE_2D, median3_forward, median3_reverse },
+ { "Median", PREDICTOR_TYPE_2D, median3_forward, median3_reverse },
  { "MED", PREDICTOR_TYPE_2D, MED_forward, MED_reverse },
  { "Paeth", PREDICTOR_TYPE_2D, Paeth_forward, Paeth_reverse },
  { "MinGrad", PREDICTOR_TYPE_2D, MinGrad_forward, MinGrad_reverse },
 
-// should only be used if depth > 8
+// splits should only be used if depth > 8
  { "SplitPrev", PREDICTOR_TYPE_1D, bytesplit_forward, bytesplit_reverse },
  { "PrevSplit", PREDICTOR_TYPE_1D, prevsplit_forward, prevsplit_reverse },
- { "UpByteSplit", PREDICTOR_TYPE_2D, upsplit_forward, upsplit_reverse },
- { "Prev2DByteSplit", PREDICTOR_TYPE_2D, prev2Dsplit_forward, prev2Dsplit_reverse },
- { "Min3ByteSplit", PREDICTOR_TYPE_2D, min3split_forward, min3split_reverse },
- { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, avgUpLeftsplit_forward, avgUpLeftsplit_reverse },
- { "Median3Split", PREDICTOR_TYPE_2D, median3split_forward, median3split_reverse },
- { "MEDSplit", PREDICTOR_TYPE_2D, MEDsplit_forward, MEDsplit_reverse },
- { "PaethSplit", PREDICTOR_TYPE_2D, Paethsplit_forward, Paethsplit_reverse },
- { "MinGradSplit", PREDICTOR_TYPE_2D, MinGradsplit_forward, MinGradsplit_reverse },
+ { "UpByteSplit", PREDICTOR_TYPE_2D, splitwrap<up_forward>, unsplitwrap<up_reverse> },
+ { "Prev2DByteSplit", PREDICTOR_TYPE_2D, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
+ { "MinByteSplit", PREDICTOR_TYPE_2D, splitwrap<min_forward>, unsplitwrap<min_reverse> },
+ { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
+ { "MedianSplit", PREDICTOR_TYPE_2D, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
+ { "MEDSplit", PREDICTOR_TYPE_2D, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
+ { "PaethSplit", PREDICTOR_TYPE_2D, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
+ { "MinGradSplit", PREDICTOR_TYPE_2D, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
 
+ { "Min3D", PREDICTOR_TYPE_3D, min3D_forward, min3D_reverse },
+
+// splits should only be used if depth > 8
+ { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ 
+ 
+ 
+// TODO - 3D extension of predictors
+// Min 3 + 9(below)?  first plane uses 2D predictor  edges?  1 above + 6 below?
 
 
 // on old notes: pred then bytesplit usually compresses better
@@ -202,9 +245,6 @@ std::vector<predictor_desc> predictorList =
 
 // TODO - should bytesplit reorder data to planar?
 // TODO - gamut specific binary encoding?  LZ should already do that.
-
-// TODO - 3D extension of predictors
-
 };
 
 /******************************************************************************/
@@ -463,16 +503,16 @@ void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
     tiles *= temp;
   }
 
-  size_t pixels = dimArray[ 0 ];
+  size_t width = dimArray[ 0 ];
 
-  if (tiles * pixels != pixelCount) {
-    LogAnError(stderr,"ERROR - 1D tile and pixel counts do not match (%zu, %zu)\n", pixelCount, tiles*pixels );
+  if (tiles * width != pixelCount) {
+    LogAnError(stderr,"ERROR - 1D tile and pixel counts do not match (%zu, %zu)\n", pixelCount, tiles*width );
   }
 
-  size_t increment = pixels * (bitDepth/8) * channels;
+  size_t increment = width * (bitDepth/8) * channels;
 
   for (size_t k = 0; k < tiles; ++k) {
-    predFunc( input, output, bitDepth, channels, pixels, 0, 0, channels, 0, 0 );
+    predFunc( input, output, bitDepth, channels, width, 0, 0, channels, 0, 0 );
     input += increment;
     output += increment;
   }
@@ -1044,89 +1084,7 @@ void prev2D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
 
 // for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
-void prev2Dsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    prev2D_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    prev2D_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void prev2Dsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    prev2D_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    prev2D_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
-void upsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    up_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    up_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void upsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   up_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    up_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
-void min3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+void min_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
 {
@@ -1193,7 +1151,7 @@ void min3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 /******************************************************************************/
 
 static
-void min3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+void min_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
 {
@@ -1253,47 +1211,6 @@ void min3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
         }
       }  // end x loop
     }   // end y loop
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
-void min3split_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    min3_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    min3_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void min3split_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   min3_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    min3_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
   } // end 16 bit
 
 }
@@ -1433,47 +1350,6 @@ void avgUpLeft_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
 
 // for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
-void avgUpLeftsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    avgUpLeft_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    avgUpLeft_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void avgUpLeftsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   avgUpLeft_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    avgUpLeft_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
 void median3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
@@ -1601,47 +1477,6 @@ void median3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
         }
       }  // end x loop
     }   // end y loop
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
-void median3split_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    median3_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    median3_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void median3split_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   median3_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    median3_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
   } // end 16 bit
 
 }
@@ -1789,47 +1624,6 @@ void MED_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
         }
       }  // end x loop
     }   // end y loop
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
-void MEDsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    MED_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    MED_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void MEDsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   MED_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    MED_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
   } // end 16 bit
 
 }
@@ -2021,47 +1815,6 @@ void Paeth_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 
 // for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
-void Paethsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-    Paeth_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    Paeth_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-static
-void Paethsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
-{
-  if (bitDepth == 8) {
-   Paeth_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
-
-  if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    Paeth_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
-  } // end 16 bit
-
-}
-
-/******************************************************************************/
-
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
-static
 void MinGrad_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
@@ -2217,19 +1970,114 @@ void MinGrad_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 
 // for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
-void MinGradsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+void min3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
 {
   if (bitDepth == 8) {
-    MinGrad_forward(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
+    // 2D first plane
+    min_forward( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = input + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = inZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            outY[c] = inY[c] - belowY[c];   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = inY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::min( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
 
   if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    MinGrad_forward(input,&temp[0],16,channels,size1,size2,0,colStep,rowStep,0);
-    bytesplit16( &temp[0], output, half );
+    // 2D first plane
+    min_forward( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = input16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = inZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            outY[c] = inY[c] - belowY[c];   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = inY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::min( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
   } // end 16 bit
 
 }
@@ -2237,19 +2085,114 @@ void MinGradsplit_forward( const uint8_t *input, uint8_t *output, int bitDepth, 
 /******************************************************************************/
 
 static
-void MinGradsplit_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t size2, size_t /*size3*/,
-                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
 {
   if (bitDepth == 8) {
-   MinGrad_reverse(input,output,8,channels,size1,size2,0,colStep,rowStep,0);
-  }
+    // first plane
+    min_reverse( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = output + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = outZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            outY[c] = inY[c] + belowY[c];   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = outY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::min( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
 
   if (bitDepth == 16) {
-    size_t half = size1*size2*channels;
-    std::vector<uint8_t> temp( 2*half );
-    byteunsplit16( input, &temp[0], half );
-    MinGrad_reverse(&temp[0],output,16,channels,size1,size2,0,colStep,rowStep,0);
+    // 2D first plane
+    min_reverse( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = output16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = outZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            outY[c] = inY[c] + belowY[c];   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = outY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::min( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
   } // end 16 bit
 
 }
