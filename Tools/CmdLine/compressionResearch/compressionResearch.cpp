@@ -82,6 +82,12 @@
 #include "zlib.h"
 #endif
 
+/*
+NOTE
+Profiling: 94.8% in deflate
+            3.0% in all predictors
+            1.9% in FindTag/LoadTag
+ */
 
 /******************************************************************************/
 
