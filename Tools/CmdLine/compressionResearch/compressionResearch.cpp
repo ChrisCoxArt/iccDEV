@@ -214,6 +214,7 @@ std::vector<predictor_desc> predictorList =
 
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
 
+
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
  { "Min", PREDICTOR_TYPE_2D, min_forward, min_reverse },
@@ -241,10 +242,6 @@ std::vector<predictor_desc> predictorList =
  { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
  
  
- 
-// TODO - 3D extension of predictors
-// Min 3 + 9(below)?  first plane uses 2D predictor  edges?  1 above + 6 below?
-
 
 // on old notes: pred then bytesplit usually compresses better
 // except on floating point data (32 bit integer diff fails)
@@ -634,6 +631,8 @@ void bytesplit16( const uint8_t *input, uint8_t *output, size_t count )
   for (size_t i = 0; i < count; ++i)
     output[count+i] = input[2*i+0];
 }
+
+/******************************************************************************/
 
 static
 void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count )
@@ -1045,7 +1044,7 @@ void min_forward( const uint8_t *input, uint8_t *output, int bitDepth, int chann
     // forward diff first row
     prev_forward( input, output, 8, channels, size1, 0, 0, colStep, 0, 0 );
     
-    // vertical diff remaining rows
+    // min3 diff remaining rows
     for (size_t y = 1; y < size2; ++y) {
       const uint8_t *inY = input + y*rowStep;
       const uint8_t *upY = input + (y-1)*rowStep;
@@ -1073,7 +1072,7 @@ void min_forward( const uint8_t *input, uint8_t *output, int bitDepth, int chann
     // forward diff first row
     prev_forward( input, output, 16, channels, size1, 0, 0, colStep, 0, 0 );
     
-    // vertical diff remaining rows
+    // min3 diff remaining rows
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
     for (size_t y = 1; y < size2; ++y) {
@@ -1112,7 +1111,7 @@ void min_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
     // forward diff first row
     prev_reverse( input, output, 8, channels, size1, 0, 0, colStep, 0, 0 );
     
-    // vertical diff remaining rows
+    // min3 diff remaining rows
     for (size_t y = 1; y < size2; ++y) {
       const uint8_t *inY = input + y*rowStep;
       const uint8_t *upY = output + (y-1)*rowStep;
@@ -1140,7 +1139,7 @@ void min_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
     // forward diff first row
     prev_reverse( input, output, 16, channels, size1, 0, 0, colStep, 0, 0 );
     
-    // vertical diff remaining rows
+    // min3 diff remaining rows
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
     for (size_t y = 1; y < size2; ++y) {
@@ -1941,11 +1940,10 @@ void min3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int cha
         const uint8_t *inX = inZ + x*colStep;
         const uint8_t *belowX = belowZ + x*colStep;
         uint8_t *outX = outZ + x*colStep;
-          
         for (int c = 0; c < channels; ++c) {
           outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
         }
-      }  // end x loop
+      }  // end x loop first row
 
       // minimum remaining rows
       for (size_t y = 1; y < size2; ++y) {
@@ -1957,7 +1955,8 @@ void min3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int cha
         
         // below first pixel
         for (int c = 0; c < channels; ++c) {
-            outY[c] = inY[c] - belowY[c];   // overflow/underflow is intentional
+            auto minVal = std::min( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] - minVal;   // overflow/underflow is intentional
         }
         for (size_t x = 1; x < size1; ++x) {
           const uint8_t *inX = inY + x*colStep;
@@ -2011,7 +2010,8 @@ void min3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int cha
         
         // below first pixel
         for (int c = 0; c < channels; ++c) {
-            outY[c] = inY[c] - belowY[c];   // overflow/underflow is intentional
+            auto minVal = std::min( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] - minVal;   // overflow/underflow is intentional
         }
         for (size_t x = 1; x < size1; ++x) {
           const uint16_t *inX = inY + x*colStep;
@@ -2072,7 +2072,8 @@ void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
         
         // below first pixel
         for (int c = 0; c < channels; ++c) {
-            outY[c] = inY[c] + belowY[c];   // overflow/underflow is intentional
+            auto minVal = std::min( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] + minVal;   // overflow/underflow is intentional
         }
         for (size_t x = 1; x < size1; ++x) {
           const uint8_t *inX = inY + x*colStep;
@@ -2126,7 +2127,8 @@ void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
         
         // below first pixel
         for (int c = 0; c < channels; ++c) {
-            outY[c] = inY[c] + belowY[c];   // overflow/underflow is intentional
+            auto minVal = std::min( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] + minVal;   // overflow/underflow is intentional
         }
         for (size_t x = 1; x < size1; ++x) {
           const uint16_t *inX = inY + x*colStep;
