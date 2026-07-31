@@ -2,6 +2,7 @@
   File:     compressionResearch.cpp
 
   Contains:   Console app to test compression of profile tags
+    Output is meant to go in a spreadsheet, and may be too large to view in your terminal/console.
 
   Version:  V1
 
@@ -87,7 +88,7 @@ NOTE
 Profiling: 94.8% in deflate
             3.0% in all predictors
             1.9% in FindTag/LoadTag
-            
+
 NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
@@ -141,6 +142,8 @@ static func_predictor MinGrad_reverse;
 // 3D
 static func_predictor min3D_forward;
 static func_predictor min3D_reverse;
+static func_predictor median3D_forward;
+static func_predictor median3D_reverse;
 
 // utilities
 static void bytesplit16( const uint8_t *input, uint8_t *output, size_t count );
@@ -237,9 +240,11 @@ std::vector<predictor_desc> predictorList =
  { "MinGradSplit", PREDICTOR_TYPE_2D, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
 
  { "Min3D", PREDICTOR_TYPE_3D, min3D_forward, min3D_reverse },
+ { "Median3D", PREDICTOR_TYPE_3D, median3D_forward, median3D_reverse },
 
 // splits should only be used if depth > 8
  { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  
  
 
@@ -464,10 +469,11 @@ icFloatNumber ClipFloat( const icFloatNumber &input )
 /******************************************************************************/
 
 // sort so y is the median
+// which version is faster depends on the compiler and vectorization
 template <typename T>
 T median3( T x, T y, T z )
 {
-#if 1
+#if 0
   if (x > y)
     std::swap(x,y);
 
@@ -1327,8 +1333,8 @@ void median3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
         const uint8_t *upXP = upY + (x-1)*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-          uint8_t minVal = median3( upX[c], upXP[c], prevX[c] );
-          outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          uint8_t medVal = median3( upX[c], upXP[c], prevX[c] );
+          outX[c] = inX[c] - medVal;   // overflow/underflow is intentional
         }
       }  // end x loop
     }   // end y loop
@@ -1357,8 +1363,8 @@ void median3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
         const uint16_t *upXP = upY + (x-1)*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-          uint16_t minVal = median3( upX[c], upXP[c], prevX[c] );
-          outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          uint16_t medVal = median3( upX[c], upXP[c], prevX[c] );
+          outX[c] = inX[c] - medVal;   // overflow/underflow is intentional
         }
       }  // end x loop
     }   // end y loop
@@ -1394,8 +1400,8 @@ void median3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
         const uint8_t *upXP = upY + (x-1)*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-          uint8_t minVal = median3( upX[c], upXP[c], prevX[c] );
-          outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          uint8_t medVal = median3( upX[c], upXP[c], prevX[c] );
+          outX[c] = inX[c] + medVal;   // overflow/underflow is intentional
         }
       }  // end x loop
     }   // end y loop
@@ -1424,8 +1430,8 @@ void median3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
         const uint16_t *upXP = upY + (x-1)*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-          uint16_t minVal = median3( upX[c], upXP[c], prevX[c] );
-          outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          uint16_t medVal = median3( upX[c], upXP[c], prevX[c] );
+          outX[c] = inX[c] + medVal;   // overflow/underflow is intentional
         }
       }  // end x loop
     }   // end y loop
@@ -2153,6 +2159,307 @@ void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 }
 
 /******************************************************************************/
+
+template<typename T>
+void cmpswap(T&a, T&b) { if (b < a) { std::swap(a,b); } }
+
+template <typename T>
+inline T median7( std::initializer_list<T> input ) {
+  std::vector<T> p( input );
+
+// NOTE - Google AI got the sorting network completely wrong 19/20 tries
+//  and got the performance analysis wrong 20/20 tries.
+//  and the one that worked, was not minimal (it was a full sort)
+// NOTE - Claude got the minimal blind sorting network (13 compares) correct
+
+  std::nth_element(p.begin(), p.begin()+3, p.end());
+  return p[3];
+}
+
+template <typename T>
+inline T median( std::initializer_list<T> input ) {
+  std::vector<T> p( input );
+  size_t half = p.size() >> 1;
+  std::nth_element(p.begin(), p.begin()+half, p.end());
+  return p[half];
+}
+
+template <typename T>
+inline T median( std::vector<T> p ) {
+  size_t count = p.size();
+  size_t half = count >> 1;
+  if ((count & 1) != 0) {
+    std::nth_element(p.begin(), p.begin()+half, p.end());
+    return p[half];
+  } else {
+    std::nth_element(p.begin(), p.begin()+half, p.end());
+    auto val1 = p[half];
+    std::nth_element(p.begin(), p.begin()+half-1, p.end());
+    return (p[half-1]+val1)/2;
+  }
+}
+
+// This is used for verification, not production code
+template<typename T>
+T bruteForceMedian( std::initializer_list<T> input )
+{
+  std::vector<T> p( input );
+  size_t count = p.size();
+  size_t half = count >> 1;
+  std::sort(p.begin(),p.end());
+  if ( (count & 1) != 0 )
+    return p[ half ];
+  else
+   return (p[half-1] + p[half])/2;
+}
+
+// This is used for verification, not production code
+template<typename T>
+T bruteForceMedian( std::vector<T> p )
+{
+  size_t count = p.size();
+  size_t half = count >> 1;
+  std::sort(p.begin(),p.end());
+  if ( (count & 1) != 0 )
+    return p[ half ];
+  else
+   return (p[half-1] + p[half])/2;
+}
+
+
+// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
+static
+void median3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // 2D first plane
+    median3_forward( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = input + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop first row
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = inZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below and median first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto medVal = median3( upY[c], belowY[c], belowUpY[c] );
+            outY[c] = inY[c] - medVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = inY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto medVal = median7( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - medVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    median3_forward( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = input16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = inZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below and median first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto medVal = median3( upY[c], belowY[c], belowUpY[c] );
+            outY[c] = inY[c] - medVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = inY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto medVal = median7( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - medVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // first plane
+    median3_reverse( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = output + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = outZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below and median first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto medVal = median3( upY[c], belowY[c], belowUpY[c] );
+            outY[c] = inY[c] + medVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = outY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto medVal = median7( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + medVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    median3_reverse( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = output16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = outZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below and median first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto medVal = median3( upY[c], belowY[c], belowUpY[c] );
+            outY[c] = inY[c] + medVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = outY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto medVal = median7( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + medVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 static
@@ -2811,6 +3118,57 @@ void unitTestPredictors(void)
 #else
   for (uint32_t i = 0; i < pixelCount4; ++i) {
     input[i] = (uint16_t)((41*i) & 0xFFFF);
+  }
+#endif
+
+  // test median code
+  srandom(0x424242);
+  for (int i = 0; i < 20; ++i) {
+    const int kMaxMedianCount = 4;
+    std::vector<uint16_t> values(kMaxMedianCount);
+    for (int k = 0; k < kMaxMedianCount; ++k)
+      values[k] = random();
+    
+     auto result = median3(values[0],values[1],values[2]);
+     auto verifyMedian = bruteForceMedian( {values[0],values[1],values[2]} );
+    
+     if (result != verifyMedian) {
+       LogAnError(stderr, "ERROR - median3 failed on pass %d\n", i );
+       break;
+     }
+  }
+  
+  for (int i = 0; i < 20; ++i) {
+    const int kMaxMedianCount = 7;
+    std::vector<uint16_t> values(kMaxMedianCount);
+    for (int k = 0; k < kMaxMedianCount; ++k)
+      values[k] = random();
+    
+     auto result = median7( {values[0],values[1],values[2],values[3],values[4],values[5],values[6]} );
+     auto verifyMedian = bruteForceMedian( {values[0],values[1],values[2],values[3],values[4],values[5],values[6]} );
+    
+     if (result != verifyMedian) {
+       LogAnError(stderr, "ERROR - median7 failed on pass %d\n", i );
+       break;
+     }
+  }
+
+#if 0
+// test more sizes, but this is SLOW
+  for (int j = 2; j < 22; ++j) {
+    for (int i = 0; i < 20; ++i) {
+      std::vector<uint16_t> values(j);
+      for (int k = 0; k < j; ++k)
+        values[k] = random();
+      
+       auto result = median( values );
+       auto verifyMedian = bruteForceMedian( values );
+      
+       if (result != verifyMedian) {
+         LogAnError(stderr, "ERROR - median%d failed on pass %d\n", j, i );
+         break;
+       }
+    }
   }
 #endif
 
