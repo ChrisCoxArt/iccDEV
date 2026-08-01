@@ -160,6 +160,8 @@ static func_predictor MinGrad_reverse;
 // 3D
 static func_predictor min3D_forward;
 static func_predictor min3D_reverse;
+static func_predictor max3D_forward;
+static func_predictor max3D_reverse;
 static func_predictor median3D_forward;
 static func_predictor median3D_reverse;
 
@@ -263,12 +265,14 @@ std::vector<predictor_desc> predictorList =
 
 
  { "Min3D", PREDICTOR_TYPE_3D, min3D_forward, min3D_reverse },
+ { "Max3D", PREDICTOR_TYPE_3D, max3D_forward, max3D_reverse },
  { "Median3D", PREDICTOR_TYPE_3D, median3D_forward, median3D_reverse },
 
 // splits should only be used if depth > 8
  { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ { "Max3DSplit", PREDICTOR_TYPE_3D, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
- 
+
  
 
 // on old notes: pred then bytesplit usually compresses better
@@ -277,7 +281,7 @@ std::vector<predictor_desc> predictorList =
 // TODO - should bytesplit reorder data to planar?
 // TODO - gamut specific binary encoding?  LZ should already do that.
 
-// TODO - next2D, Max3D
+// TODO - next2D
 
 };
 
@@ -2493,6 +2497,240 @@ void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
           
           for (int c = 0; c < channels; ++c) {
             auto minVal = std::min( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
+static
+void max3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // 2D first plane
+    max_forward( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = input + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop first row
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = inZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] - minVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = inY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    max_forward( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = input16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = inZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] - minVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = inY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] - minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void max3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // first plane
+    max_reverse( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = output + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inZ + x*colStep;
+        const uint8_t *belowX = belowZ + x*colStep;
+        uint8_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *upY = outZ + (y-1)*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        const uint8_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] + minVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *prevX = outY + (x-1)*colStep;
+          const uint8_t *upX = upY + x*colStep;
+          const uint8_t *upXP = upY + (x-1)*colStep;
+          const uint8_t *belowX = belowY + x*colStep;
+          const uint8_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint8_t *belowUpX = belowUpY + x*colStep;
+          const uint8_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
+            outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    max_reverse( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = output16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+      
+      // below first row
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inZ + x*colStep;
+        const uint16_t *belowX = belowZ + x*colStep;
+        uint16_t *outX = outZ + x*colStep;
+          
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + belowX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+
+      // minimum remaining rows
+      for (size_t y = 1; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *upY = outZ + (y-1)*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        const uint16_t *belowUpY = belowZ + (y-1)*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below first pixel
+        for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upY[c], belowY[c], belowUpY[c]  } );
+            outY[c] = inY[c] + minVal;   // overflow/underflow is intentional
+        }
+        for (size_t x = 1; x < size1; ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *prevX = outY + (x-1)*colStep;
+          const uint16_t *upX = upY + x*colStep;
+          const uint16_t *upXP = upY + (x-1)*colStep;
+          const uint16_t *belowX = belowY + x*colStep;
+          const uint16_t *belowPrevX = belowY + (x-1)*colStep;
+          const uint16_t *belowUpX = belowUpY + x*colStep;
+          const uint16_t *belowUpPrevX = belowUpY + (x-1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            auto minVal = std::max( { upX[c], upXP[c], prevX[c], belowX[c], belowPrevX[c], belowUpX[c], belowUpPrevX[c]  } );
             outX[c] = inX[c] + minVal;   // overflow/underflow is intentional
           }
         }  // end x loop
