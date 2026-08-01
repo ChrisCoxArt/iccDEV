@@ -138,6 +138,8 @@ static func_predictor bytesplitPrev_reverse;
 // 2D
 static func_predictor up_forward;
 static func_predictor up_reverse;
+static func_predictor down_forward;
+static func_predictor down_reverse;
 static func_predictor prev2D_forward;
 static func_predictor prev2D_reverse;
 static func_predictor min_forward;
@@ -223,19 +225,18 @@ struct predictor_desc {
 std::vector<predictor_desc> predictorList =
 {
  { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
-
 #if 0 && !defined(NDEBUG)
 // these test the outer loops of the predictors
  { "None1", PREDICTOR_TYPE_1D, null_forward, null_reverse },
  { "None2", PREDICTOR_TYPE_2D, null_forward, null_reverse },
  { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
 #endif
-
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, next_forward, next_reverse },
 
 
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
+ { "Down", PREDICTOR_TYPE_2D, down_forward, down_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
  { "Min", PREDICTOR_TYPE_2D, min_forward, min_reverse },
  { "Max", PREDICTOR_TYPE_2D, max_forward, max_reverse },
@@ -250,6 +251,7 @@ std::vector<predictor_desc> predictorList =
  { "PrevSplit", PREDICTOR_TYPE_1D, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
  { "NextSplit", PREDICTOR_TYPE_1D, splitwrap<next_forward>, unsplitwrap<next_reverse> },
  { "UpByteSplit", PREDICTOR_TYPE_2D, splitwrap<up_forward>, unsplitwrap<up_reverse> },
+ { "DownByteSplit", PREDICTOR_TYPE_2D, splitwrap<down_forward>, unsplitwrap<down_reverse> },
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
  { "MinByteSplit", PREDICTOR_TYPE_2D, splitwrap<min_forward>, unsplitwrap<min_reverse> },
  { "MaxByteSplit", PREDICTOR_TYPE_2D, splitwrap<max_forward>, unsplitwrap<max_reverse> },
@@ -275,7 +277,7 @@ std::vector<predictor_desc> predictorList =
 // TODO - should bytesplit reorder data to planar?
 // TODO - gamut specific binary encoding?  LZ should already do that.
 
-// TODO - next, max, down, next2D
+// TODO - next2D, Max3D
 
 };
 
@@ -993,6 +995,113 @@ void up_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channe
     for (size_t y = 1; y < size2; ++y) {
       const uint16_t *inY = input16 + y*rowStep;
       const uint16_t *prevY = output16 + (y-1)*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inY + x*colStep;
+        const uint16_t *prevX = prevY + x*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
+static
+void down_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    // reverse diff last row
+    next_forward( input+(size2-1)*rowStep, output+(size2-1)*rowStep,
+                8, channels, size1, 0, 0, colStep, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (size_t y = 0; y < (size2-1); ++y) {
+      const uint8_t *inY = input + y*rowStep;
+      const uint8_t *prevY = input + (y+1)*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inY + x*colStep;
+        const uint8_t *prevX = prevY + x*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // reverse diff last row
+    
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    next_forward( (uint8_t*)(input16+(size2-1)*rowStep), (uint8_t*)(output16+(size2-1)*rowStep),
+                  16, channels, size1, 0, 0, colStep, 0, 0 );
+    
+    for (size_t y = 0; y < (size2-1); ++y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      const uint16_t *prevY = input16 + (y+1)*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      for (size_t x = 0; x < size1; ++x) {
+        const uint16_t *inX = inY + x*colStep;
+        const uint16_t *prevX = prevY + x*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void down_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    // reverse diff last row
+    next_reverse( input+(size2-1)*rowStep, output+(size2-1)*rowStep,
+                8, channels, size1, 0, 0, colStep, 0, 0 );
+    
+    // vertical diff remaining rows
+    for (int y = ((int)size2-2); y >= 0; --y) {
+      const uint8_t *inY = input + y*rowStep;
+      const uint8_t *prevY = output + (y+1)*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      for (size_t x = 0; x < size1; ++x) {
+        const uint8_t *inX = inY + x*colStep;
+        const uint8_t *prevX = prevY + x*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + prevX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // vertical diff remaining rows
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    // reverse diff last row
+    next_reverse( (uint8_t*)(input16+(size2-1)*rowStep), (uint8_t*)(output16+(size2-1)*rowStep),
+                  16, channels, size1, 0, 0, colStep, 0, 0 );
+    for (int y = ((int)size2-2); y >= 0; --y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      const uint16_t *prevY = output16 + (y+1)*rowStep;
       uint16_t *outY = output16 + y*rowStep;
       for (size_t x = 0; x < size1; ++x) {
         const uint16_t *inX = inY + x*colStep;
