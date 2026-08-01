@@ -3356,6 +3356,42 @@ void unitTestPredictors(void)
   }
 #endif
 
+  // simple compress and decompress to validate zlib
+  size_t compSize = pixelCount3*2;
+  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, 9 )) {
+    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
+  }
+  size_t fullSize = pixelCount3*2;
+  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
+    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
+  }
+  if (fullSize != pixelCount3) {
+    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
+  }
+  if (memcmp( input, verify, pixelCount3) != 0) {
+    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
+  }
+
+
+  // iterate over all predictors, 8 and 16 bit
+  for (const auto &pred : predictorList) {
+    unitTestPredictorMiddle( pred, input, output, verify, pixelCount1, testDim1, dimensionArray1 );
+    unitTestPredictorMiddle( pred, input, output, verify, pixelCount2, testDim2, dimensionArray2 );
+    unitTestPredictorMiddle( pred, input, output, verify, pixelCount3, testDim3, dimensionArray3 );
+    unitTestPredictorMiddle( pred, input, output, verify, pixelCount4, testDim4, dimensionArray4 );
+    unitTestPredictorMiddle( pred, input, output, verify, pixelCount5, testDim5, dimensionArray5 );
+  }
+#endif      // DEBUG
+
+} // end unitTestPredictors
+
+
+// sanity check!
+static
+void unitTestMedians(void)
+{
+#ifndef NDEBUG
+
   // test median code
   srandom(0x424242);
   for (int i = 0; i < 20; ++i) {
@@ -3407,35 +3443,8 @@ void unitTestPredictors(void)
   }
 #endif
 
-
-  // simple compress and decompress to validate zlib
-  size_t compSize = pixelCount3*2;
-  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, 9 )) {
-    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
-  }
-  size_t fullSize = pixelCount3*2;
-  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
-    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
-  }
-  if (fullSize != pixelCount3) {
-    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
-  }
-  if (memcmp( input, verify, pixelCount3) != 0) {
-    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
-  }
-
-
-  // iterate over all predictors, 8 and 16 bit
-  for (const auto &pred : predictorList) {
-    unitTestPredictorMiddle( pred, input, output, verify, pixelCount1, testDim1, dimensionArray1 );
-    unitTestPredictorMiddle( pred, input, output, verify, pixelCount2, testDim2, dimensionArray2 );
-    unitTestPredictorMiddle( pred, input, output, verify, pixelCount3, testDim3, dimensionArray3 );
-    unitTestPredictorMiddle( pred, input, output, verify, pixelCount4, testDim4, dimensionArray4 );
-    unitTestPredictorMiddle( pred, input, output, verify, pixelCount5, testDim5, dimensionArray5 );
-  }
 #endif      // DEBUG
-
-}
+} // end unitTestMedians
 
 /******************************************************************************/
 
@@ -3511,6 +3520,7 @@ int main(int argc, char* argv[])
   filename_list fileList = parse_arguments(argc,argv);
   
   unitTestPredictors();
+  unitTestMedians();
   
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
