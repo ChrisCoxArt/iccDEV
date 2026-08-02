@@ -9,7 +9,7 @@
 #
 ###############################################################
 
-name: "Legacy AFL filename issue 1948 strict-aliasing repro"
+name: "Issue 1948 CIccIO strict-aliasing repro"
 
 permissions:
   contents: read
