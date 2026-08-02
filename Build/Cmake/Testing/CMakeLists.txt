@@ -1976,6 +1976,50 @@ function(iccdev_add_fileio_seek_tell_test)
   endif()
 endfunction()
 
+# Guards the strict-aliasing fix in CIccIO::Write16/Write32/Write64 (#1948).
+# Those writers used to load the caller's buffer through the wide integer type,
+# which is undefined behaviour when the buffer holds floats -- as it does on
+# every WriteFloat32Float() call. Under -flto (ENABLE_LTO defaults to ON) clang
+# at -O3 dropped the caller's store, so segmented-curve breakpoints reached the
+# file as 0.0 and the resulting curve sets could not be applied. The test drives
+# CIccSegmentedCurve::Write and inspects the emitted bytes. Core IccProfLib
+# only, so no extra include dirs are needed.
+function(iccdev_add_iccio_write_float_aliasing_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccIoWriteFloatAliasingTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/iccio-write-float-aliasing.cpp"
+  )
+  target_link_libraries(iccIoWriteFloatAliasingTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccIoWriteFloatAliasingTest)
+
+  add_test(
+    NAME iccdev.iccio-write-float-aliasing
+    COMMAND
+      "$<TARGET_FILE:iccIoWriteFloatAliasingTest>"
+  )
+  set_tests_properties(iccdev.iccio-write-float-aliasing PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;fileio;curves;issue-1948;regression"
+  )
+  if(WIN32)
+    set(_iccio_aliasing_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccIoWriteFloatAliasingTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _iccio_aliasing_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.iccio-write-float-aliasing PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_iccio_aliasing_env_mods}"
+    )
+  endif()
+endfunction()
+
 function(iccdev_add_profile_write_failure_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -3191,6 +3235,7 @@ if(WIN32)
   iccdev_add_fileio_getlength_position_test()
   iccdev_add_profile_write_failure_test()
   iccdev_add_fileio_seek_tell_test()
+  iccdev_add_iccio_write_float_aliasing_test()
   iccdev_add_tagdata_zlib_roundtrip_test()
   iccdev_add_ziputf8_settext_contract_test()
   iccdev_add_compression_describe_labels_test()
@@ -3440,6 +3485,7 @@ iccdev_add_embedio_read8_bounds_test()
 iccdev_add_fileio_getlength_position_test()
 iccdev_add_profile_write_failure_test()
 iccdev_add_fileio_seek_tell_test()
+iccdev_add_iccio_write_float_aliasing_test()
 iccdev_add_tagdata_zlib_roundtrip_test()
 iccdev_add_ziputf8_settext_contract_test()
 iccdev_add_compression_describe_labels_test()
@@ -3536,6 +3582,30 @@ iccdev_add_script_test(
 set_tests_properties(iccdev.legacy-run-tests PROPERTIES
   FIXTURES_REQUIRED iccdev_profiles
 )
+
+# #1809: the corpus mixes conformant examples, profiles carrying a baselined
+# warning, and fixtures that are malformed on purpose. A sweep that only asks
+# whether iccDumpProfile exited non-zero cannot tell a deliberate rejection from a
+# regression, so the 78 negative fixtures either read as unexplained failures or,
+# if the sweep tolerates them, mask a conformant profile that has newly turned
+# critical. Testing/qa-profile-manifest.tsv records the expected verdict per
+# profile and this test enforces it. It runs after iccdev.create-profiles because
+# 133 of the 213 profiles do not exist until that fixture generates them.
+# The manifest is expressed in terms of what iccDumpProfile -v reports, so the test
+# is only meaningful where that tool was built.
+if(TARGET iccDumpProfile)
+  iccdev_add_script_test(
+    iccdev.qa-profile-manifest
+    300
+    "iccdev;qa;manifest;profiles;validation;issue-1809;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-qa-profile-manifest.sh"
+    check
+  )
+  set_tests_properties(iccdev.qa-profile-manifest PROPERTIES
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+endif()
 
 if(ICCDEV_HAS_JSON_RUNTIME_CONFIG_TOOLS AND ICCDEV_HAS_JSON_TOOLS)
   iccdev_add_script_test(
