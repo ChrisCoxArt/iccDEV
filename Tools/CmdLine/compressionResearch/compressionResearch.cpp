@@ -96,14 +96,26 @@ FUTURE: test LZMA compressor
 TODO: add switch for CLUT results only (1D results are pretty simple)
 TODO: output to file?
 
-NOTE:
-A2B -- neutral (white or black) to chromatic, always 3 channels out
-  left to right, min might be best
-  can I specialize a 3 channel operation for LAB?
+on old notes: pred then bytesplit usually compresses better
+except on floating point data (32 bit integer diff fails)
 
-B2A - darks (high ink, 255) to light (no ink, 0), always 3 channels in
-  right to left, or max might be better
-  Next, Max3
+
+NOTE:
+A2B -- neutral (white or black) to chromatic
+  always 3 channels out
+
+B2A - darks (high ink, 255) to light (no ink, 0)
+      darks (0 signal) to light (full signal) for RGB/spectral
+      always 3 channels in
+
+  increasing: left to right, min might be best
+  decreasing: right to left, max may be best
+  can I specialize a 3 channel operation for LAB?
+  can I get statistics from table to determine best approach?
+  
+  gamut - many are binary, can I compress to binary better than LZ? then call LZ?
+    or do a simple RLE?
+    need to check data compatibility before
 
  */
 
@@ -134,6 +146,8 @@ static func_predictor next_forward;
 static func_predictor next_reverse;
 static func_predictor bytesplitPrev_forward;
 static func_predictor bytesplitPrev_reverse;
+static func_predictor bytesplitChanPrev_forward;
+static func_predictor bytesplitChanPrev_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -168,6 +182,8 @@ static func_predictor median3D_reverse;
 // utilities
 static void bytesplit16( const uint8_t *input, uint8_t *output, size_t count );
 static void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count );
+static void bytesplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count );
+static void byteunsplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count );
 void LogAnError(FILE *stream, const char* format, ...);
 
 /******************************************************************************/
@@ -217,6 +233,51 @@ void unsplitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channe
 
 /******************************************************************************/
 
+template<func_predictor fun>
+void splitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep)
+{
+    if (bitDepth == 8)
+        fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
+
+    if (bitDepth == 16) {
+      if ((int)colStep != channels) {
+        LogAnError(stderr,"ERROR - split forward cannot be used on non-linear steps\n" );
+        // at least not without a lot more code and testing...
+      }
+      size2 = size2 ? size2 : 1;
+      size3 = size3 ? size3 : 1;
+      size_t half = size1*size2*size3;
+      std::vector<uint8_t> temp( 2*half*channels );
+      fun(input,&temp[0],16,channels,size1,size2,size3,colStep,rowStep,planeStep);
+      bytesplitchannels16( &temp[0], output, channels, half );
+    }
+}
+
+template<func_predictor fun>
+void unsplitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep)
+{
+    if (bitDepth == 8)
+        fun(input,output,8,channels,size1,size2,size3,colStep,rowStep,planeStep);
+
+    if (bitDepth == 16) {
+      if ((int)colStep != channels) {
+        LogAnError(stderr,"ERROR - split reverse cannot be used on non-linear steps\n" );
+      }
+      size2 = size2 ? size2 : 1;
+      size3 = size3 ? size3 : 1;
+      size_t half = size1*size2*size3;
+      std::vector<uint8_t> temp( 2*half*channels );
+      byteunsplitchannels16( input, &temp[0], channels, half );
+      fun(&temp[0],output,16,channels,size1,size2,size3,colStep,rowStep,planeStep);
+    }
+}
+
+/******************************************************************************/
+
 struct predictor_desc {
     const char *name;
     predictor_type type;
@@ -250,18 +311,31 @@ std::vector<predictor_desc> predictorList =
 
 // splits should only be used if depth > 8
  { "SplitPrev", PREDICTOR_TYPE_1D, bytesplitPrev_forward, bytesplitPrev_reverse },
+ { "SplitPrevChan", PREDICTOR_TYPE_1D, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
  { "PrevSplit", PREDICTOR_TYPE_1D, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
+ { "PrevSplitChan", PREDICTOR_TYPE_1D, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
  { "NextSplit", PREDICTOR_TYPE_1D, splitwrap<next_forward>, unsplitwrap<next_reverse> },
+ { "NextSplitChan", PREDICTOR_TYPE_1D, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
  { "UpByteSplit", PREDICTOR_TYPE_2D, splitwrap<up_forward>, unsplitwrap<up_reverse> },
+ { "UpByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<up_forward>, unsplitchannelswrap<up_reverse> },
  { "DownByteSplit", PREDICTOR_TYPE_2D, splitwrap<down_forward>, unsplitwrap<down_reverse> },
+ { "DownByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
+ { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
  { "MinByteSplit", PREDICTOR_TYPE_2D, splitwrap<min_forward>, unsplitwrap<min_reverse> },
+ { "MinByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
  { "MaxByteSplit", PREDICTOR_TYPE_2D, splitwrap<max_forward>, unsplitwrap<max_reverse> },
+ { "MaxByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<max_forward>, unsplitchannelswrap<max_reverse> },
  { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
+ { "AvgUpLeftSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<avgUpLeft_forward>, unsplitchannelswrap<avgUpLeft_reverse> },
  { "MedianSplit", PREDICTOR_TYPE_2D, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
+ { "MedianSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<median3_forward>, unsplitchannelswrap<median3_reverse> },
  { "MEDSplit", PREDICTOR_TYPE_2D, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
+ { "MEDSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<MED_forward>, unsplitchannelswrap<MED_reverse> },
  { "PaethSplit", PREDICTOR_TYPE_2D, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
+ { "PaethSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
  { "MinGradSplit", PREDICTOR_TYPE_2D, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
+ { "MinGradSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
 
 
  { "Min3D", PREDICTOR_TYPE_3D, min3D_forward, min3D_reverse },
@@ -270,15 +344,15 @@ std::vector<predictor_desc> predictorList =
 
 // splits should only be used if depth > 8
  { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ { "Min3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
  { "Max3DSplit", PREDICTOR_TYPE_3D, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
+ { "Max3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
+ { "Median3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
  
 
-// on old notes: pred then bytesplit usually compresses better
-// except on floating point data (32 bit integer diff fails)
 
-// TODO - should bytesplit reorder data to planar?
 // TODO - gamut specific binary encoding?  LZ should already do that.
 
 // TODO - next2D
@@ -683,6 +757,39 @@ void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count )
 /******************************************************************************/
 
 static
+void bytesplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count )
+{
+  // rearrange bytes: assumes little endian byte order, reorganized to big endian (sort of)
+  size_t half = channels*count;
+  for (int c = 0; c < channels; ++c) {
+    for (size_t i = 0; i < count; ++i)
+      output[c*count+i] = input[2*c + 2*i*channels +1];
+  }
+
+  for (int c = 0; c < channels; ++c) {
+    for (size_t i = 0; i < count; ++i)
+      output[half+c*count+i] = input[2*c + 2*i*channels +0];
+  }
+}
+
+/******************************************************************************/
+
+static
+void byteunsplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count )
+{
+  // rearrange bytes: assumes little endian byte order, reorganized to big endian (sort of)
+  size_t half = channels*count;
+  for (int c = 0; c < channels; ++c) {
+    for (size_t i = 0; i < count; ++i) {
+      output[2*c + 2*i*channels +0] = input[half+c*count+i];
+      output[2*c + 2*i*channels +1] = input[c*count+i];
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
 void null_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t size3,
                 size_t /*colStep*/, size_t /*rowStep*/, size_t /*planeStep*/ )
@@ -831,6 +938,60 @@ void bytesplitPrev_reverse( const uint8_t *input, uint8_t *output, int bitDepth,
     std::vector<uint8_t> temp( 2*half );
     prev_reverse(input,&temp[0],8,channels,2*size1,0,0,colStep,0,0);
     byteunsplit16( &temp[0], output, half );
+  }
+}
+
+/******************************************************************************/
+
+static
+void bytesplitChanPrev_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    prev_forward(input,output,8,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 16) {
+    if ((int)colStep != channels) {
+      LogAnError(stderr,"ERROR - bytesplit reverse cannot be used on non-linear steps\n" );
+      // at least not without a lot more code and testing...
+    }
+    // rearrange bytes: assumes little endian byte order, reorganized into big endian (sort of)
+    // NOTE - this operation cannot be done inplace
+    //          because prev is not designed to run inplace (else we could write to output)
+    //           and bytesplit/unsplit is near impossible to do inplace
+    size_t half = size1;
+    std::vector<uint8_t> temp( 2*half*channels );
+    bytesplitchannels16( input, &temp[0], channels, half );
+    prev_forward( &temp[0],output,8,channels,2*size1,0,0,colStep,0,0);
+  }
+}
+
+/******************************************************************************/
+
+static
+void bytesplitChanPrev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    prev_reverse(input,output,8,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 16) {
+    if ((int)colStep != channels) {
+      LogAnError(stderr,"ERROR - bytesplit reverse cannot be used on non-linear steps\n" );
+    }
+    // NOTE - this operation cannot be done inplace
+    //          because prev is not designed to run inplace (else we could write to input)
+    //           and bytesplit/unsplit is near impossible to do inplace
+    size_t half = size1;
+    std::vector<uint8_t> temp( 2*half*channels );
+    prev_reverse(input,&temp[0],8,channels,2*size1,0,0,colStep,0,0);
+    byteunsplitchannels16( &temp[0], output, channels, half );
   }
 }
 
@@ -3793,6 +3954,51 @@ void unitTestMedians(void)
 #endif      // DEBUG
 } // end unitTestMedians
 
+
+// sanity check!
+static
+void unitTestSplits(void)
+{
+#ifndef NDEBUG
+  const int kMaxPixelCount = 4;
+  const int kMaxChannelCount = 11;
+  const int kAllocated = kMaxPixelCount * kMaxChannelCount;
+  
+  std::vector<uint16_t> values(kAllocated);
+  std::vector<uint16_t> work(kAllocated);
+  std::vector<uint16_t> output(kAllocated);
+  for (int k = 0; k < kAllocated; ++k)
+    values[k] = random();
+
+  // test byte split code
+  srandom(0x424242);
+  for (int j = 1; j < kMaxChannelCount; ++j) {
+    for (int i = 0; i < 10; ++i) {
+      work = values;
+      bytesplitchannels16( (uint8_t*) (&work[0]), (uint8_t*) (&output[0]), j, kMaxPixelCount );
+      byteunsplitchannels16( (uint8_t*) (&output[0]), (uint8_t*) (&work[0]), j, kMaxPixelCount );
+      if (memcmp( &work[0], &values[0], kAllocated*2) != 0) {
+        LogAnError(stderr, "ERROR - bytesplitchannels16 failed on pass %d, %d\n", j, i );
+        break;
+      }
+    }
+  }
+  
+  for (int i = 0; i < 20; ++i) {
+    for (int k = 0; k < kAllocated; ++k)
+      values[k] = random();
+    work = values;
+    bytesplit16( (uint8_t*) (&work[0]), (uint8_t*) (&output[0]), kAllocated );
+    byteunsplit16( (uint8_t*) (&output[0]), (uint8_t*) (&work[0]), kAllocated );
+    if (memcmp( &work[0], &values[0], kAllocated*2) != 0) {
+      LogAnError(stderr, "ERROR - bytesplit16 failed on pass %d\n", i );
+      break;
+    }
+  }
+
+#endif      // DEBUG
+} // end unitTestSplits
+
 /******************************************************************************/
 
 static
@@ -3866,8 +4072,9 @@ int main(int argc, char* argv[])
   
   filename_list fileList = parse_arguments(argc,argv);
   
-  unitTestPredictors();
+  unitTestSplits();
   unitTestMedians();
+  unitTestPredictors();
   
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
