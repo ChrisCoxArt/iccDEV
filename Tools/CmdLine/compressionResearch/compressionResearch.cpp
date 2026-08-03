@@ -93,6 +93,7 @@ NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
 
+
 TODO: add switch for CLUT results only (1D results are pretty simple)
     and 1D only to keep accurate data
 TODO: output to file?
@@ -159,6 +160,8 @@ static func_predictor bytesplitChanPrev_forward;
 static func_predictor bytesplitChanPrev_reverse;
 static func_predictor gamutbin_forward;
 static func_predictor gamutbin_reverse;
+static func_predictor gamutbinxor_forward;
+static func_predictor gamutbinxor_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -306,6 +309,7 @@ std::vector<predictor_desc> predictorList =
  { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
 #endif
  { "GamutBinary", PREDICTOR_TYPE_1D, gamutbin_forward, gamutbin_reverse },
+ { "GamutBinaryXOR", PREDICTOR_TYPE_1D, gamutbinxor_forward, gamutbinxor_reverse },
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, next_forward, next_reverse },
 
@@ -360,7 +364,6 @@ std::vector<predictor_desc> predictorList =
  { "Max3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
- 
 
 // TODO - next2D
 
@@ -1260,6 +1263,137 @@ void gamutbin_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
       const uint16_t *in = input16 + x*colStep;
       uint16_t *out = output16 + x*colStep;
       out[0] = in[0] ? 0 : 0xffff;
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void xor_forward(uint8_t *output, int bitDepth, size_t size1, size_t colStep )
+{
+  if (bitDepth == 8) {
+    uint8_t prev = output[0];
+    for (size_t x = 1; x < size1; ++x) {
+      uint8_t *out = output + x*colStep;
+      uint8_t val = out[0];
+      out[0] = (prev ^ val);
+      prev = val;
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *output16 = (uint16_t*)output;
+    uint16_t prev = output16[0];
+    for (size_t x = 1; x < size1; ++x) {
+      uint16_t *out = output16 + x*colStep;
+      uint16_t val = out[0];
+      out[0] = (prev ^ val);
+      prev = val;
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void xor_reverse(uint8_t *output, int bitDepth, size_t size1, size_t colStep )
+{
+  if (bitDepth == 8) {
+    uint8_t prev = output[0];
+    for (size_t x = 1; x < size1; ++x) {
+      uint8_t *out = output + x*colStep;
+      prev = out[0] = (prev ^ out[0]);
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *output16 = (uint16_t*)output;
+    uint16_t prev = output16[0];
+    for (size_t x = 1; x < size1; ++x) {
+      uint16_t *out = output16 + x*colStep;
+      prev = out[0] = (prev ^ out[0]);
+    }
+  }
+}
+
+/******************************************************************************/
+
+// if gamut tag, if input is pure binary, reduce data to 0 and 1, flipping to make more zeros
+// then xor with previous to get more zeros and a few ones
+static
+void gamutbinxor_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (channels != 1 || !isbinaryForward(input,bitDepth,size1,colStep) ) {
+    null_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      out[0] = in[0] ? 0 : 0x01;
+    }
+    xor_forward(output,8,size1,colStep);
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      uint16_t *out = output16 + x*colStep;
+      out[0] = in[0] ? 0 : 0x0001;
+    }
+    xor_forward(output,16,size1,colStep);
+  }
+}
+
+/******************************************************************************/
+
+static
+void gamutbinxor_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (channels != 1 || !isbinaryReverse(input,bitDepth,size1,colStep) ) {
+    null_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+  
+  
+  if (bitDepth == 8) {
+    // copy input to output
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      out[0] = in[0];
+    }
+    // reverse xor
+    xor_reverse(output,8,size1,colStep);
+    for (size_t x = 0; x < size1; ++x) {
+      uint8_t *out = output + x*colStep;
+      out[0] = out[0] ? 0 : 0xff;
+    }
+  }
+
+  if (bitDepth == 16) {
+    // copy input to output
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      uint16_t *out = output16 + x*colStep;
+      out[0] = in[0];
+    }
+    // reverse xor
+    xor_reverse(output,16,size1,colStep);
+    for (size_t x = 0; x < size1; ++x) {
+      uint16_t *out = output16 + x*colStep;
+      out[0] = out[0] ? 0 : 0xffff;
     }
   }
 }
