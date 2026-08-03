@@ -88,6 +88,7 @@ NOTE
 Profiling: 94.8% in deflate
             3.0% in all predictors
             1.9% in FindTag/LoadTag
+            inflate only used in unit tests, not in release build.
 
 NEXT: test on many, many profiles, find best predictors
 
@@ -103,6 +104,8 @@ TODO: summary with how many times each algorithm won?
 
 NOTE - prediction algorithms are listed in increasing order of complexity
   we want to find the FIRST one with the minimum size, ignoring later ones with the same size
+  many later ones fall back to earlier ones for cases they cannot handles
+  In production, we would limit LUTs to 1D, gamt predictors to gamt tags, splits to 16 bit tables
 
 
 From old notes: pred then bytesplit usually compresses better
@@ -122,10 +125,6 @@ B2A - darks (high ink, 255) to light (no ink, 0)
   decreasing: right to left, max may be best
   can I specialize a 3 channel operation for LAB?
   can I get statistics from table to determine best approach?
-  
-  gamut - many are binary, can I compress to binary better than LZ? then call LZ?
-    or do a simple RLE?  Might make things worse.
-    need to check data compatibility before
 
  */
 
@@ -325,6 +324,8 @@ std::vector<predictor_desc> predictorList =
  { "MinGrad", PREDICTOR_TYPE_2D, MinGrad_forward, MinGrad_reverse },
 
 // splits should only be used if depth > 8
+ { "GamutBinary", PREDICTOR_TYPE_1D, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
+ { "GamutBinaryXOR", PREDICTOR_TYPE_1D, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
  { "SplitPrev", PREDICTOR_TYPE_1D, bytesplitPrev_forward, bytesplitPrev_reverse },
  { "SplitPrevChan", PREDICTOR_TYPE_1D, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
  { "PrevSplit", PREDICTOR_TYPE_1D, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
