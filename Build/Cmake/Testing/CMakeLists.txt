@@ -2708,7 +2708,7 @@ function(iccdev_add_json_fixednum_size_cap_test)
   set_tests_properties(iccdev.json-fixednum-size-cap PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
     TIMEOUT 180
-    LABELS "iccdev;json;codeql;alert-2343;regression"
+    LABELS "iccdev;json;codeql;alert-2343;regression;slow"
   )
   if(WIN32)
     set(_json_fixednum_cap_windows_env_mods
@@ -3625,7 +3625,7 @@ if(TARGET iccDumpProfile)
   iccdev_add_script_test(
     iccdev.qa-profile-manifest
     300
-    "iccdev;qa;manifest;profiles;validation;issue-1809;regression"
+    "iccdev;qa;manifest;profiles;validation;issue-1809;regression;slow"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-qa-profile-manifest.sh"
     check
@@ -3639,7 +3639,7 @@ if(ICCDEV_HAS_JSON_RUNTIME_CONFIG_TOOLS AND ICCDEV_HAS_JSON_TOOLS)
   iccdev_add_script_test(
     iccdev.tool-coverage
     300
-    "iccdev;tools;asan;regression"
+    "iccdev;tools;asan;regression;slow"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-tool-coverage-baseline.sh"
     --asan
@@ -3861,7 +3861,7 @@ if(ICCDEV_HAS_JSON_TOOLS)
   iccdev_add_script_test(
     iccdev.json-sort-regression
     300
-    "iccdev;json;sort;regression;issue-1920;asan"
+    "iccdev;json;sort;regression;issue-1920;asan;slow"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-json-sort-regression.sh"
   )
@@ -4609,7 +4609,7 @@ iccdev_add_script_test(
 iccdev_add_script_test(
   iccdev.issue-1781-applytolink-qa-matrix
   300
-  "iccdev;tools;applytolink;security;issue-1781;regression"
+  "iccdev;tools;applytolink;security;issue-1781;regression;slow"
   "${ICCDEV_REPO_ROOT}"
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1781-applytolink-qa-matrix.sh"
 )
