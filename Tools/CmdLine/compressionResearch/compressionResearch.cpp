@@ -2,7 +2,7 @@
   File:     compressionResearch.cpp
 
   Contains:   Console app to test compression of profile tags
-    Output is meant to go in a spreadsheet, and may be too large to view in your terminal/console.
+    Output is meant to go into a spreadsheet, and may be too large to view in your terminal/console.
 
   Version:  V1
 
@@ -94,18 +94,27 @@ NEXT: test on many, many profiles, find best predictors
 FUTURE: test LZMA compressor
 
 TODO: add switch for CLUT results only (1D results are pretty simple)
+    and 1D only to keep accurate data
 TODO: output to file?
+TODO: summary with how many times each algorithm won?
+    compression ratios?
 
-on old notes: pred then bytesplit usually compresses better
-except on floating point data (32 bit integer diff fails)
+
+NOTE - prediction algorithms are listed in increasing order of complexity
+  we want to find the FIRST one with the minimum size, ignoring later ones with the same size
+
+
+From old notes: pred then bytesplit usually compresses better
+    except on floating point data (32 bit integer diff fails)
+    that's why TIFF FP predictor is byte split then previous.
 
 
 NOTE:
 A2B -- neutral (white or black) to chromatic
-  always 3 channels out
+      always 3 channels out
 
 B2A - darks (high ink, 255) to light (no ink, 0)
-      darks (0 signal) to light (full signal) for RGB/spectral
+      darks (0 signal) to light (255 signal) for RGB/spectral
       always 3 channels in
 
   increasing: left to right, min might be best
@@ -114,7 +123,7 @@ B2A - darks (high ink, 255) to light (no ink, 0)
   can I get statistics from table to determine best approach?
   
   gamut - many are binary, can I compress to binary better than LZ? then call LZ?
-    or do a simple RLE?
+    or do a simple RLE?  Might make things worse.
     need to check data compatibility before
 
  */
@@ -148,6 +157,8 @@ static func_predictor bytesplitPrev_forward;
 static func_predictor bytesplitPrev_reverse;
 static func_predictor bytesplitChanPrev_forward;
 static func_predictor bytesplitChanPrev_reverse;
+static func_predictor gamutbin_forward;
+static func_predictor gamutbin_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -198,7 +209,7 @@ void splitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channels
 
     if (bitDepth == 16) {
       if ((int)colStep != channels) {
-        LogAnError(stderr,"ERROR - split forward cannot be used on non-linear steps\n" );
+        LogAnError(stderr,"ERROR - byte split forward cannot be used on non-linear steps\n" );
         // at least not without a lot more code and testing...
       }
       size2 = size2 ? size2 : 1;
@@ -220,7 +231,7 @@ void unsplitwrap(const uint8_t *input, uint8_t *output, int bitDepth, int channe
 
     if (bitDepth == 16) {
       if ((int)colStep != channels) {
-        LogAnError(stderr,"ERROR - split reverse cannot be used on non-linear steps\n" );
+        LogAnError(stderr,"ERROR - byte split reverse cannot be used on non-linear steps\n" );
       }
       size2 = size2 ? size2 : 1;
       size3 = size3 ? size3 : 1;
@@ -243,7 +254,7 @@ void splitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, int 
 
     if (bitDepth == 16) {
       if ((int)colStep != channels) {
-        LogAnError(stderr,"ERROR - split forward cannot be used on non-linear steps\n" );
+        LogAnError(stderr,"ERROR - byte split channel forward cannot be used on non-linear steps\n" );
         // at least not without a lot more code and testing...
       }
       size2 = size2 ? size2 : 1;
@@ -265,7 +276,7 @@ void unsplitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, in
 
     if (bitDepth == 16) {
       if ((int)colStep != channels) {
-        LogAnError(stderr,"ERROR - split reverse cannot be used on non-linear steps\n" );
+        LogAnError(stderr,"ERROR - byte split channel reverse cannot be used on non-linear steps\n" );
       }
       size2 = size2 ? size2 : 1;
       size3 = size3 ? size3 : 1;
@@ -294,9 +305,9 @@ std::vector<predictor_desc> predictorList =
  { "None2", PREDICTOR_TYPE_2D, null_forward, null_reverse },
  { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
 #endif
+ { "GamutBinary", PREDICTOR_TYPE_1D, gamutbin_forward, gamutbin_reverse },
  { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, next_forward, next_reverse },
-
 
  { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
  { "Down", PREDICTOR_TYPE_2D, down_forward, down_reverse },
@@ -349,11 +360,7 @@ std::vector<predictor_desc> predictorList =
  { "Max3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
-
  
-
-
-// TODO - gamut specific binary encoding?  LZ should already do that.
 
 // TODO - next2D
 
@@ -593,6 +600,75 @@ T median3( T x, T y, T z )
 #else
   return std::max(std::min(x, y), std::min(std::max(x, y), z));
 #endif
+}
+
+/******************************************************************************/
+
+template <typename T>
+inline T median7( std::initializer_list<T> input ) {
+  std::vector<T> p( input );
+
+// NOTE - LOL - Google AI got the sorting network completely wrong 19/20 tries
+//  and got the performance analysis wrong 20/20 tries.
+//  and the one that worked, was not minimal (it was a full sort)
+// NOTE - Claude got the minimal blind sorting network (13 compares) correct
+
+  std::nth_element(p.begin(), p.begin()+3, p.end());
+  return p[3];
+}
+
+/******************************************************************************/
+
+template <typename T>
+inline T median( std::initializer_list<T> input ) {
+  std::vector<T> p( input );
+  size_t half = p.size() >> 1;
+  std::nth_element(p.begin(), p.begin()+half, p.end());
+  return p[half];
+}
+
+template <typename T>
+inline T median( std::vector<T> p ) {
+  size_t count = p.size();
+  size_t half = count >> 1;
+  if ((count & 1) != 0) {
+    std::nth_element(p.begin(), p.begin()+half, p.end());
+    return p[half];
+  } else {
+    std::nth_element(p.begin(), p.begin()+half, p.end());
+    auto val1 = p[half];
+    std::nth_element(p.begin(), p.begin()+half-1, p.end());
+    return (p[half-1]+val1)/2;
+  }
+}
+
+/******************************************************************************/
+
+// This is used for verification, not production code
+template<typename T>
+T bruteForceMedian( std::initializer_list<T> input )
+{
+  std::vector<T> p( input );
+  size_t count = p.size();
+  size_t half = count >> 1;
+  std::sort(p.begin(),p.end());
+  if ( (count & 1) != 0 )
+    return p[ half ];
+  else
+   return (p[half-1] + p[half])/2;
+}
+
+// This is used for verification, not production code
+template<typename T>
+T bruteForceMedian( std::vector<T> p )
+{
+  size_t count = p.size();
+  size_t half = count >> 1;
+  std::sort(p.begin(),p.end());
+  if ( (count & 1) != 0 )
+    return p[ half ];
+  else
+   return (p[half-1] + p[half])/2;
 }
 
 /******************************************************************************/
@@ -1067,6 +1143,123 @@ void next_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
       for (int c = 0; c < channels; ++c) {
         out[c] = in[c] + next[c];   // overflow/underflow is intentional
       }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+bool isbinaryForward( const uint8_t *input, int bitDepth, size_t size1, size_t colStep )
+{
+// channels == 1
+
+  if (bitDepth == 8) {
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      if (in[0] != 0 && in[0] != 0xff)
+        return false;
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      if (in[0] != 0 && in[0] != 0xffff)
+        return false;
+    }
+  }
+
+  return true;
+}
+
+/******************************************************************************/
+
+static
+bool isbinaryReverse( const uint8_t *input, int bitDepth, size_t size1, size_t colStep )
+{
+// channels == 1
+
+  if (bitDepth == 8) {
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      if (in[0] != 0 && in[0] != 0x01)
+        return false;
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      if (in[0] != 0 && in[0] != 0x0001)
+        return false;
+    }
+  }
+
+  return true;
+}
+
+/******************************************************************************/
+
+// if gamut tag, if input is pure binary, reduce data to 0 and 1, flipping to make more zeros
+static
+void gamutbin_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (channels != 1 || !isbinaryForward(input,bitDepth,size1,colStep) ) {
+    null_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      out[0] = in[0] ? 0 : 0x01;
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      uint16_t *out = output16 + x*colStep;
+      out[0] = in[0] ? 0 : 0x0001;
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void gamutbin_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (channels != 1 || !isbinaryReverse(input,bitDepth,size1,colStep) ) {
+    null_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+  
+  if (bitDepth == 8) {
+    for (size_t x = 0; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      out[0] = in[0] ? 0 : 0xff;
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t x = 0; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      uint16_t *out = output16 + x*colStep;
+      out[0] = in[0] ? 0 : 0xffff;
     }
   }
 }
@@ -2902,73 +3095,6 @@ void max3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 }
 
 /******************************************************************************/
-
-template<typename T>
-void cmpswap(T&a, T&b) { if (b < a) { std::swap(a,b); } }
-
-template <typename T>
-inline T median7( std::initializer_list<T> input ) {
-  std::vector<T> p( input );
-
-// NOTE - Google AI got the sorting network completely wrong 19/20 tries
-//  and got the performance analysis wrong 20/20 tries.
-//  and the one that worked, was not minimal (it was a full sort)
-// NOTE - Claude got the minimal blind sorting network (13 compares) correct
-
-  std::nth_element(p.begin(), p.begin()+3, p.end());
-  return p[3];
-}
-
-template <typename T>
-inline T median( std::initializer_list<T> input ) {
-  std::vector<T> p( input );
-  size_t half = p.size() >> 1;
-  std::nth_element(p.begin(), p.begin()+half, p.end());
-  return p[half];
-}
-
-template <typename T>
-inline T median( std::vector<T> p ) {
-  size_t count = p.size();
-  size_t half = count >> 1;
-  if ((count & 1) != 0) {
-    std::nth_element(p.begin(), p.begin()+half, p.end());
-    return p[half];
-  } else {
-    std::nth_element(p.begin(), p.begin()+half, p.end());
-    auto val1 = p[half];
-    std::nth_element(p.begin(), p.begin()+half-1, p.end());
-    return (p[half-1]+val1)/2;
-  }
-}
-
-// This is used for verification, not production code
-template<typename T>
-T bruteForceMedian( std::initializer_list<T> input )
-{
-  std::vector<T> p( input );
-  size_t count = p.size();
-  size_t half = count >> 1;
-  std::sort(p.begin(),p.end());
-  if ( (count & 1) != 0 )
-    return p[ half ];
-  else
-   return (p[half-1] + p[half])/2;
-}
-
-// This is used for verification, not production code
-template<typename T>
-T bruteForceMedian( std::vector<T> p )
-{
-  size_t count = p.size();
-  size_t half = count >> 1;
-  std::sort(p.begin(),p.end());
-  if ( (count & 1) != 0 )
-    return p[ half ];
-  else
-   return (p[half-1] + p[half])/2;
-}
-
 
 // for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
