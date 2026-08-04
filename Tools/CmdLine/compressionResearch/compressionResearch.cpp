@@ -85,18 +85,19 @@
 
 /*
 NOTE
-Profiling: 94.8% in deflate
-            3.0% in all predictors
-            1.9% in FindTag/LoadTag
+Profiling: 90.1% in deflate
+            8.6% in all predictors
+            0.7% in FindTag/LoadTag
             inflate only used in unit tests, not in release build.
+Median3D is really slow, could special case.
+Could thread most of the predictors for CLUT.
+
 
 NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
 
 
-TODO: add switch for CLUT results only (1D results are pretty simple)
-    and 1D only to keep accurate data
 TODO: output to file?
 TODO: summary with how many times each algorithm won?
     compression ratios?
@@ -104,7 +105,7 @@ TODO: summary with how many times each algorithm won?
 
 NOTE - prediction algorithms are listed in increasing order of complexity
   we want to find the FIRST one with the minimum size, ignoring later ones with the same size
-  many later ones fall back to earlier ones for cases they cannot handles
+  many later ones fall back to earlier ones for cases they cannot handle
   In production, we would limit LUTs to 1D, gamt predictors to gamt tags, splits to 16 bit tables
 
 
@@ -127,6 +128,10 @@ B2A - darks (high ink, 255) to light (no ink, 0)
   can I get statistics from table to determine best approach?
 
  */
+ 
+ 
+bool gTestCLUT = true;
+bool gTest1DLUT = true;
 
 /******************************************************************************/
 
@@ -3550,6 +3555,9 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
   
   // print name of the data object and base size
   printf("%s\t%u", name.c_str(), steps*2 );
+  
+  size_t minSize = steps*4;
+  predictor_desc minPred = predictorList[0];
 
   uint32_t dimensionArray[2] = {(uint32_t)steps,0};
   
@@ -3580,12 +3588,18 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, 9 ) ) {
       LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
     }
+    
+    if (outBytes < minSize) {
+      minSize = outBytes;
+      minPred = pred;
+    }
 
     // report size
     printf("\t%zu", outBytes );
   }
 
   printf("\n"); // and finish the line of results
+  printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
 
 }
 
@@ -3598,6 +3612,9 @@ void process1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sig
 {
   const size_t bufSize = 64;
   char buf[bufSize];
+  
+  if (!gTest1DLUT)
+    return;
 
   if (!tag) {
     LogAnError(stderr, "%s: ERROR - missing data for %s\n", filename.c_str(), sigDesc.c_str() );
@@ -3762,6 +3779,9 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
   for (; i < 16; ++i) {
     dimensionArray[i] = 0;
   }
+  
+  size_t minSize = byteSize*2;
+  predictor_desc minPred = predictorList[0];
 
   // iterate over all predictors
   for (const auto &pred : predictorList) {
@@ -3790,12 +3810,18 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
     if ( !deflateBuffer( output, compressed, inSize, outBytes, 9 ) ) {
       LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
     }
+    
+    if (outBytes < minSize) {
+      minSize = outBytes;
+      minPred = pred;
+    }
 
     // report size
     printf("\t%zu", outBytes );
   }
 
   printf("\n"); // and finish the line of results
+  printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
 
 }
 
@@ -3913,6 +3939,9 @@ void process3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
 {
   const size_t bufSize = 128;
   char buf[bufSize];
+  
+  if (!gTestCLUT)
+    return;
 
   if (!tag) {
     LogAnError(stderr, "%s: Skipping %s: unable to load tag\n", basename.c_str(), sigDesc.c_str());
@@ -4267,6 +4296,8 @@ void printUsage(void)
 {
   printf("Usage: compressionResearch <args> input_profiles\n");
   printf("\t-silent         don't output any warnings or errors.\n");
+  printf("\t-clut           test only n-dimensional luts\n");
+  printf("\t-1dlut          test only 1 dimensional luts\n");
   printf("\t-V              print usage and version.\n");
   printf("\t-help           print usage and version.\n");
   printf("compressionResearch built with IccProfLib version " ICCPROFLIBVER "\n\n");
@@ -4285,6 +4316,14 @@ filename_list parse_arguments( int argc, char *argv[] )
 
     if ( (strcasecmp( argv[c], "-silent" ) == 0 ) ) {
       gRunSilent = true;
+    }
+    else if ( (strcasecmp( argv[c], "-clut" ) == 0 ) ) {
+      gTest1DLUT = false;
+      gTestCLUT = true;
+    }
+    else if ( (strcasecmp( argv[c], "-1dlut" ) == 0 ) ) {
+      gTestCLUT = false;
+      gTest1DLUT = true;
     }
     else if ( strcasecmp( argv[c], "-V" ) == 0
             || strcasecmp( argv[c], "--V" ) == 0
@@ -4332,10 +4371,12 @@ int main(int argc, char* argv[])
   }
   
   filename_list fileList = parse_arguments(argc,argv);
-  
+
+#if 0
   unitTestSplits();
   unitTestMedians();
   unitTestPredictors();
+#endif
   
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
