@@ -16,9 +16,9 @@ listed below. Maintainer-level sanitizer, Docker, and CMake policy details live 
 
 | Platform | Packages |
 |----------|----------|
-| Ubuntu | `libpng-dev libjpeg-dev libtiff-dev libxml2-dev libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev wx-common wx3.2-headers nlohmann-json3-dev cmake make ninja-build` |
-| macOS | `libpng jpeg-turbo libtiff libxml2 wxwidgets nlohmann-json` |
-| Windows | MSVC 2022 with vcpkg-managed `libpng`, `libjpeg-turbo`, `libtiff`, `libxml2`, `wxwidgets`, `nlohmann-json` |
+| Ubuntu | `libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev wx-common wx3.2-headers nlohmann-json3-dev cmake make ninja-build` |
+| macOS | `libpng jpeg-turbo libtiff libxml2 zlib wxwidgets nlohmann-json` |
+| Windows | MSVC 2022 with vcpkg-managed `libpng`, `libjpeg-turbo`, `libtiff`, `libxml2`, `zlib`, `wxwidgets`, `nlohmann-json` |
 
 Thread support is provided by the platform C/C++ runtime and CMake's
 `Threads::Threads` imported target; no separate Ubuntu package is required.
@@ -29,10 +29,16 @@ Windows examples include both `cmd.exe` and PowerShell forms where shell syntax
 differs. If CMake reports `No such preset`, fetch and switch to a branch that
 contains the matching `Build/Cmake/CMakePresets.json` update.
 
+Visual Studio presets use vcpkg through `VCPKG_ROOT`. For the Visual Studio
+Community system vcpkg layout, set `VCPKG_ROOT` to
+`C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg`, or pass
+`-DCMAKE_TOOLCHAIN_FILE=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake`
+on the configure command line.
+
 ## Ubuntu
 
 ```bash
-sudo apt install -y libpng-dev libjpeg-dev libtiff-dev libxml2-dev \
+sudo apt install -y libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev \
   libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev \
   wx-common wx3.2-headers nlohmann-json3-dev curl git make cmake \
   clang clang-tools build-essential ninja-build
@@ -46,7 +52,7 @@ cmake --build out/linux-clang -j"$(nproc)"
 ## macOS
 
 ```bash
-brew install nlohmann-json libxml2 wxwidgets libtiff libpng jpeg-turbo
+brew install nlohmann-json libxml2 zlib wxwidgets libtiff libpng jpeg-turbo
 git clone https://github.com/InternationalColorConsortium/iccDEV.git iccdev
 cd iccdev
 cmake --preset macos-xcode -S Build/Cmake -B out/macos-xcode
@@ -227,14 +233,56 @@ cmake --build out/vs2022-x64 --config Release --target check
 See [CTest tool suites](ctest.md) for the registered tests, fixtures, logs, and
 add-test process.
 
+QA flag evidence builds are enabled by `ICCDEV_ENABLE_QA_FLAGS=ON`. Convenience
+presets turn on tests, tools, zlib-backed compressed tag support
+(`ICC_USE_ZLIB=ON`), and QA evidence hooks for the common local toolchains:
+
+```bash
+cmake --preset linux-clang-qa-flags -S Build/Cmake -B out/linux-clang-qa-flags
+cmake --build out/linux-clang-qa-flags --parallel "$(nproc)"
+ctest --test-dir out/linux-clang-qa-flags -R "^iccdev\.qa-target-flags$" --output-on-failure --no-tests=error
+
+cmake --preset linux-clang-qa-sanitizers -S Build/Cmake -B out/linux-clang-qa-sanitizers
+```
+
+QA builds also enable `ICCDEV_ENABLE_STRICT_WARNINGS` by default so CMake, not
+workflow command lines, owns maintainer warning policy. The strict tier adds
+`-Wpedantic -Werror` plus compiler-specific diagnostics: GCC treats type-limit
+and attribute diagnostics as errors, while Clang treats the matching
+tautological type-limit and attribute diagnostics as errors. Pass
+`-DICCDEV_ENABLE_STRICT_WARNINGS=OFF` to collect QA evidence without promoting
+warnings to errors. GCC and Clang QA builds also add debug symbols and frame
+pointers so Release and Debug reports can be symbolized consistently.
+On ELF platforms, verify the compression dependency with `ldd TOOL_PATH |
+grep -E 'libz|zlib'`; `liblzma` is a separate LibXml2 dependency and is
+expected only for XML-linked tools.
+
+For local FlameGraph capture of the hybrid `iccApplyProfiles` path, use the
+profiling helper after building tools:
+
+```bash
+ICCDEV_TOOLS_DIR=$PWD/build/Tools ICCDEV_TESTING_DIR=$PWD/Testing ICCDEV_PROFILE_MODE=record ICCDEV_FLAMEGRAPH_DIR=/tmp/FlameGraph .github/scripts/iccdev-hybrid-applyprofiles-profile.sh
+```
+
+The helper defaults to user-space samples, DWARF call graphs, a higher sample
+frequency, and a minimum sample threshold so short or kernel-heavy captures do
+not produce misleading SVGs with large `unknown` blocks.
+
 The reusable tool-test workflow can also run opt-in all-tool profiling. Dispatch
 `ci-pr-action` with `run_tool_flamegraphs=true` to include the sanitized
 FlameGraph manifest in the job summary. Each profiled tool records status,
 sample count, unknown folded-frame count, SVG availability, and skip reason.
 On successful runs, the workflow uploads an `iccdev-developer-report-<BuildType>`
-artifact with `index.html`, CTest outputs, hybrid timing data when requested,
-and FlameGraph data/SVGs when profiling was enabled. The artifact upload uses
-the reviewed sanitized developer-report governance exception.
+artifact with `index.html`, CTest outputs, QA target-flag evidence, hybrid timing
+data when requested, and FlameGraph data/SVGs when profiling was enabled. The
+artifact upload uses the reviewed sanitized developer-report governance exception.
+
+```cmd
+set VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg
+cmake --preset vs2022-x64-qa-flags -S Build/Cmake -B out/vs2022-x64-qa-flags
+cmake --preset vs2022-clangcl-x64-qa-flags -S Build/Cmake -B out/vs2022-clangcl-x64-qa-flags
+cmake --preset mingw-x64-qa-flags -S Build/Cmake -B out/mingw-x64-qa-flags
+```
 
 ## Runtime packaging
 
@@ -254,6 +302,56 @@ installed by the `dev` component. Linux builds generate ZIP packages by default
 and add DEB or RPM packages when the corresponding local CPack backend is
 available. The `ci-latest-release` workflow runs the Linux CPack runtime-package
 smoke and uploads the `reficcmax-runtime-packages-linux` artifact.
+
+## Shared library exports
+
+`ENABLE_SHARED_LIBS` defaults to `ON`, so a default Windows build links against
+`IccProfLib2.dll`. Its exports come from CMake's `WINDOWS_EXPORT_ALL_SYMBOLS`
+rather than from `__declspec` annotations: MSVC is deliberately excluded from the
+`ICCPROFLIBDLL_EXPORTS` definition in `Build/Cmake/IccProfLib/CMakeLists.txt`.
+That arrangement dates from #764, and the same file records why hidden visibility
+is not used on GCC/Clang — `ICCPROFLIB_API` annotations are incomplete
+(~308 partial uses across 43 headers) and `IccXML` has none at all.
+
+One consequence is worth knowing before it costs a CI round (#1888):
+
+> `WINDOWS_EXPORT_ALL_SYMBOLS` auto-exports **functions**. Exported global
+> **variables** still require explicit `dllexport`/`dllimport`, which IccProfLib
+> does not carry. Referencing one from outside the library fails to link on
+> Windows shared builds with `LNK2019`/`LNK1120`, while every function in the
+> same header links normally.
+
+Linux and macOS have no import-library model and are unaffected, so this never
+appears in a local pre-flight on those platforms.
+
+Affected symbols are `g_pIccMatrixSolver` and `g_pIccMatrixInverter`
+(`IccSolve.h`), and `icD50XYZ`, `icD50XYZxx` and the four `icMsgValidate*`
+message prefixes (`IccUtil.h`). Each declaration carries a note. `IccUtil.h` also
+declared `icInfo` until #1897, but that one had no definition anywhere in the tree
+and so failed to link on every platform — a dangling declaration rather than an
+export problem. It is gone; construct a `CIccInfo` where one is needed. The
+`iccdev.proflib-exported-global-definitions` CTest now checks every
+`ICCPROFLIB_API extern` declaration in these headers against the built library's
+symbol table, so a declaration added without a definition fails CI rather than
+reaching a consumer.
+
+Existing consumers handle it in one of two ways:
+
+- **Tools** link `IccProfLib2-static` on Windows shared builds — see
+  `Build/Cmake/Tools/{IccDumpProfile,IccProfilePlot,wxProfileDump}/CMakeLists.txt`.
+  Regression executables get the same fallback through
+  `${ICCDEV_TEST_LIB_ICCPROFLIB}`.
+- **Consumers that also link `IccXML`/`IccJson`** cannot use that fallback, since
+  those libraries link `IccProfLib` `PUBLIC` and the static copy would load the
+  library twice in one process. They avoid the symbol and use literal values.
+
+Prefer the setter functions where they exist: `IccSetMatrixSolver()` and
+`IccSetMatrixInverter()` are functions, so they link normally and are the
+supported way to install a custom solver against the DLL.
+
+See `.github/ci/regression/README.md` for the test-side rules and
+`iccdev.proflib-exported-data-linkage`, which pins both the linkage and the
+literal values that dependent tests hard-code.
 
 ## Instrumentation Builds
 

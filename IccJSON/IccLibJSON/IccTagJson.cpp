@@ -693,10 +693,12 @@ bool CIccTagJsonSpectralViewingConditions::ToJson(IccJson &j)
       obs["Reserved"] = (int)m_reserved2;
     IccJson data = IccJson::array();
     icUInt32Number nTotal = (icUInt32Number)m_observerRange.steps * 3;
+    // Sample count is known before the walk, so size the backing vector once.
+    data.get_ref<IccJson::array_t &>().reserve(nTotal);
     for (icUInt32Number i = 0; i < nTotal; i++)
       data.push_back((double)m_observer[i]);
-    obs["data"] = data;
-    j["ObserverFuncs"] = obs;
+    obs["data"] = std::move(data);
+    j["ObserverFuncs"] = std::move(obs);
   }
 
   j["StdIlluminant"]    = info.GetIlluminantName(m_stdIlluminant);
@@ -710,10 +712,11 @@ bool CIccTagJsonSpectralViewingConditions::ToJson(IccJson &j)
     if (m_reserved3)
       illum["Reserved"] = (int)m_reserved3;
     IccJson data = IccJson::array();
+    data.get_ref<IccJson::array_t &>().reserve(m_illuminantRange.steps);
     for (int i = 0; i < (int)m_illuminantRange.steps; i++)
       data.push_back((double)m_illuminant[i]);
-    illum["data"] = data;
-    j["IlluminantSPD"] = illum;
+    illum["data"] = std::move(data);
+    j["IlluminantSPD"] = std::move(illum);
   }
 
   j["SurroundXYZ"] = IccJson::array({ (double)m_surroundXYZ.X,
@@ -872,13 +875,14 @@ bool CIccTagJsonNamedColor2::ToJson(IccJson &j)
       c["name"] = icJsonFixedAsciiString(pColor->rootName, sizeof(pColor->rootName));
       c["pcsCoords"] = IccJson::array({ pColor->pcsCoords[0], pColor->pcsCoords[1], pColor->pcsCoords[2] });
       IccJson dev = IccJson::array();
+      dev.get_ref<IccJson::array_t &>().reserve(m_nDeviceCoords);
       for (icUInt32Number d = 0; d < m_nDeviceCoords; d++)
         dev.push_back(icJsonDeviceCoordToU16(pColor->deviceCoords[d]));
-      c["deviceCoords"] = dev;
-      colors.push_back(c);
+      c["deviceCoords"] = std::move(dev);
+      colors.push_back(std::move(c));
     }
   }
-  j["colors"] = colors;
+  j["colors"] = std::move(colors);
   return true;
 }
 
@@ -1100,18 +1104,21 @@ bool CIccTagJsonSparseMatrixArray::ToJson(IccJson &j)
 
       icUInt16Number *cols = mtx.GetColumnsForRow(r);
       icFloatNumber  *data = (icFloatNumber*)mtx.GetData()->getPtr(mtx.GetRowOffset(r));
+      // The stored column count for this row bounds both walks.
+      jIdx.get_ref<IccJson::array_t &>().reserve(n);
+      jData.get_ref<IccJson::array_t &>().reserve(n);
       for (int k = 0; k < n; k++) {
         jIdx.push_back(cols[k]);
         jData.push_back(data[k]);
       }
-      jRow["colIndices"] = jIdx;
-      jRow["colData"]    = jData;
-      jRows.push_back(jRow);
+      jRow["colIndices"] = std::move(jIdx);
+      jRow["colData"]    = std::move(jData);
+      jRows.push_back(std::move(jRow));
     }
-    jMtx["sparseRows"] = jRows;
-    matrices.push_back(jMtx);
+    jMtx["sparseRows"] = std::move(jRows);
+    matrices.push_back(std::move(jMtx));
   }
-  j["matrices"] = matrices;
+  j["matrices"] = std::move(matrices);
   return true;
 }
 
@@ -1256,10 +1263,25 @@ const char* CIccTagJsonFixedNum<T, Tsig>::GetClassName() const
 template <class T, icTagTypeSignature Tsig>
 bool CIccTagJsonFixedNum<T, Tsig>::ToJson(IccJson &j)
 {
+  // CWE-400/CWE-834: m_nSize is derived from the tag byte size in
+  // CIccTagFixedNum::Read() and m_Num is allocated to match; assert the same explicit
+  // upper limit the CIccTagJsonNum and CIccTagJsonFloatNum siblings below already use,
+  // and that the XML mirror CIccTagXmlFixedNum::ToXml applies, so a corrupted count
+  // can't drive an unbounded serialization walk. This was the only m_nSize-driven walk
+  // in the JSON writer left without a cap. Assert it before the reserve() as well as
+  // the loop: reserve() commits m_nSize json nodes in one allocation, and each node is
+  // wider than the 4-byte fixed-point value it carries, so that is the larger cost.
+  // Returning false skips just this tag -- CIccProfileJson::ToJson continues past a
+  // failed tag rather than discarding the document.
+  const icUInt32Number nMaxNumValues = 0xffffff;
+  if (this->m_nSize > nMaxNumValues)
+    return false;
+
   IccJson arr = IccJson::array();
+  arr.get_ref<IccJson::array_t &>().reserve(this->m_nSize);
   for (icUInt32Number i = 0; i < this->m_nSize; i++)
     arr.push_back(icFtoD(this->m_Num[i]));
-  j["values"] = arr;
+  j["values"] = std::move(arr);
   return true;
 }
 
@@ -1306,9 +1328,10 @@ bool CIccTagJsonNum<T, A, Tsig>::ToJson(IccJson &j)
   const icUInt32Number nMaxNumValues = 0xffffff;
   if (this->m_nSize > nMaxNumValues)
     return false;
+  arr.get_ref<IccJson::array_t &>().reserve(this->m_nSize);
   for (icUInt32Number i = 0; i < this->m_nSize; i++)
     arr.push_back(this->m_Num[i]);
-  j["values"] = arr;
+  j["values"] = std::move(arr);
   return true;
 }
 
@@ -1356,9 +1379,10 @@ bool CIccTagJsonFloatNum<T, A, Tsig>::ToJson(IccJson &j)
   const icUInt32Number nMaxNumValues = 0xffffff;
   if (this->m_nSize > nMaxNumValues)
     return false;
+  arr.get_ref<IccJson::array_t &>().reserve(this->m_nSize);
   for (icUInt32Number i = 0; i < this->m_nSize && i < nMaxNumValues; i++)
     arr.push_back((double)this->m_Num[i]);
-  j["values"] = arr;
+  j["values"] = std::move(arr);
   return true;
 }
 
@@ -1821,6 +1845,7 @@ bool CIccTagJsonCurve::ToJson(IccJson &j, icConvertType nType)
     } else {
       j["curveType"] = "table";
       IccJson arr = IccJson::array();
+      arr.get_ref<IccJson::array_t &>().reserve(m_nSize);
       for (icUInt32Number i = 0; i < m_nSize; i++) {
         switch (nType) {
           case icConvert8Bit:
@@ -1836,7 +1861,7 @@ bool CIccTagJsonCurve::ToJson(IccJson &j, icConvertType nType)
         j["precision"] = 1;
       else if (nType == icConvert16Bit || nType == icConvertVariable)
         j["precision"] = 2;
-      j["table"] = arr;
+      j["table"] = std::move(arr);
     }
   }
   return true;
@@ -2522,6 +2547,15 @@ bool CIccTagJsonMultiProcessElement::ParseJson(const IccJson &j, std::string &pa
   int nIn = 0, nOut = 0;
   jGetValue(j, "inputChannels",  nIn);
   jGetValue(j, "outputChannels", nOut);
+
+  // The tag-level counts were stored with no bound at all, so the narrowing
+  // cast below turned "outputChannels": 360200 into 32520 and the tag was
+  // built at that size (#1901). Mirrors the XML reader in
+  // CIccTagXmlMultiProcessElement::ParseXml.
+  if (!icJsonValidChannels(nIn, nOut)) {
+    parseStr += "Invalid inputChannels or outputChannels in multiProcessElementType\n";
+    return false;
+  }
   m_nInputChannels  = (icUInt16Number)nIn;
   m_nOutputChannels = (icUInt16Number)nOut;
 

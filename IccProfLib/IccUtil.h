@@ -133,6 +133,8 @@ ICCPROFLIB_API icFloatNumber icU16toF(icUInt16Number num);
 ICCPROFLIB_API icUInt8Number icABtoU8(icFloatNumber num);
 ICCPROFLIB_API icFloatNumber icU8toAB(icUInt8Number num);
 
+// Exported DATA: not linkable from outside the library on Windows shared
+// builds. See the note beside icMsgValidateWarning below and #1888.
 ICCPROFLIB_API extern icFloatNumber icD50XYZ[3];
 ICCPROFLIB_API extern icFloatNumber icD50XYZxx[3];
 
@@ -197,6 +199,18 @@ bool ICCPROFLIB_API icSameSpectralRange(const icSpectralRange &rng1, const icSpe
 
 ICCPROFLIB_API icUInt8Number icGetStorageTypeBytes(icUInt16Number nStorageType);
 
+// Exported DATA, not functions. On a Windows shared build these do not link
+// from outside the library: exports come from WINDOWS_EXPORT_ALL_SYMBOLS (see
+// Build/Cmake/IccProfLib/CMakeLists.txt and #764), which covers functions but
+// not global data, and IccProfLib carries no dllexport/dllimport annotation on
+// its variables. Referencing one from a tool or test gives LNK2019/LNK1120 on
+// MSVC while every function beside it links normally; Linux and macOS are
+// unaffected, so this does not show up in a local pre-flight. See #1888.
+// Tools work around it by linking IccProfLib2-static on Windows shared builds;
+// tests use ${ICCDEV_TEST_LIB_ICCPROFLIB}, or assert on literal values when
+// they also link IccXML. The literals are pinned by
+// .github/ci/regression/proflib-exported-data-linkage.cpp -- update it if these
+// strings change.
 ICCPROFLIB_API extern const char *icMsgValidateWarning;
 ICCPROFLIB_API extern const char *icMsgValidateNonCompliant;
 ICCPROFLIB_API extern const char *icMsgValidateCriticalError;
@@ -426,7 +440,32 @@ public:
 
 
 
-extern ICCPROFLIB_API CIccInfo icInfo;
+// REMOVED (#1897): `extern ICCPROFLIB_API CIccInfo icInfo;` used to sit here.
+// It was declared in the initial 2015 import and never defined -- in any build,
+// on any platform. Construct a CIccInfo where one is needed; every method that
+// would have been reached through the global is a non-static member, so a local
+// instance does the same job. Three reasons it is gone rather than defined:
+//
+//   1. Nothing could ever have used it. Referencing it failed at link time
+//      everywhere, so removing the declaration turns a link error into a
+//      compile error -- no code that builds today stops building.
+//   2. A consumer could not have supplied the definition either. On a Windows
+//      shared build ICCPROFLIB_API expands to __declspec(dllimport) on the
+//      consuming side, and dllimport data cannot be defined locally.
+//   3. Defining it would have been worse than removing it. CIccInfo::Get*Name()
+//      return pointers into the per-instance m_szStr/m_szSigStr scratch
+//      buffers, so one process-wide instance would hand every caller the same
+//      128-byte buffer -- unsafe across threads, and even single-threaded the
+//      next call from anywhere invalidates the pointer the last one returned.
+//      The constructor also heap-allocates m_str, which a namespace-scope
+//      object would run before main() and free during static destruction.
+//
+// The eight genuinely exported globals -- icD50XYZ, icD50XYZxx, the four
+// icMsgValidate* prefixes (above) and the two solver pointers (IccSolve.h) --
+// are unaffected; those are the Windows-only export problem of #1888, which is
+// a different defect. iccdev.proflib-exported-global-definitions now checks
+// every such declaration against the built library, so a declaration added
+// without a definition fails CI here instead of in a consumer's link.
 
 // ---------------------------------------------------------------------------
 // UTF-16 string class and conversion helpers

@@ -72,6 +72,10 @@ Choose the smallest gate that proves the behavior:
   log excerpts by default; rerun with `registry_qa_log_tail_lines=0` only when
   complete raw per-tool logs are required. Preserve downloaded registry profile
   payloads in developer reports so failing inputs remain available for review.
+- On `ci-qa-pr-docker-testing`, Docker PR verification is advisory. If it fails,
+  keep the orchestrator result successful when required non-Docker gates pass,
+  add `bump-sha-pins`, update pinned action or container SHAs, and rerun Docker
+  before claiming the container lane is verified.
 - When adding cases inside an existing script-backed suite, document that the
   CTest suite count is unchanged and validate both direct script execution and
   the CTest wrapper.
@@ -117,6 +121,13 @@ For `Dockerfile.ci-regression`, use a no-cache build and smoke `clang`,
 `clang++`, `gcc`, `g++`, `cmake`, `afl-fuzz`, and `/usr/bin/time`. If the image must be published,
 publish through the maintainer-controlled container release path, then pass the
 published branch or SHA tag to `ci-iccdev-tool-tests.yml`.
+
+For PR or issue proof with the published maintainer image, follow
+[Prove a Local PR Worktree](../../docs/regression-container.md#prove-a-local-pr-worktree).
+For tool-specific behavior, build the affected target and
+`build-test-binaries`, then run the focused registered CTest. Record the image
+digest, image source revision, tested worktree commit, command, exit status,
+warning count, and sanitizer result before handoff.
 
 Workflow YAML:
 

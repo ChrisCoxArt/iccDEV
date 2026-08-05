@@ -435,6 +435,11 @@ public:
   //ShareProfile should only be called when the profile is shared between transforms 
   void ShareProfile() { m_bOwnsProfile = false; } 
   void SetPcsAdjustXform() { m_bPcsAdjustXform = true; }
+  /// Marks this xform as the gamut check for its profile.  The gamt tag is
+  /// B-to-A shaped, so Create() traverses it with bInput false; without this
+  /// flag the !m_bInput branches of GetDstSpace()/GetNumDstSamples() would
+  /// report the profile's device space instead of the single gamut channel.
+  void SetGamutXform() { m_bGamutXform = true; }
 
   virtual icStatusCMM Begin();
 
@@ -522,6 +527,9 @@ protected:
   CIccProfile *m_pProfile;
   bool m_bOwnsProfile = true;
   bool m_bPcsAdjustXform = false;
+  /// Set by SetGamutXform().  Decouples the reported destination of a gamut
+  /// xform from m_bInput, which selects LUT traversal direction only.
+  bool m_bGamutXform = false;
   bool m_bInput;
   icRenderingIntent m_nIntent;
   icRenderingIntent m_nTagIntent;
@@ -981,6 +989,26 @@ public:
   virtual ~CIccPcsStepSrcMatrix();
 
   virtual void Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const;
+  // m_nCols is the width of m_vals -- the single illuminant row this step multiplies by
+  // -- and not the number of values Apply() consumes from pSrc, which walks pSrc as a
+  // flattened m_nRows x m_nCols matrix. The two differ because the matrix arrives in the
+  // pixel rather than in the step. What keeps that read in bounds is the header check in
+  // icSpectralPcsMatchesRange(): a bi-spectral PCS signature has to declare
+  // spectralRange.steps * biSpectralRange.steps channels, and that channel count is the
+  // pixel width the CMM moves across the connection. The distinction matters if this
+  // step is ever placed anywhere but first in a chain, where pSrc would be a
+  // CIccApplyPcsXform temporary sized from these accessors instead of the pixel.
+  //
+  // Reporting m_nCols is deliberate rather than an oversight. Returning the
+  // product would inflate CIccApplyPcsXform's temporaries for no gain on the only
+  // shape that occurs: the corpus's one bi-spectral profile is 31 x 41, so
+  // MaxChannels() would answer 1271 instead of 41 and size both temporaries from
+  // that, while a first step never reads from a temporary at all.
+  //
+  // Revisit if this accessor gains a second consumer -- specifically any
+  // sample-count validation added to CIccPcsXform::Optimize(). That would read it
+  // to decide whether a profile is rejected, and such a decision needs the count
+  // Apply() actually consumes, not the width of m_vals.
   virtual icUInt16Number GetSrcChannels() const { return m_nCols; }
   virtual icUInt16Number GetDstChannels() const { return m_nRows; }
 

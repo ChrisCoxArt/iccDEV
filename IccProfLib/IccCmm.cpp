@@ -1241,6 +1241,12 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
       rv->m_pConnectionConditions = pProfile;
 
     rv->SetParams(pProfile, bInput, nIntent, nTagIntent, bUseSpectralPCS, nInterp, pHintManager, bAbsToRel, nMCS);
+
+    // The icXformLutGamut case above forced bInput false to walk the gamt tag
+    // in its stored B-to-A direction.  Record that this is a gamut xform so the
+    // reported destination stays icSigGamutData rather than the device space.
+    if (nLutType == icXformLutGamut)
+      rv->SetGamutXform();
   }
   else if (bOwnsProfile) {
     // No xform was produced. pProfile never reached SetParams(), so free it here
@@ -1894,6 +1900,14 @@ icUInt16Number CIccXform::GetNumSrcSamples() const
 */
 icColorSpaceSignature CIccXform::GetDstSpace() const
 {
+  // A gamut xform consumes the PCS and produces the single gamut channel, so
+  // its destination is icSigGamutData whatever the profile's device space is.
+  // m_bInput is false here purely to traverse the B-to-A shaped gamt tag; the
+  // !m_bInput branch below would otherwise report m_Header.colorSpace and
+  // contradict the PCS -> gamt link CIccCmm::AddXform() already recorded.
+  if (m_bGamutXform)
+    return icSigGamutData;
+
   icColorSpaceSignature rv;
   icProfileClassSignature deviceClass = m_pProfile->m_Header.deviceClass;
 
@@ -1936,6 +1950,12 @@ icColorSpaceSignature CIccXform::GetDstSpace() const
 */
 icUInt16Number CIccXform::GetNumDstSamples() const
 {
+  // Must track GetDstSpace() above: CIccCmm::Begin() rejects the chain with
+  // icCmmStatBadSpaceLink when this disagrees with the CMM destination sample
+  // count, and CIccApplyCmm sizes its pixel buffers from it.
+  if (m_bGamutXform)
+    return (icUInt16Number)icGetSpaceSamples(icSigGamutData);
+
   icUInt16Number rv;
 
   if (m_nMCS==icToMCS) {
@@ -2121,6 +2141,56 @@ CIccPcsXform::~CIccPcsXform()
 
 /**
  **************************************************************************
+ * Name: icSpectralPcsMatchesRange
+ *
+ * Purpose:
+ *  Reports whether a header's spectral PCS signature and its spectral range
+ *  definition describe the same number of samples.
+ *
+ *  A spectral PCS signature carries its channel count in its low 16 bits, and that
+ *  count is the pixel width the CMM moves across the connection: it is what
+ *  CIccXform::GetNumSrcSamples()/GetNumDstSamples() report, and in turn what
+ *  CIccApplyCmm::InitPixel() sizes m_Pixel/m_Pixel2 from. The PCS steps that
+ *  CIccPcsXform::Connect() pushes are sized from the header's spectralRange /
+ *  biSpectralRange instead. When the two disagree, a step operates on a wider
+ *  vector than the pixel buffer holding it.
+ *
+ *  CIccProfile::Validate() already reports both disagreements as critical errors
+ *  (IccProfile.cpp, the bi-spectral product and the plain spectral count in the
+ *  spectralPCS switch), but nothing on the apply path consults it - iccApplyProfiles
+ *  and the CMM never call Validate() - so the check has to exist here too.
+ *
+ *  The scoping deliberately mirrors the validator's. icSigNoSpectralData has no
+ *  spectral PCS to be inconsistent with, and the sparse-matrix PCS is excluded
+ *  because there the channel count is the size of the encoded matrix blob carried in
+ *  the pixel rather than a sample count, so it is independent of the ranges by design
+ *  (see CIccPcsStepSrcSparseMatrix, which takes the two separately).
+ **************************************************************************
+ */
+static bool icSpectralPcsMatchesRange(const icHeader &hdr)
+{
+  icColorSpaceSignature sig = (icColorSpaceSignature)hdr.spectralPCS;
+
+  switch (icGetColorSpaceType(sig)) {
+    case icSigReflectanceSpectralData:
+    case icSigTransmisionSpectralData:
+    case icSigRadiantSpectralData:
+      return icNumColorSpaceChannels(sig) == (icUInt32Number)hdr.spectralRange.steps;
+
+    case icSigBiSpectralReflectanceData:
+      // One sample per (spectral, bi-spectral) wavelength pair. Widened before the
+      // multiply so a large pair cannot wrap the 16-bit product into a value that
+      // happens to match the channel count.
+      return icNumColorSpaceChannels(sig) ==
+             (icUInt32Number)hdr.biSpectralRange.steps * (icUInt32Number)hdr.spectralRange.steps;
+
+    default:
+      return true;
+  }
+}
+
+/**
+ **************************************************************************
  * Name: CIccPcsXform::Connect
  * 
  * Purpose: 
@@ -2212,6 +2282,29 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
       m_dstSpace = icGetColorSpaceType(m_dstSpace);
 
     m_nDstSamples = pToXform->GetNumSrcSamples();
+
+    // m_nSrcSamples and m_nDstSamples were just taken from the neighbouring xforms, which
+    // derive them from their profile's PCS signature. Every spectral branch of the switch
+    // below instead sizes the steps it pushes from that profile's spectralRange, so a
+    // header whose two statements of the same quantity disagree produces a chain that
+    // reads or writes past the pixel buffer the caller allocated from the signature.
+    //
+    // Issue #1932 is that read: a header pairing an "rs" spectral PCS of 36 channels with
+    // spectralRange.steps == 184 reached pushRef2Xyz(), whose 3x184 observer matrix -
+    // well formed in itself - indexed a 36-float pixel buffer. Rejecting the profile is
+    // the only correct outcome; there is no way to tell which of the two numbers the
+    // producer meant, and Validate() already treats the disagreement as a critical error.
+    //
+    // Named pSpectralSrc/pSpectralDst rather than the pFromProfile/pToProfile used
+    // elsewhere in this function: the icSigRadiantSpectralPcsData case below declares its
+    // own pFromProfile, and reusing the name here would shadow it under -Wshadow.
+    CIccProfile *pSpectralSrc = pFromXform->GetProfilePtr();
+    CIccProfile *pSpectralDst = pToXform->GetProfilePtr();
+
+    if ((pSpectralSrc && !icSpectralPcsMatchesRange(pSpectralSrc->m_Header)) ||
+        (pSpectralDst && !icSpectralPcsMatchesRange(pSpectralDst->m_Header))) {
+      return icCmmStatInvalidProfile;
+    }
 
     switch (m_srcSpace) {
       case icSigLabPcsData:
@@ -2466,7 +2559,13 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
       case icSigSparseMatrixSpectralPcsData:
         switch (m_dstSpace) {
           case icSigLabPcsData:
-            pushBiRef2Xyz(pFromXform->m_pProfile, pFromXform->m_pConnectionConditions);
+            // This was the one call among the nine status-returning push* helpers whose
+            // result was discarded; the bi-spectral cases below it, and pushXYZConvert()
+            // on the next line, all propagate. Swallowing it let a refused illuminant
+            // step leave the chain a step short and Begin() still report success.
+            if ((stat=pushBiRef2Xyz(pFromXform->m_pProfile, pFromXform->m_pConnectionConditions))!=icCmmStatOk) {
+              return stat;
+            }
             if ((stat=pushXYZConvert(pFromXform, pToXform))!=icCmmStatOk) {
               return stat;
             }
@@ -2885,22 +2984,35 @@ CIccApplyXform *CIccPcsXform::GetNewApply(icStatusCMM &status)
  * 
  * Purpose: 
  *  Returns the maximum number of channels used by PCS xform steps
+ *
+ *  This is what CIccApplyPcsXform::Init() sizes m_temp1/m_temp2 from, and
+ *  CIccApplyPcsXform::Apply() hands those two buffers to every step in the list
+ *  except the last, so the count has to cover each step's output width as well as
+ *  each step's input width.
+ *
+ *  The walk used to take GetDstChannels() from the first step only and
+ *  GetSrcChannels() from all of them. On a chain whose steps agree -- step i's
+ *  output width equalling step i+1's input width -- that reaches the same answer,
+ *  which is why it has held up: every intermediate output is also the next step's
+ *  input and gets counted in that role. It stops holding as soon as a chain does not
+ *  agree with itself, and then the miss is an undersized destination for a step that
+ *  is about to write through it. Counting both widths at every step removes the
+ *  dependence on that assumption; the result is never smaller than before, so a chain
+ *  that sized correctly still sizes the same.
  **************************************************************************
  */
 icUInt16Number CIccPcsXform::MaxChannels()
 {
   icUInt16Number nMax = 0;
-  CIccPcsStepList::const_iterator s = m_list->begin();
-  if (s==m_list->end())
-    return nMax;
-  nMax = s->ptr->GetDstChannels();
-  if (s->ptr->GetSrcChannels()>nMax)
-    nMax = s->ptr->GetSrcChannels();
-  s++;
-  for (; s!= m_list->end(); s++) {
+  CIccPcsStepList::const_iterator s;
+
+  for (s = m_list->begin(); s != m_list->end(); s++) {
     if (s->ptr->GetSrcChannels()>nMax)
       nMax = s->ptr->GetSrcChannels();
+    if (s->ptr->GetDstChannels()>nMax)
+      nMax = s->ptr->GetDstChannels();
   }
+
   return nMax;
 }
 
@@ -3559,17 +3671,47 @@ icStatusCMM CIccPcsXform::pushApplyIllum(CIccProfile *pProfile, IIccProfileConne
       m_list->push_back(ptr);
     }
     else {
-      ptr.ptr  = rangeMap(pProfile->m_Header.spectralRange, illuminantRange);
-      if (ptr.ptr) {
-        m_list->push_back(ptr);
+      // Control reaches here only because the ranges differ, so rangeMap() returning
+      // NULL can carry just one of its two meanings: not "no conversion is needed" but
+      // "a conversion was needed and SetRange() refused to build one" -- it rejects any
+      // pair carrying <= 1 step, a non-finite endpoint or a zero-width source span.
+      // Skipping the step on that answer is what the outer if() already handles for the
+      // identical case; here it silently shortens the chain instead, leaving the scale
+      // running at illuminantRange.steps over a vector that is spectralRange.steps wide.
+      // Nothing downstream contains that: CIccApplyPcsXform::Init() sizes its
+      // temporaries from the steps that survived, and Begin() still reports success.
+      // Of the six rangeMap() call sites in this file the other four -- pushSpecToRange()
+      // and the three in pushBiRef2Rad()/pushBiRef2Ref() -- already reject a refused map;
+      // these two were the last that did not.
+      //
+      // The return leg is the more damaging of the two to drop, because it is the last
+      // step pushed here and so its output is what the caller reads back: without it the
+      // chain hands illuminantRange.steps values to a consumer expecting
+      // spectralRange.steps, writing past the end of the destination pixel whenever the
+      // illuminant is the wider of the two. The two legs also fail independently -- an
+      // illuminant declaring a zero-width span is refused as a resampling source while
+      // still being usable as a destination -- so both are built before either is pushed,
+      // which leaves the step list untouched on a reject the way the sibling sites do.
+      CIccPcsStepMatrix *pToIllum = rangeMap(pProfile->m_Header.spectralRange, illuminantRange);
+      CIccPcsStepMatrix *pFromIllum = pToIllum ? rangeMap(illuminantRange, pProfile->m_Header.spectralRange) : NULL;
+
+      if (!pToIllum || !pFromIllum) {
+        // Nothing has been pushed, so these are still owned here; a step handed to
+        // m_list is deleted by the destructor instead.
+        delete pToIllum;
+        delete pFromIllum;
+        delete pScale;
+        return icCmmStatInvalidProfile;
       }
+
+      ptr.ptr = pToIllum;
+      m_list->push_back(ptr);
 
       ptr.ptr = pScale;
       m_list->push_back(ptr);
 
-      ptr.ptr = rangeMap(illuminantRange, pProfile->m_Header.spectralRange);
-      if (ptr.ptr)
-        m_list->push_back(ptr);
+      ptr.ptr = pFromIllum;
+      m_list->push_back(ptr);
     }
   }
   return icCmmStatOk;
@@ -3668,12 +3810,26 @@ icStatusCMM CIccPcsXform::pushBiRef2Rad(CIccProfile *pProfile, IIccProfileConnec
       if (!pMtx)
         return icCmmStatAllocErr;
 
-      CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.biSpectralRange);
-      if (illumMtx) {
+      // rangeMap() folds two different answers into NULL: "no conversion is needed
+      // because the ranges are identical", and "a conversion is needed but cannot be
+      // built". SetRange() refuses any pair carrying <= 1 step, a non-finite endpoint or
+      // a zero-width span, all of which a malformed header can ask for. Only the first
+      // answer makes the wholesale copy below correct -- it writes illuminantRange.steps
+      // floats into m_vals, which the constructor sized to biSpectralRange.steps. Testing
+      // the identical case up front, the way pushSpecToRange() already does, leaves a
+      // failed map as an unambiguous reject rather than a copy past the end of m_vals.
+      if (!icSameSpectralRange(illuminantRange, pProfile->m_Header.biSpectralRange)) {
+        CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.biSpectralRange);
+        if (!illumMtx) {
+          delete pMtx;
+          return icCmmStatInvalidProfile;
+        }
         illumMtx->Apply(NULL, pMtx->data(), illuminant);
-        delete illumMtx; 
+        delete illumMtx;
       }
       else {
+        // The ranges match, so illuminantRange.steps == biSpectralRange.steps and the
+        // copy is an exact fit for the buffer.
         memcpy(pMtx->data(), illuminant, illuminantRange.steps*sizeof(icFloatNumber));
       }
 
@@ -3687,10 +3843,18 @@ icStatusCMM CIccPcsXform::pushBiRef2Rad(CIccProfile *pProfile, IIccProfileConnec
       if (!pMtx)
         return icCmmStatAllocErr;
 
-      CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.biSpectralRange);
-      if (illumMtx) {
+      // Same NULL ambiguity as the sparse branch above, and the same buffer contract:
+      // m_vals holds biSpectralRange.steps floats. This is the site reached by the #1677
+      // reproducer, where a header declaring biSpectralRange.steps == 0 made SetRange()
+      // refuse the pair, so the copy pushed a whole illuminant into a zero-length array.
+      if (!icSameSpectralRange(illuminantRange, pProfile->m_Header.biSpectralRange)) {
+        CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.biSpectralRange);
+        if (!illumMtx) {
+          delete pMtx;
+          return icCmmStatInvalidProfile;
+        }
         illumMtx->Apply(NULL, pMtx->data(), illuminant);
-        delete illumMtx; 
+        delete illumMtx;
       }
       else {
         memcpy(pMtx->data(), illuminant, illuminantRange.steps*sizeof(icFloatNumber));
@@ -3777,18 +3941,26 @@ icStatusCMM CIccPcsXform::pushBiRef2Ref(CIccProfile *pProfile, IIccProfileConnec
 
     if (pScale) {
       icFloatNumber *pData = pScale->data();
-      CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.spectralRange);
       int i;
 
-      if (illumMtx) {
+      // Third instance of the NULL ambiguity described in pushBiRef2Rad(). Here the
+      // fallback walks illuminant[] to spectralRange.steps, but that array only holds
+      // illuminantRange.steps entries, so a refused map reads past its end rather than
+      // writing past one. pData is sized spectralRange.steps either way.
+      if (!icSameSpectralRange(illuminantRange, pProfile->m_Header.spectralRange)) {
+        CIccPcsStepMatrix *illumMtx = rangeMap(illuminantRange, pProfile->m_Header.spectralRange);
+        if (!illumMtx) {
+          delete pScale;
+          return icCmmStatInvalidProfile;
+        }
         illumMtx->Apply(NULL, pData, illuminant);
         for (i=0; i<pProfile->m_Header.spectralRange.steps; i++)
           pData[i] = 1.0f / pData[i];
 
         delete illumMtx;
-
       }
       else {
+        // Ranges match, so this reads exactly illuminantRange.steps entries.
         for (i=0; i<pProfile->m_Header.spectralRange.steps; i++) {
           pData[i] = 1.0f / illuminant[i];
         }
@@ -7904,6 +8076,12 @@ CIccXform *CIccXformMpe::Create(CIccProfile *pProfile, bool bInput/* =true */, i
 
   if (rv) {
     rv->SetParams(pProfile, bInput, nIntent, nTagIntent, bUseSpectralPCS, nInterp, pHintManager, bAbsToRel);
+
+    // Same reasoning as the icXformLutGamut case in CIccXform::Create(): this
+    // overload has no in-tree caller, but it is public API and its gamut case
+    // forces bInput false the same way, so it needs the same marking.
+    if (nLutType == icXformLutGamut)
+      rv->SetGamutXform();
   }
   else if (bOwnsProfile) {
     // No xform was produced; pProfile never reached SetParams(), so free it here
@@ -9583,9 +9761,9 @@ icStatusCMM CIccCmm::RemoveAllIO()
  ** Name: CIccCmm::IsInGamut
  **
  ** Purpose:
- **  Function to check if internal representation of gamut is in gamut.  Note
- **  that the gamut table is 8 bit and a color is considered to be out of gamut
- **  if the value is not zero.
+ **  Function to check if internal representation of gamut is in gamut.  A
+ **  colour is in gamut only when the gamut value is zero; every non-zero
+ **  value means out of gamut.
  **
  **  Args:
  **   pInternal = internal pixel representation of gamut value
@@ -9595,12 +9773,46 @@ icStatusCMM CIccCmm::RemoveAllIO()
  **************************************************************************/
 bool CIccCmm::IsInGamut(icFloatNumber *pInternal)
 {
-  // replace float->int conversion with simple float comparison
-  if (*pInternal < (1.0f/255.0f))
-    return true;
-  return false;
+  // The gamt tag may be lut8Type, lut16Type or lutBToAType, so what reaches us
+  // is a normalized float, not an 8-bit code.  Treating anything below 1/255 as
+  // in gamut (and the equivalent (unsigned)(v*255.0) truncation it replaced)
+  // accepted every 16-bit code below 258; 1/255 is exactly 257/65535.
+  //
+  // Stored nodes rarely land there - all 7 gamt tables in Testing/ hold 8-bit
+  // values replicated x257, so wherever a non-zero node exists the smallest is
+  // exactly 257, i.e. 1/255, which the old test judged correctly.  Interpolation
+  // is what exposes the threshold: between a zero node and a 257 node every
+  // intermediate value falls under the cutoff.  Sweeping 3444 Lab coordinates
+  // through CMYK-3DLUTs.icc yields 92 out-of-gamut results the old test called
+  // in gamut, the smallest ~7.1e-15.
+  //
+  // Compare against zero, which is what the tag definition specifies.  NaN and
+  // infinity both fail this test and so report out of gamut, the safe verdict.
+  return *pInternal == 0.0f;
 }
 
+
+// Decode one already-encoded fixed-integer sample carried in a float into its
+// icUIntN value.  Unlike icFtoU8/icFtoU16 this does NOT pre-clamp to [0,1]: the
+// argument is a sample in 0..255 / 0..65535, not a normalized float being
+// quantized.  Clamps to the encoding range and rounds; NaN maps to 0.
+static icUInt8Number icToU8Sample(icFloatNumber v)
+{
+  if (std::isnan(v) || v <= 0.0f)
+    return 0;
+  if (v >= 255.0f)
+    return 255;
+  return (icUInt8Number)icRoundOffset(v);
+}
+
+static icUInt16Number icToU16Sample(icFloatNumber v)
+{
+  if (std::isnan(v) || v <= 0.0f)
+    return 0;
+  if (v >= 65535.0f)
+    return 65535;
+  return (icUInt16Number)icRoundOffset(v);
+}
 
 /**
  **************************************************************************
@@ -9665,25 +9877,25 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
           }
         case icEncode8Bit:
           {
-            pInput[0] = icU8toF(icFtoU8(pInput[0]))*100.0f;
-            pInput[1] = icU8toAB(icFtoU8(pInput[1]));
-            pInput[2] = icU8toAB(icFtoU8(pInput[2]));
+            pInput[0] = icU8toF(icToU8Sample(pInput[0]))*100.0f;
+            pInput[1] = icU8toAB(icToU8Sample(pInput[1]));
+            pInput[2] = icU8toAB(icToU8Sample(pInput[2]));
 
             icLabToPcs(pInput);
             break;
           }
         case icEncode16Bit:
           {
-            pInput[0] = icU16toF(icFtoU16(pInput[0]));
-            pInput[1] = icU16toF(icFtoU16(pInput[1]));
-            pInput[2] = icU16toF(icFtoU16(pInput[2]));
+            pInput[0] = icU16toF(icToU16Sample(pInput[0]));
+            pInput[1] = icU16toF(icToU16Sample(pInput[1]));
+            pInput[2] = icU16toF(icToU16Sample(pInput[2]));
             break;
           }
         case icEncode16BitV2:
           {
-            pInput[0] = icU16toF(icFtoU16(pInput[0]));
-            pInput[1] = icU16toF(icFtoU16(pInput[1]));
-            pInput[2] = icU16toF(icFtoU16(pInput[2]));
+            pInput[0] = icU16toF(icToU16Sample(pInput[0]));
+            pInput[1] = icU16toF(icToU16Sample(pInput[1]));
+            pInput[2] = icU16toF(icToU16Sample(pInput[2]));
 
             CIccPCSUtil::Lab2ToLab4(pInput, pInput);
             break;
@@ -9723,9 +9935,10 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
         case icEncode16Bit:
         case icEncode16BitV2:
           {
-            pInput[0] = icUSFtoD((icU1Fixed15Number)icFtoU16(pInput[0]));
-            pInput[1] = icUSFtoD((icU1Fixed15Number)icFtoU16(pInput[1]));
-            pInput[2] = icUSFtoD((icU1Fixed15Number)icFtoU16(pInput[2]));
+            pInput[0] = icUSFtoD((icU1Fixed15Number)icToU16Sample(pInput[0]));
+            pInput[1] = icUSFtoD((icU1Fixed15Number)icToU16Sample(pInput[1]));
+            pInput[2] = icUSFtoD((icU1Fixed15Number)icToU16Sample(pInput[2]));
+            icXyzToPcs(pInput);
             break;
           }
           
@@ -9784,20 +9997,20 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
         case icEncode8Bit:
           {
             for(i=0; i<nSamples; i++) {
-              pInput[i] = icU8toF(icFtoU8(pInput[i]));
+              pInput[i] = icU8toF(icToU8Sample(pInput[i]));
             }
             break;
           }
-          
+
         case icEncode16Bit:
         case icEncode16BitV2:
           {
             for(i=0; i<nSamples; i++) {
-              pInput[i] = icU16toF(icFtoU16(pInput[i]));
+              pInput[i] = icU16toF(icToU16Sample(pInput[i]));
             }
             break;
           }
-        
+
         default:
             return icCmmStatBadColorEncoding;
             break;

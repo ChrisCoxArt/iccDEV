@@ -2338,21 +2338,25 @@ bool HasFail(const std::vector<PawgItem> &items)
 
 } // namespace
 
-int DumpPawgReport(const char *szFilename, bool bUseRead, bool bJson)
+int DumpPawgReport(const char *szFilename, bool bJson)
 {
+  // The raw byte read is deliberately unconditional and comes first: it does not
+  // depend on IccProfLib parsing the file at all, so a profile the library refuses
+  // still receives the full raw-byte security assessment below, with the
+  // parsed-profile items reported as NOT RUN. That graceful degradation is what
+  // makes a strict-only load acceptable -- and is why the --read fallback that
+  // used to sit further down was never needed (#1977).
   RawProfile raw;
   LoadRawProfile(szFilename, raw);
 
+  // sReport/nStatus exist only to satisfy ValidateIccProfile's out-parameters:
+  // this entry point reports the PAWG checklist, not the validation log, and the
+  // checklist derives its own verdict from the profile.  TagTypeAllowedVerdict()
+  // re-runs Validate() on the parsed profile and turns that status into the C-item
+  // the report actually prints, so nothing downstream of here reads either local.
   std::string sReport;
   icValidateStatus nStatus = icValidateOK;
   CIccProfile *pIcc = ValidateIccProfile(szFilename, sReport, nStatus);
-
-  if (bUseRead && !pIcc) {
-    pIcc = ReadIccProfile(szFilename);
-    if (pIcc) {
-      nStatus = pIcc->Validate(sReport);
-    }
-  }
 
   std::vector<PawgItem> items = EvaluatePawg(raw, pIcc);
 

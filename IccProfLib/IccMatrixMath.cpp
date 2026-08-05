@@ -12,7 +12,7 @@
  * The ICC Software License, Version 0.2
  *
  *
- * Copyright (c) 2003-2015 The International Color Consortium. All rights 
+ * Copyright (c) 2003-2015 The International Color Consortium. All rights
  * reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -20,7 +20,7 @@
  * are met:
  *
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *    notice, this list of conditions and the following disclaimer.
  *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in
@@ -48,20 +48,20 @@
  * ====================================================================
  *
  * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
+ * individuals on behalf of the The International Color Consortium.
  *
  *
  * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
+ * commercial purposes.
  *
- *  
+ *
  * For more information on The International Color Consortium, please
  * see <http://www.color.org/>.
- *  
- * 
+ *
+ *
  */
 
-////////////////////////////////////////////////////////////////////// 
+//////////////////////////////////////////////////////////////////////
 // HISTORY:
 //
 // -Initial implementation by Max Derhak 5-15-2003
@@ -79,6 +79,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <new>
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -87,8 +88,8 @@ namespace iccDEV {
 /**
 **************************************************************************
 * Name: CIccMatrixMath::CIccMatrixMath
-* 
-* Purpose: 
+*
+* Purpose:
 *  Constructor
 **************************************************************************
 */
@@ -114,8 +115,8 @@ CIccMatrixMath::CIccMatrixMath(icUInt16Number nRows, icUInt16Number nCols, bool 
 /**
 **************************************************************************
 * Name: CIccMatrixMath::CIccMatrixMath
-* 
-* Purpose: 
+*
+* Purpose:
 *  Copy Constructor
 **************************************************************************
 */
@@ -163,8 +164,8 @@ CIccMatrixMath &CIccMatrixMath::operator=(const CIccMatrixMath &matrix)
 /**
 **************************************************************************
 * Name: CIccMatrixMath::~CIccMatrixMath
-* 
-* Purpose: 
+*
+* Purpose:
 *  Destructor
 **************************************************************************
 */
@@ -177,8 +178,8 @@ CIccMatrixMath::~CIccMatrixMath()
 /**
 **************************************************************************
 * Name: CIccMatrixMath::VectorMult
-* 
-* Purpose: 
+*
+* Purpose:
 *  Multiplies pSrc vector passed by a matrix resulting in a pDst vector
 **************************************************************************
 */
@@ -200,8 +201,8 @@ void CIccMatrixMath::VectorMult(icFloatNumber *pDst, const icFloatNumber *pSrc) 
 /**
 **************************************************************************
 * Name: CIccMatrixMath::dump
-* 
-* Purpose: 
+*
+* Purpose:
 *  dumps the context of the step
 **************************************************************************
 */
@@ -225,8 +226,8 @@ void CIccMatrixMath::dumpMtx(std::string &str) const
 /**
 **************************************************************************
 * Name: CIccMatrixMath::Mult
-* 
-* Purpose: 
+*
+* Purpose:
 *  Creates a new CIccMatrixMath that is the result of concatentating
 *  another matrix with this matrix. (IE result = matrix * this).
 **************************************************************************
@@ -262,8 +263,8 @@ CIccMatrixMath *CIccMatrixMath::Mult(const CIccMatrixMath *matrix) const
 /**
 **************************************************************************
 * Name: CIccMatrixMath::VectorScale
-* 
-* Purpose: 
+*
+* Purpose:
 *  Multiplies each row by values of vector passed in
 **************************************************************************
 */
@@ -281,8 +282,8 @@ void CIccMatrixMath::VectorScale(const icFloatNumber *vec)
 /**
 **************************************************************************
 * Name: CIccMatrixMath::Scale
-* 
-* Purpose: 
+*
+* Purpose:
 *  Multiplies all values in matrix by a single scale factor
 **************************************************************************
 */
@@ -300,8 +301,8 @@ void CIccMatrixMath::Scale(icFloatNumber v)
 /**
 **************************************************************************
 * Name: CIccMatrixMath::Invert
-* 
-* Purpose: 
+*
+* Purpose:
 *  Inverts the matrix
 **************************************************************************
 */
@@ -319,8 +320,8 @@ bool CIccMatrixMath::Invert()
 /**
 **************************************************************************
 * Name: CIccMatrixMath::RowSum
-* 
-* Purpose: 
+*
+* Purpose:
 *  Creates a new CIccMatrixMath step that is the result of multiplying the
 *  matrix of this object to the scale of another object.
 **************************************************************************
@@ -343,8 +344,8 @@ icFloatNumber CIccMatrixMath::RowSum(icUInt16Number nRow) const
 /**
 **************************************************************************
 * Name: CIccMatrixMath::isIdentityMtx
-* 
-* Purpose: 
+*
+* Purpose:
 *  Determines if applying this step will result in negligible change in data
 **************************************************************************
 */
@@ -375,8 +376,8 @@ bool CIccMatrixMath::isIdentityMtx() const
 /**
 **************************************************************************
 * Name: CIccMatrixMath::SetRange
-* 
-* Purpose: 
+*
+* Purpose:
 *  Fills a matrix math object that can be used to convert
 *  spectral vectors from one spectral range to another using linear interpolation.
 **************************************************************************
@@ -447,19 +448,62 @@ bool CIccMatrixMath::SetRange(const icSpectralRange &srcRange, const icSpectralR
 /**
  **************************************************************************
  * Name: CIccMatrixMath::rangeMap
- * 
- * Purpose: 
+ *
+ * Purpose:
  *  This helper function generates a matrix math object that can be used to convert
  *  spectral vectors from one spectral range to another using linear interpolation.
  **************************************************************************
  */
 CIccMatrixMath *CIccMatrixMath::rangeMap(const icSpectralRange &srcRange, const icSpectralRange &dstRange)
 {
+  return rangeMap(srcRange, dstRange, NULL);
+}
+
+/**
+ **************************************************************************
+ * Name: CIccMatrixMath::rangeMap
+ *
+ * Purpose:
+ *  As above, but reports through pFailed whether a NULL return means "the two
+ *  ranges are identical, so no conversion matrix is needed" or "a conversion is
+ *  required but could not be built".
+ *
+ *  The two-argument form cannot distinguish those, and every caller in the
+ *  library reads NULL as the first. That was safe only while this function
+ *  never failed: it returned the matrix even when SetRange() rejected the
+ *  ranges. The constructor leaves the coefficient array uninitialised unless
+ *  bInitIdentity is set, and SetRange() bails out before its own memset(), so
+ *  the caller received a matrix whose every entry was uninitialised heap and
+ *  multiplied it straight into a colour value. SetRange() rejects a range pair
+ *  three ways that a malformed profile can reach -- either range carrying one
+ *  step or fewer, a non-finite start/end (an infinity survives the
+ *  icNotZero(end - start) screen in icCanMapSpectralRange), and a zero-width
+ *  source span -- and CIccTagSpectralViewingConditions::getObserverMatrix()
+ *  and applyRangeToObserver() call this with no screen at all.
+ *
+ *  Returning NULL there is the fix, but it also makes NULL ambiguous, so
+ *  pFailed exists to keep the callers correct. Their "ranges were identical"
+ *  branches index one range's length into the other array, which is only in
+ *  bounds while that assumption holds; see the guards added alongside this.
+ **************************************************************************
+ */
+CIccMatrixMath *CIccMatrixMath::rangeMap(const icSpectralRange &srcRange, const icSpectralRange &dstRange,
+                                         bool *pFailed)
+{
+  if (pFailed)
+    *pFailed = false;
+
   if (srcRange.steps != dstRange.steps ||
       srcRange.start != dstRange.start ||
       srcRange.end != dstRange.end) {
-    CIccMatrixMath *mtx = new CIccMatrixMath(dstRange.steps, srcRange.steps);
-    mtx->SetRange(srcRange, dstRange);
+    CIccMatrixMath *mtx = new (std::nothrow) CIccMatrixMath(dstRange.steps, srcRange.steps);
+
+    if (!mtx || !mtx->SetRange(srcRange, dstRange)) {
+      delete mtx;
+      if (pFailed)
+        *pFailed = true;
+      return NULL;
+    }
 
     return mtx;
   }

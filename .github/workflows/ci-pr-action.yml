@@ -30,6 +30,7 @@ on:
     branches:
       - master
       - ci-qa-flags
+      - ci-qa-pr-docker-testing
     types:
       - opened
       - synchronize
@@ -97,7 +98,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REGRESSION_IMAGE_TAG: ci-qa-pr-docker-testing
+  REGRESSION_IMAGE_TAG: sha-547c4bed27b0432942b2b34c57d5bd5495191798
 
 jobs:
   detect-src:
@@ -771,7 +772,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # Required to derive the PR build matrix.
-    needs: [setup, detect-src]
+    needs: [detect-src]
 
     outputs:
       os-list: ${{ steps.v.outputs.os }}
@@ -887,7 +888,7 @@ jobs:
   unix-ci:
     if: ${{ needs.detect-src.outputs.src_changed == 'true' && needs.validate-inputs.outputs.fast-lane != 'true' }}
     name: Unix Build & Test Profiles
-    needs: [setup, detect-src, validate-inputs]
+    needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-pr-unix.yml
     # pass minimized inputs
     with:
@@ -901,7 +902,7 @@ jobs:
   gcc15-lto-ci:
     if: ${{ needs.detect-src.outputs.src_changed == 'true' }}
     name: GCC 15.2 Strict Release LTO
-    needs: [setup, detect-src, validate-inputs]
+    needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-pr-gcc15.yml
     with:
       regression-image-tag: ${{ needs.validate-inputs.outputs.regression-image-tag }}
@@ -910,7 +911,7 @@ jobs:
   tool-tests:
     if: ${{ needs.detect-src.outputs.src_changed == 'true' }}
     name: Tool Smoke Tests (ASAN+UBSAN, ${{ matrix.tool_build_type }})
-    needs: [setup, detect-src, validate-inputs]
+    needs: [detect-src, validate-inputs]
     strategy:
       fail-fast: false
       matrix:
@@ -927,7 +928,7 @@ jobs:
   win-ci:
     if: ${{ needs.detect-src.outputs.src_changed == 'true' && needs.validate-inputs.outputs.include-windows == 'true' }}
     name: Windows Build & Test Profiles
-    needs: [setup, detect-src, validate-inputs]
+    needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-pr-win.yml
     with:
       target_sha: ${{ needs.detect-src.outputs.target_sha }}
@@ -935,7 +936,7 @@ jobs:
   docker-ci:
     if: ${{ needs.detect-src.outputs.src_changed == 'true' && needs.validate-inputs.outputs.include-docker == 'true' }}
     name: Docker Verification
-    needs: [setup, detect-src, validate-inputs]
+    needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-docker-pr.yml
     with:
       target_sha: ${{ needs.detect-src.outputs.target_sha }}
@@ -1062,7 +1063,19 @@ jobs:
 
           # --- compute overall result from upstream jobs ----------------------
           job_res=success
-          for s in "$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$RISK_RESULT" "$UNIX_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$WIN_RESULT" "$DOCKER_RESULT"; do
+          docker_advisory=success
+          qa_docker_branch=false
+          if [[ "${GITHUB_BASE_REF:-}" == "ci-qa-pr-docker-testing" || "${GITHUB_REF_NAME:-}" == "ci-qa-pr-docker-testing" ]]; then
+            qa_docker_branch=true
+          fi
+          if [[ "$DOCKER_RESULT" != "success" && "$DOCKER_RESULT" != "skipped" ]]; then
+            docker_advisory=warning
+          fi
+          required_results=("$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$RISK_RESULT" "$UNIX_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$WIN_RESULT")
+          if [[ "$qa_docker_branch" != "true" ]]; then
+            required_results+=("$DOCKER_RESULT")
+          fi
+          for s in "${required_results[@]}"; do
             # 'skipped' is acceptable (jobs are skipped when src_changed is false)
             # only 'failure' or 'cancelled' should cause overall failure
             if [[ "$s" != "success" && "$s" != "skipped" ]]; then
@@ -1137,9 +1150,19 @@ jobs:
             printf "| tool-tests         | %s |\n" "$(sanitize_line "$TOOL_RESULT")"
             printf "| win-ci             | %s |\n" "$(sanitize_line "$WIN_RESULT")"
             printf "| docker-ci          | %s |\n" "$(sanitize_line "$DOCKER_RESULT")"
+            if [[ "$qa_docker_branch" == "true" ]]; then
+              printf "| docker-ci policy   | %s |\n" "$(sanitize_line "advisory/${docker_advisory}")"
+            fi
             echo ""
             echo "**Overall Result:** \`$(sanitize_line "$job_res")\`"
             echo ""
+            if [[ "$qa_docker_branch" == "true" ]]; then
+              echo "### Docker Advisory and SHA Pin Maintenance"
+              echo ""
+              echo "Docker PR verification is non-blocking only for \`ci-qa-pr-docker-testing\` so maintainer QA can continue while container or third-party action pins are refreshed."
+              echo "If \`docker-ci\` is not \`success\` or \`skipped\`, apply the \`bump-sha-pins\` label and update pinned action, Docker, or container SHA references before treating the Docker lane as verified."
+              echo ""
+            fi
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
           if [ "$job_res" != "success" ]; then

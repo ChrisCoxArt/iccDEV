@@ -30,17 +30,24 @@ Canonical guide: `docs/regression-container.md`
 4. For an issue, use the smallest existing project input and project tool.
 5. Rebuild the affected target or the full configured build.
 6. Run the focused regression first and its CTest wrapper when registered.
-7. Scan output for compiler warnings, ASAN, UBSAN, and signal termination.
-8. Classify exit `1-127` as graceful and `128+` as signal termination.
-9. For AFL/CFL work, run `iccdev-fuzz-env`, verify patch-stack counts, and run
-   the smallest patched or unpatched smoke that matches the requested scope.
-10. Save evidence outside the disposable container.
-11. If CI is requested, use the PR trigger or explicitly dispatch
+7. For local PR proof, pull the published `latest` image, record its resolved
+   digest, mount the reviewed worktree read-only, and copy it to container-local
+   scratch space. Run the Docker PR verification build: strict Clang sanitizer
+   flags, the configured tool and test target set, zero compiler warnings, and
+   CTest excluding only the `slow` and `calculator` labels.
+8. If the changed behavior is in an excluded suite, run its focused CTest in
+   addition to the routine Docker PR envelope.
+9. Scan output for compiler warnings, ASAN, UBSAN, and signal termination.
+10. Classify exit `1-127` as graceful and `128+` as signal termination.
+11. For AFL/CFL work, run `iccdev-fuzz-env`, verify patch-stack counts, and run
+    the smallest patched or unpatched smoke that matches the requested scope.
+12. Save evidence outside the disposable container.
+13. If CI is requested, use the PR trigger or explicitly dispatch
     `ci-pr-action.yml`; do not assume a branch push triggers it.
-12. Diff all `Dockerfile*` files between `ci-qa-pr-docker-testing` and
+14. Diff all `Dockerfile*` files between `ci-qa-pr-docker-testing` and
     `ci-qa-flags`, then carry applicable fixes and validation to both branches.
-13. Include the `ci-qa-flags` commit and hosted run in the handoff.
-14. Promote the verified immutable digest to `latest` only after all image smoke
+15. Include the `ci-qa-flags` commit and hosted run in the handoff.
+16. Promote the verified immutable digest to `latest` only after all image smoke
     tests and regression CTest checks succeed: from `master`, or with the
     explicit `publish-regression-latest=true` dispatch on the protected
     Docker-testing branch.

@@ -145,6 +145,21 @@ audit contexts and `Init PR Build Matrix` independently required. Require WASM
 parity separately on `master`, where that workflow runs outside the
 orchestrator. See `docs/label-system.md` for the current context list.
 
+On the `ci-qa-pr-docker-testing` branch, Docker PR verification is advisory.
+Keep the workflow running to completion even when the Docker lane fails, report
+overall PR orchestration success when the required non-Docker gates pass, and
+use the `bump-sha-pins` label plus the summary note to route follow-up work for
+pinned GitHub Action, Docker, or container SHA updates. Do not treat that
+advisory result as container verification; rerun the Docker lane after the pins
+are updated.
+
+The Docker PR lane consumes the published
+`ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest` image as a
+maintainer-controlled build cache. It must report the resolved digest, bind the
+checked-out PR tree read-only, copy it to container-local scratch space, and
+build and run the fast CTest envelope there. Do not rebuild the regression image
+per PR; image rebuilds and publishing belong to `ci-docker`.
+
 Local review should include YAML parsing, `actionlint`, `yamllint`, direct
 `${{ }}` interpolation scans for `run:` blocks, Dockerfile base/remote-exec
 checks when container files are in scope, CodeQL Actions analysis, and CodeQL

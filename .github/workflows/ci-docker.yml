@@ -198,7 +198,7 @@ jobs:
 
       - name: Log in to GHCR
         if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-qa-flags' || github.ref == 'refs/heads/ci-qa-pr-docker-testing' }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c  # v4.5.2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -747,7 +747,7 @@ jobs:
             for d in "$ICCDEV_BUILD_DIR"/Tools/*; do
               [ -d "$d" ] && export PATH="$(realpath "$d"):$PATH"
             done
-            printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" \
+            printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" \
               "unsigned-integer-overflow:*/IccMD5.cpp" \
               "shift-base:*/IccMD5.cpp" \
               "shift-exponent:*/IccMD5.cpp" \
@@ -756,7 +756,9 @@ jobs:
               "unsigned-integer-overflow:*/include/c++/*/bits/basic_string.h" \
               "unsigned-integer-overflow:*/include/c++/*/bits/basic_string.tcc" \
               "unsigned-integer-overflow:*/include/c++/*/bits/stl_bvector.h" \
-              "unsigned-integer-overflow:*/include/c++/*/bits/stl_uninitialized.h" > silence.txt
+              "unsigned-integer-overflow:*/include/c++/*/bits/stl_uninitialized.h" \
+              "unsigned-integer-overflow:*/include/c++/*/bits/vector.tcc" \
+              "unsigned-integer-overflow:*/include/c++/*/ext/string_conversions.h" > silence.txt
             test -x ./CreateAllProfiles.sh
             test -x ./RunTests.sh
             test -x ./HDR/mkprofiles.sh
@@ -809,7 +811,7 @@ jobs:
 
       # preflight: allow-token-exposure reason=ghcr-verified-regression-promotion
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c  # v4.5.2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

@@ -55,12 +55,11 @@ when practical.
   coverage.
 - Use `rg "Total Tests:|currently register|ci[-]tool[-]tests[.]yml" docs .github`
   before PR handoff to catch stale count and workflow-name references.
-- Generated-profile gates currently validate 208 ICC profiles.
-- Windows and JSON profile generation validate 130 profile parses.
-- WASM parity currently expects 208 generated ICC profiles.
-- WASM generated-profile count changes must update both the workflow inputs and
-  `Build/Cmake/wasm-package/regression.js`; the packaged script is the fallback
-  source used by local and release parity runs.
+- Generated-profile count changes must update every explicit assertion source,
+  including `Build/Cmake/Testing/CMakeLists.txt`, generated-profile workflows,
+  and packaged WASM regression scripts.
+- Do not duplicate generated-profile totals in this skill; use the assertion
+  sources as the current truth.
 - Windows batch CTest runs must use the disposable Testing copy under the build
   tree and must not dirty the source `Testing/` directory.
 - Windows executable tests must receive runtime DLL directories through
@@ -79,6 +78,10 @@ when practical.
 - Use `ci_scope=fast-lane` for the exact GCC 15.2 Release LTO and ASAN+UBSAN
   Release tool lanes. Fast lane defaults to the latest CTest with Windows and
   Docker disabled; add them only when the change needs those surfaces.
+- On `ci-qa-pr-docker-testing`, Docker PR verification is advisory. Let the
+  orchestrator continue when that lane fails, mark the run for
+  `bump-sha-pins`, update pinned action or container SHAs, and rerun Docker
+  before claiming container verification.
 - Do not use `|| true` around profile generation, CTest discovery, regression
   execution, sanitizer checks, or packaging verification.
 - Use least-privilege permissions and credential cleanup.
