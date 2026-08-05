@@ -73,6 +73,8 @@
 #include <string>
 #include <memory>
 #include <algorithm>
+#include <vector>
+#include <map>
 #include "IccProfile.h"
 #include "IccTag.h"
 #include "IccUtil.h"
@@ -374,6 +376,13 @@ std::vector<predictor_desc> predictorList =
 // TODO - next2D
 
 };
+
+/******************************************************************************/
+
+typedef std::map<std::string,int> predictor_statistics;
+
+predictor_statistics stats1D;
+predictor_statistics statsND;
 
 /******************************************************************************/
 /******************************************************************************/
@@ -3600,6 +3609,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
 
   printf("\n"); // and finish the line of results
   printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
+  stats1D[ minPred.name ] += 1;
 
 }
 
@@ -3822,6 +3832,7 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
 
   printf("\n"); // and finish the line of results
   printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
+  statsND[ minPred.name ] += 1;
 
 }
 
@@ -4377,7 +4388,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestPredictors();
 #endif
-  
+
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
 
@@ -4407,6 +4418,22 @@ int main(int argc, char* argv[])
     // NOTE - consume error logs here if needed, so exceptions are included
 
   } // end for file list
+
+
+  // report statistics
+  if (gTest1DLUT) {
+    printf("\n1D statistics\n");
+    for (const auto &entry: stats1D) {
+      printf("%s : %d\n", entry.first.c_str(), entry.second );
+    }
+  }
+  
+  if (gTestCLUT) {
+    printf("\nND statistics\n");
+    for (const auto &entry: statsND) {
+      printf("%s : %d\n", entry.first.c_str(), entry.second );
+    }
+  }
 
   return 0;
 }
