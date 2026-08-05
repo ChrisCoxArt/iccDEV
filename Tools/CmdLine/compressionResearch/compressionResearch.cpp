@@ -101,8 +101,7 @@ FUTURE: test LZMA compressor
 
 
 TODO: output to file?
-TODO: summary with how many times each algorithm won?
-    compression ratios?
+TODO: compression ratios?   average, best, worst?
 
 
 NOTE - prediction algorithms are listed in increasing order of complexity
@@ -301,77 +300,79 @@ void unsplitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, in
 struct predictor_desc {
     const char *name;
     predictor_type type;
+    bool gamutOnly;
     func_predictor *forward;
     func_predictor *reverse;
 };
 
 std::vector<predictor_desc> predictorList =
 {
- { "None", PREDICTOR_TYPE_NULL, null_forward, null_reverse },
+ { "None", PREDICTOR_TYPE_NULL, false, null_forward, null_reverse },
 #if 0 && !defined(NDEBUG)
 // these test the outer loops of the predictors
- { "None1", PREDICTOR_TYPE_1D, null_forward, null_reverse },
- { "None2", PREDICTOR_TYPE_2D, null_forward, null_reverse },
- { "None3", PREDICTOR_TYPE_3D, null_forward, null_reverse },
+ { "None1", PREDICTOR_TYPE_1D, false, null_forward, null_reverse },
+ { "None2", PREDICTOR_TYPE_2D, false, null_forward, null_reverse },
+ { "None3", PREDICTOR_TYPE_3D, false, null_forward, null_reverse },
 #endif
- { "GamutBinary", PREDICTOR_TYPE_1D, gamutbin_forward, gamutbin_reverse },
- { "GamutBinaryXOR", PREDICTOR_TYPE_1D, gamutbinxor_forward, gamutbinxor_reverse },
- { "Previous", PREDICTOR_TYPE_1D, prev_forward, prev_reverse },
- { "Next", PREDICTOR_TYPE_1D, next_forward, next_reverse },
+ { "GamutBinary", PREDICTOR_TYPE_1D, true, gamutbin_forward, gamutbin_reverse },
+ { "GamutBinaryXOR", PREDICTOR_TYPE_1D, true, gamutbinxor_forward, gamutbinxor_reverse },
+ { "Previous", PREDICTOR_TYPE_1D, false, prev_forward, prev_reverse },
+ { "Next", PREDICTOR_TYPE_1D, false, next_forward, next_reverse },
 
- { "Up", PREDICTOR_TYPE_2D, up_forward, up_reverse },
- { "Down", PREDICTOR_TYPE_2D, down_forward, down_reverse },
- { "Previous2D", PREDICTOR_TYPE_2D, prev2D_forward, prev2D_reverse },
- { "Min", PREDICTOR_TYPE_2D, min_forward, min_reverse },
- { "Max", PREDICTOR_TYPE_2D, max_forward, max_reverse },
- { "AvgUpLeft", PREDICTOR_TYPE_2D, avgUpLeft_forward, avgUpLeft_reverse },
- { "Median", PREDICTOR_TYPE_2D, median3_forward, median3_reverse },
- { "MED", PREDICTOR_TYPE_2D, MED_forward, MED_reverse },
- { "Paeth", PREDICTOR_TYPE_2D, Paeth_forward, Paeth_reverse },
- { "MinGrad", PREDICTOR_TYPE_2D, MinGrad_forward, MinGrad_reverse },
-
-// splits should only be used if depth > 8
- { "GamutBinary", PREDICTOR_TYPE_1D, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
- { "GamutBinaryXOR", PREDICTOR_TYPE_1D, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
- { "SplitPrev", PREDICTOR_TYPE_1D, bytesplitPrev_forward, bytesplitPrev_reverse },
- { "SplitPrevChan", PREDICTOR_TYPE_1D, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
- { "PrevSplit", PREDICTOR_TYPE_1D, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
- { "PrevSplitChan", PREDICTOR_TYPE_1D, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
- { "NextSplit", PREDICTOR_TYPE_1D, splitwrap<next_forward>, unsplitwrap<next_reverse> },
- { "NextSplitChan", PREDICTOR_TYPE_1D, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
- { "UpByteSplit", PREDICTOR_TYPE_2D, splitwrap<up_forward>, unsplitwrap<up_reverse> },
- { "UpByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<up_forward>, unsplitchannelswrap<up_reverse> },
- { "DownByteSplit", PREDICTOR_TYPE_2D, splitwrap<down_forward>, unsplitwrap<down_reverse> },
- { "DownByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
- { "Prev2DByteSplit", PREDICTOR_TYPE_2D, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
- { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
- { "MinByteSplit", PREDICTOR_TYPE_2D, splitwrap<min_forward>, unsplitwrap<min_reverse> },
- { "MinByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
- { "MaxByteSplit", PREDICTOR_TYPE_2D, splitwrap<max_forward>, unsplitwrap<max_reverse> },
- { "MaxByteSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<max_forward>, unsplitchannelswrap<max_reverse> },
- { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
- { "AvgUpLeftSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<avgUpLeft_forward>, unsplitchannelswrap<avgUpLeft_reverse> },
- { "MedianSplit", PREDICTOR_TYPE_2D, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
- { "MedianSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<median3_forward>, unsplitchannelswrap<median3_reverse> },
- { "MEDSplit", PREDICTOR_TYPE_2D, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
- { "MEDSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<MED_forward>, unsplitchannelswrap<MED_reverse> },
- { "PaethSplit", PREDICTOR_TYPE_2D, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
- { "PaethSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
- { "MinGradSplit", PREDICTOR_TYPE_2D, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
- { "MinGradSplitChan", PREDICTOR_TYPE_2D, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
-
-
- { "Min3D", PREDICTOR_TYPE_3D, min3D_forward, min3D_reverse },
- { "Max3D", PREDICTOR_TYPE_3D, max3D_forward, max3D_reverse },
- { "Median3D", PREDICTOR_TYPE_3D, median3D_forward, median3D_reverse },
+ { "Up", PREDICTOR_TYPE_2D, false, up_forward, up_reverse },
+ { "Down", PREDICTOR_TYPE_2D, false, down_forward, down_reverse },
+ { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
+ { "Min", PREDICTOR_TYPE_2D, false, min_forward, min_reverse },
+ { "Max", PREDICTOR_TYPE_2D, false, max_forward, max_reverse },
+ { "AvgUpLeft", PREDICTOR_TYPE_2D, false, avgUpLeft_forward, avgUpLeft_reverse },
+ { "Median", PREDICTOR_TYPE_2D, false, median3_forward, median3_reverse },
+ { "MED", PREDICTOR_TYPE_2D, false, MED_forward, MED_reverse },
+ { "Paeth", PREDICTOR_TYPE_2D, false, Paeth_forward, Paeth_reverse },
+ { "MinGrad", PREDICTOR_TYPE_2D, false, MinGrad_forward, MinGrad_reverse },
 
 // splits should only be used if depth > 8
- { "Min3DSplit", PREDICTOR_TYPE_3D, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
- { "Min3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
- { "Max3DSplit", PREDICTOR_TYPE_3D, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
- { "Max3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
- { "Median3DSplit", PREDICTOR_TYPE_3D, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
- { "Median3DSplitChan", PREDICTOR_TYPE_3D, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
+ { "GamutBinarySplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
+ { "GamutBinaryXORSplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
+ { "SplitPrev", PREDICTOR_TYPE_1D, false, bytesplitPrev_forward, bytesplitPrev_reverse },
+ { "SplitPrevChan", PREDICTOR_TYPE_1D, false, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, false, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
+ { "PrevSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
+ { "NextSplit", PREDICTOR_TYPE_1D, false, splitwrap<next_forward>, unsplitwrap<next_reverse> },
+ { "NextSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
+ 
+ { "UpByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<up_forward>, unsplitwrap<up_reverse> },
+ { "UpByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<up_forward>, unsplitchannelswrap<up_reverse> },
+ { "DownByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<down_forward>, unsplitwrap<down_reverse> },
+ { "DownByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
+ { "Prev2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
+ { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
+ { "MinByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<min_forward>, unsplitwrap<min_reverse> },
+ { "MinByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
+ { "MaxByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<max_forward>, unsplitwrap<max_reverse> },
+ { "MaxByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<max_forward>, unsplitchannelswrap<max_reverse> },
+ { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, false, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
+ { "AvgUpLeftSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<avgUpLeft_forward>, unsplitchannelswrap<avgUpLeft_reverse> },
+ { "MedianSplit", PREDICTOR_TYPE_2D, false, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
+ { "MedianSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<median3_forward>, unsplitchannelswrap<median3_reverse> },
+ { "MEDSplit", PREDICTOR_TYPE_2D, false, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
+ { "MEDSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MED_forward>, unsplitchannelswrap<MED_reverse> },
+ { "PaethSplit", PREDICTOR_TYPE_2D, false, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
+ { "PaethSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
+ { "MinGradSplit", PREDICTOR_TYPE_2D, false, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
+ { "MinGradSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
+
+
+ { "Min3D", PREDICTOR_TYPE_3D, false, min3D_forward, min3D_reverse },
+ { "Max3D", PREDICTOR_TYPE_3D, false, max3D_forward, max3D_reverse },
+ { "Median3D", PREDICTOR_TYPE_3D, false, median3D_forward, median3D_reverse },
+
+// splits should only be used if depth > 8
+ { "Min3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ { "Min3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
+ { "Max3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
+ { "Max3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
+ { "Median3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
+ { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
 // TODO - next2D
 
@@ -3527,6 +3528,9 @@ bool describe3DLUT( CIccMBB *curve, CIccProfile *pIcc, std::string &description,
 
 /******************************************************************************/
 
+// debugging, verification
+#define ALWAYS_TEST_REVERSE   0
+
 static
 void test1DLUT( CIccTagCurve *curve, const std::string &name,
                 const std::string &description )
@@ -3549,7 +3553,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
   uint16_t *input = inputBuffer.get();
   uint16_t *output = outputBuffer.get();
 
-#if 1
+#if ALWAYS_TEST_REVERSE
   std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ steps ] );
   uint16_t *verify = verifyBuffer.get();
 #endif
@@ -3573,34 +3577,39 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
   // iterate over all predictors
   for (const auto &pred : predictorList) {
     
-    // apply forward predictor
-    applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
-                       dimensionArray, 1, 16, 1, steps, false );
-
-#if 1
-    // apply reverse predictor for verification
-    applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
-                       dimensionArray, 1, 16, 1, steps, true );
-    if ( memcmp(input,verify,steps*2) != 0 ) {
-        LogAnError(stderr, "%s: WARNING - %s predictor reverse failed %s\n",
-                    name.c_str(), pred.name, description.c_str() );
-    }
-#endif
-
-    // allow extra room, just in case
-    std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
-    uint16_t *compressed = compressedBuffer.get();
-
-    // compress
-    size_t inSize = steps*2;
-    size_t outBytes = steps*4;
-    if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, 9 ) ) {
-      LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
-    }
+    size_t outBytes = steps*2;  // aka no compression
     
-    if (outBytes < minSize) {
-      minSize = outBytes;
-      minPred = pred;
+    // 1D LUTs never use the gamut predictors
+    if (!pred.gamutOnly) {
+      // apply forward predictor
+      applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
+                         dimensionArray, 1, 16, 1, steps, false );
+
+  #if ALWAYS_TEST_REVERSE
+      // apply reverse predictor for verification
+      applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
+                         dimensionArray, 1, 16, 1, steps, true );
+      if ( memcmp(input,verify,steps*2) != 0 ) {
+          LogAnError(stderr, "%s: WARNING - %s predictor reverse failed %s\n",
+                      name.c_str(), pred.name, description.c_str() );
+      }
+  #endif
+
+      // allow extra room, just in case
+      std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
+      uint16_t *compressed = compressedBuffer.get();
+
+      // compress
+      size_t inSize = steps*2;
+      outBytes = steps*4;
+      if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, 9 ) ) {
+        LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
+      }
+      
+      if (outBytes < minSize) {
+        minSize = outBytes;
+        minPred = pred;
+      }
     }
 
     // report size
@@ -3684,9 +3693,10 @@ std::string channelName(int index, bool isInputMatrix, icColorSpaceSignature inp
 
 /******************************************************************************/
 
+
 static
 void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
-                const std::string &basename )
+                const std::string &basename, bool isGamut = false )
 {
   int inputChannels = clut->GetInputDim();
   int outputChannels = clut->GetOutputChannels();
@@ -3699,58 +3709,19 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
   }
 
   int gridPoints = clut->GridPoints(); // gridSize[0]
-  int tiles = gridPoints;
   if (gridPoints <= 0) {
     LogAnError(stderr, "%s: Skipping %s: invalid CLUT grid\n", basename.c_str(), sigDesc.c_str());
     return;
   }
-  
-  int tileWidth = 1;
-  int tileHeight = 1;
 
-  if (inputChannels >= 2) {
-    tileWidth = clut->GridPoint(1);
-    if (tileWidth <= 0) {
-      LogAnError(stderr, "%s: Skipping %s: invalid CLUT width\n", basename.c_str(), sigDesc.c_str());
-      return;
-    }
-  }
-
-  if (inputChannels >= 3) {
-    tileHeight = clut->GridPoint(2);
-    if (tileHeight <= 0) {
-      LogAnError(stderr, "%s: Skipping %s: invalid CLUT height\n", basename.c_str(), sigDesc.c_str());
-      return;
-    }
-  }
-
-  if (inputChannels > 3) {
-    for (int i = 3; i < inputChannels; ++i) {
+  if (inputChannels > 1) {
+    for (int i = 2; i < inputChannels; ++i) {
       int extraGridPoints = clut->GridPoint(i);
       if (extraGridPoints <= 0) {
         LogAnError(stderr, "%s: Skipping %s: invalid CLUT tile count\n", basename.c_str(), sigDesc.c_str());
         return;
       }
-      tiles *= extraGridPoints;
     }
-  }
-
-  // special case for single dimensional LUT
-  if (inputChannels == 1) {
-    tileWidth = tiles;
-    tiles = 1;
-    tileHeight = 1;
-  }
-
-  // special case for 2 dimensional LUT
-  if (inputChannels == 2) {
-    tileHeight = tiles;
-    tiles = 1;
-  }
-
-  if (tiles <= 0) {
-    LogAnError(stderr,"%s: WARNING - tile count overflow.\n", basename.c_str() );
-    tiles = 1;
   }
 
   icUInt32Number numPoints = clut->NumPoints();
@@ -3762,7 +3733,7 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
   uint16_t *input16 = (uint16_t*)inputBuffer.get();
   uint8_t *output = outputBuffer.get();
 
-#if 1
+#if ALWAYS_TEST_REVERSE
   std::unique_ptr<uint8_t[]> verifyBuffer( new uint8_t[ byteSize ] );
   uint8_t *verify = verifyBuffer.get();
 #endif
@@ -3796,34 +3767,38 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
   // iterate over all predictors
   for (const auto &pred : predictorList) {
     
-    // apply forward predictor
-    applyOnePredictor( pred, input8, output,
-                       dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, false );
-
-#if 1
-    // apply reverse predictor for verification
-    applyOnePredictor( pred, output, verify,
-                       dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, true );
-    if ( memcmp(input8,verify,byteSize) != 0 ) {
-        LogAnError(stderr, "%s: WARNING - %s predictor reverse failed\n",
-                    sigDesc.c_str(), pred.name );
-    }
-#endif
-
-    // allow extra room, just in case
-    std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*byteSize ] );
-    uint8_t *compressed = compressedBuffer.get();
-
-    // compress
-    size_t inSize = byteSize;
-    size_t outBytes = 2*byteSize;
-    if ( !deflateBuffer( output, compressed, inSize, outBytes, 9 ) ) {
-      LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
-    }
+    size_t outBytes = byteSize; // aka no compression
     
-    if (outBytes < minSize) {
-      minSize = outBytes;
-      minPred = pred;
+    if (!pred.gamutOnly || isGamut) {
+      // apply forward predictor
+      applyOnePredictor( pred, input8, output,
+                         dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, false );
+
+  #if ALWAYS_TEST_REVERSE
+      // apply reverse predictor for verification
+      applyOnePredictor( pred, output, verify,
+                         dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, true );
+      if ( memcmp(input8,verify,byteSize) != 0 ) {
+          LogAnError(stderr, "%s: WARNING - %s predictor reverse failed\n",
+                      sigDesc.c_str(), pred.name );
+      }
+  #endif
+
+      // allow extra room, just in case
+      std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*byteSize ] );
+      uint8_t *compressed = compressedBuffer.get();
+
+      // compress
+      size_t inSize = byteSize;
+      outBytes = 2*byteSize;
+      if ( !deflateBuffer( output, compressed, inSize, outBytes, 9 ) ) {
+        LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
+      }
+      
+      if (outBytes < minSize) {
+        minSize = outBytes;
+        minPred = pred;
+      }
     }
 
     // report size
@@ -3840,7 +3815,7 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
 
 static
 void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-                const std::string &basename )
+                const std::string &basename, bool isGamut = false )
 {
   const size_t bufSize = 128;
   char buf[bufSize];
@@ -3936,7 +3911,7 @@ void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
   // validate is called back before the Describe call
   clut->Begin();  // initialize some grid information
 
-  testCLUT( pIcc, clut, sigDesc + " table", basename );
+  testCLUT( pIcc, clut, sigDesc + " table", basename, isGamut );
 
 }
 
@@ -3946,7 +3921,7 @@ void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
 // return count of output objects created, 0 if none
 static
 void process3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
-        const std::string &basename )
+        const std::string &basename, bool isGamut = false )
 {
   const size_t bufSize = 128;
   char buf[bufSize];
@@ -3967,7 +3942,7 @@ void process3DLUT( CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     case icSigLut16Type:  // CIccTagLut16
     case icSigLutAtoBType:  // CIccTagLutAtoB
     case icSigLutBtoAType:  // CIccTagLutBtoA
-      processMBBType( pIcc, tag, sigDesc, basename );
+      processMBBType( pIcc, tag, sigDesc, basename, isGamut );
       break;
 
     case icSigMultiProcessElementType:
@@ -4069,7 +4044,7 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         {
         std::string sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
-        process3DLUT(pIcc, pTag, sigDesc, basename );
+        process3DLUT(pIcc, pTag, sigDesc, basename, (sig == icSigGamutTag) );
         }
         break;
 
