@@ -102,12 +102,14 @@ FUTURE: test LZMA compressor
 
 TODO: output to file?
 TODO: compression ratios?   average, best, worst?
+TODO: statistics only mode?
 
 
 NOTE - prediction algorithms are listed in increasing order of complexity
   we want to find the FIRST one with the minimum size, ignoring later ones with the same size
   many later ones fall back to earlier ones for cases they cannot handle
   In production, we would limit LUTs to 1D, gamt predictors to gamt tags, splits to 16 bit tables
+  In testing, run em all.
 
 
 From old notes: pred then bytesplit usually compresses better
@@ -128,8 +130,17 @@ B2A - darks (high ink, 255) to light (no ink, 0)
   can I specialize a 3 channel operation for LAB?
   can I get statistics from table to determine best approach?
 
+TODO - analyze tables where "none" was the winner: are they really bad, or is there a missed pattern?
+      some are really, really bad
+      some are just small, or incredibly simplistic (esp. 1D luts)
+      quantization
+      bad edges around gamut throw off predictions
+      edge sharpening along gamut boundary
+      tile edge artifacts
+      noise in dark areas
+      
  */
- 
+
  
 bool gTestCLUT = true;
 bool gTest1DLUT = true;
@@ -145,6 +156,7 @@ enum predictor_type {
 };
 
 
+// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 typedef void func_predictor( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                             size_t size1, size_t size2, size_t size3,
                             size_t colStep, size_t rowStep, size_t planeStep );
@@ -175,6 +187,8 @@ static func_predictor down_forward;
 static func_predictor down_reverse;
 static func_predictor prev2D_forward;
 static func_predictor prev2D_reverse;
+static func_predictor next2D_forward;
+static func_predictor next2D_reverse;
 static func_predictor min_forward;
 static func_predictor min_reverse;
 static func_predictor max_forward;
@@ -322,6 +336,7 @@ std::vector<predictor_desc> predictorList =
  { "Up", PREDICTOR_TYPE_2D, false, up_forward, up_reverse },
  { "Down", PREDICTOR_TYPE_2D, false, down_forward, down_reverse },
  { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
+ { "Next2D", PREDICTOR_TYPE_2D, false, next2D_forward, next2D_reverse },
  { "Min", PREDICTOR_TYPE_2D, false, min_forward, min_reverse },
  { "Max", PREDICTOR_TYPE_2D, false, max_forward, max_reverse },
  { "AvgUpLeft", PREDICTOR_TYPE_2D, false, avgUpLeft_forward, avgUpLeft_reverse },
@@ -346,6 +361,8 @@ std::vector<predictor_desc> predictorList =
  { "DownByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
  { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
+ { "Next2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<next2D_forward>, unsplitwrap<next2D_reverse> },
+ { "Next2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<next2D_forward>, unsplitchannelswrap<next2D_reverse> },
  { "MinByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<min_forward>, unsplitwrap<min_reverse> },
  { "MinByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
  { "MaxByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<max_forward>, unsplitwrap<max_reverse> },
@@ -374,7 +391,8 @@ std::vector<predictor_desc> predictorList =
  { "Median3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
-// TODO - next2D
+
+// TODO - prev3D, up3D, next3D ?
 
 };
 
@@ -1416,7 +1434,6 @@ void gamutbinxor_reverse( const uint8_t *input, uint8_t *output, int bitDepth, i
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void up_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -1519,7 +1536,6 @@ void up_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channe
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void down_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -1626,7 +1642,6 @@ void down_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void prev2D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -1757,7 +1772,138 @@ void prev2D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
+static
+void next2D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    for (size_t y = 0; y < size2; ++y) {
+      const uint8_t *inY = input + y*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      
+      for (size_t x = 0; x < (size1-1); ++x) {
+        const uint8_t *inX = inY + x*colStep;
+        const uint8_t *nextX = inY + (x+1)*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - nextX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+      
+      // up diff last pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c];
+      }
+      else {
+        const uint8_t *prevY = input + (y-1)*rowStep;
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] - prevY[(size1-1)*colStep+c]; // overflow/underflow is intentional
+      }
+    
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 0; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      
+      for (size_t x = 0; x < (size1-1); ++x) {
+        const uint16_t *inX = inY + x*colStep;
+        const uint16_t *nextX = inY + (x+1)*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] - nextX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+      
+      // up diff last pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c];
+      }
+      else {
+        const uint16_t *prevY = input16 + (y-1)*rowStep;
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] - prevY[(size1-1)*colStep+c]; // overflow/underflow is intentional
+      }
+      
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void next2D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (bitDepth == 8) {
+    for (size_t y = 0; y < size2; ++y) {
+      const uint8_t *inY = input + y*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      
+      // up diff last pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c];
+      }
+      else {
+        const uint8_t *prevY = output + (y-1)*rowStep;
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] + prevY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+      }
+      
+      for (int x = ((int)size1-2); x >= 0; --x) {
+        const uint8_t *inX = inY + x*colStep;
+        const uint8_t *nextX = outY + (x+1)*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + nextX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t y = 0; y < size2; ++y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      
+      // up diff last pixel (copying very first)
+      if (y == 0) {
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c];
+      }
+      else {
+        const uint16_t *prevY = output16 + (y-1)*rowStep;
+        for (int c = 0; c < channels; ++c)
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] + prevY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+      }
+      
+      for (int x = ((int)size1-2); x >= 0; --x) {
+        const uint16_t *inX = inY + x*colStep;
+        const uint16_t *nextX = outY + (x+1)*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          outX[c] = inX[c] + nextX[c];   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
 static
 void min_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -1892,7 +2038,6 @@ void min_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void max_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2027,7 +2172,6 @@ void max_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void avgUpLeft_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2158,7 +2302,6 @@ void avgUpLeft_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void median3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2293,7 +2436,6 @@ void median3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void MED_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2440,7 +2582,6 @@ void MED_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chann
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void Paeth_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2623,7 +2764,6 @@ void Paeth_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void MinGrad_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -2778,7 +2918,6 @@ void MinGrad_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void min3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t size3,
@@ -3012,7 +3151,6 @@ void min3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void max3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t size3,
@@ -3246,7 +3384,6 @@ void max3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int cha
 
 /******************************************************************************/
 
-// for normal call: colStep = channels, rowStep = size1*channels, planeStep = size1*size2*channels
 static
 void median3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t size3,
@@ -4358,7 +4495,7 @@ int main(int argc, char* argv[])
   
   filename_list fileList = parse_arguments(argc,argv);
 
-#if 0
+#if 1
   unitTestSplits();
   unitTestMedians();
   unitTestPredictors();
