@@ -213,6 +213,8 @@ static func_predictor median3D_forward;
 static func_predictor median3D_reverse;
 static func_predictor prev3D_forward;
 static func_predictor prev3D_reverse;
+static func_predictor next3D_forward;
+static func_predictor next3D_reverse;
 
 // utilities
 static void bytesplit16( const uint8_t *input, uint8_t *output, size_t count );
@@ -382,6 +384,7 @@ std::vector<predictor_desc> predictorList =
 
 
  { "Prev3D", PREDICTOR_TYPE_3D, false, prev3D_forward, prev3D_reverse },
+ { "Next3D", PREDICTOR_TYPE_3D, false, next3D_forward, next3D_reverse },
  { "Min3D", PREDICTOR_TYPE_3D, false, min3D_forward, min3D_reverse },
  { "Max3D", PREDICTOR_TYPE_3D, false, max3D_forward, max3D_reverse },
  { "Median3D", PREDICTOR_TYPE_3D, false, median3D_forward, median3D_reverse },
@@ -389,6 +392,8 @@ std::vector<predictor_desc> predictorList =
 // splits should only be used if depth > 8
  { "Prev3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<prev3D_forward>, unsplitwrap<prev3D_reverse> },
  { "Prev3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<prev3D_forward>, unsplitchannelswrap<prev3D_reverse> },
+ { "Next3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<next3D_forward>, unsplitwrap<next3D_reverse> },
+ { "Next3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<next3D_forward>, unsplitchannelswrap<next3D_reverse> },
  { "Min3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
  { "Min3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
  { "Max3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
@@ -397,7 +402,7 @@ std::vector<predictor_desc> predictorList =
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
 
-// TODO - prev3D, up3D, next3D ?
+// TODO - next3D, up3D, down3D ?
 
 };
 
@@ -3063,6 +3068,154 @@ void prev3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
           
           for (int c = 0; c < channels; ++c) {
             outX[c] = inX[c] + prevX[c];   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void next3D_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // 2D first plane
+    next2D_forward( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = input + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+
+      // next rows
+      for (size_t y = 0; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        for (size_t x = 0; x < (size1-1); ++x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *nextX = inY + (x+1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            outX[c] = inX[c] - nextX[c];   // overflow/underflow is intentional
+          }
+        }  // end x loop
+        
+        // below last pixel
+        for (int c = 0; c < channels; ++c) {
+            outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] - belowY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+        }
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    next2D_forward( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = input16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+
+      // previous rows
+      for (size_t y = 0; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        for (size_t x = 0; x < (size1-1); ++x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *nextX = inY + (x+1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          
+          for (int c = 0; c < channels; ++c) {
+            outX[c] = inX[c] - nextX[c];   // overflow/underflow is intentional
+          }
+        }  // end x loop
+        
+        // below last pixel
+        for (int c = 0; c < channels; ++c) {
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] - belowY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+        }
+      }   // end y loop
+    } // end z loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void next3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t size3,
+                size_t colStep, size_t rowStep, size_t planeStep )
+{
+  if (bitDepth == 8) {
+    // 2D first plane
+    next2D_reverse( input, output, 8, channels, size1, size2, 0, colStep, rowStep, 0 );
+
+    for (size_t z = 1; z < size3; ++z) {
+      const uint8_t *inZ = input + z*planeStep;
+      const uint8_t *belowZ = output + (z-1)*planeStep;
+      uint8_t *outZ = output + z*planeStep;
+
+      // previous rows
+      for (size_t y = 0; y < size2; ++y) {
+        const uint8_t *inY = inZ + y*rowStep;
+        const uint8_t *belowY = belowZ + y*rowStep;
+        uint8_t *outY = outZ + y*rowStep;
+        
+        // below last pixel
+        for (int c = 0; c < channels; ++c) {
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] + belowY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+        }
+        for (int x = ((int)size1-2); x >= 0; --x) {
+          const uint8_t *inX = inY + x*colStep;
+          const uint8_t *nextX = outY + (x+1)*colStep;
+          uint8_t *outX = outY + x*colStep;
+          for (int c = 0; c < channels; ++c) {
+            outX[c] = inX[c] + nextX[c];   // overflow/underflow is intentional
+          }
+        }  // end x loop
+      }   // end y loop
+    } // end z loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    // 2D first plane
+    next2D_reverse( input, output, 16, channels, size1, size2, 0, colStep, rowStep, 0 );
+    
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t z = 1; z < size3; ++z) {
+      const uint16_t *inZ = input16 + z*planeStep;
+      const uint16_t *belowZ = output16 + (z-1)*planeStep;
+      uint16_t *outZ = output16 + z*planeStep;
+    
+      // previous rows
+      for (size_t y = 0; y < size2; ++y) {
+        const uint16_t *inY = inZ + y*rowStep;
+        const uint16_t *belowY = belowZ + y*rowStep;
+        uint16_t *outY = outZ + y*rowStep;
+        
+        // below last pixel
+        for (int c = 0; c < channels; ++c) {
+          outY[(size1-1)*colStep+c] = inY[(size1-1)*colStep+c] + belowY[(size1-1)*colStep+c];   // overflow/underflow is intentional
+        }
+        for (int x = ((int)size1-2); x >= 0; --x) {
+          const uint16_t *inX = inY + x*colStep;
+          const uint16_t *nextX = outY + (x+1)*colStep;
+          uint16_t *outX = outY + x*colStep;
+          for (int c = 0; c < channels; ++c) {
+            outX[c] = inX[c] + nextX[c];   // overflow/underflow is intentional
           }
         }  // end x loop
       }   // end y loop
