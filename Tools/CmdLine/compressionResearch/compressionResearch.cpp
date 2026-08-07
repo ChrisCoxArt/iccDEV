@@ -519,6 +519,8 @@ bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     return false;
   }
 
+  zstr.data_type = Z_BINARY;
+
   zstr.next_in = input;
   zstr.avail_in = (uInt) in_bytes;
 
@@ -526,7 +528,7 @@ bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     zstr.next_out = output;
     zstr.avail_out = (uInt) out_bytes;
 
-    zstat = inflate(&zstr, Z_SYNC_FLUSH);
+    zstat = inflate(&zstr, Z_FINISH);
     if (zstat != Z_OK && zstat != Z_STREAM_END) {
       inflateEnd(&zstr);
       return false;
@@ -566,6 +568,8 @@ bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     return false;
   }
 
+  zstr.data_type = Z_BINARY;
+
   zstr.next_in = input;
   zstr.avail_in = (uInt) in_bytes;
 
@@ -573,9 +577,9 @@ bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     zstr.next_out = output;
     zstr.avail_out = (uInt) out_bytes;
 
-    zstat = deflate(&zstr, Z_SYNC_FLUSH);
+    zstat = deflate(&zstr, Z_FINISH);
     if (zstat != Z_OK && zstat != Z_STREAM_END) {
-      inflateEnd(&zstr);
+      deflateEnd(&zstr);
       return false;
     }
 
@@ -737,7 +741,7 @@ void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
 {
   func_predictor *predFunc = reverse ? pred.reverse : pred.forward;
   
-  // shortcut the simplest case
+  // shortcut the simplest case, because we'll use this a lot for 1D LUTs
   if (nDimensions == 1) {
     predFunc( input, output, bitDepth, channels, pixelCount, 0, 0, channels, 0, 0 );
     return;
@@ -4325,7 +4329,7 @@ bool describe3DLUT( CIccMBB *curve, CIccProfile *pIcc, std::string &description,
 /******************************************************************************/
 
 // debugging, verification
-#define ALWAYS_TEST_REVERSE   0
+#define ALWAYS_TEST_REVERSE   1
 
 static
 void test1DLUT( CIccTagCurve *curve, const std::string &name,
@@ -4381,15 +4385,15 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
       applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
                          dimensionArray, 1, 16, 1, steps, false );
 
-  #if ALWAYS_TEST_REVERSE
+#if ALWAYS_TEST_REVERSE
       // apply reverse predictor for verification
       applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                          dimensionArray, 1, 16, 1, steps, true );
       if ( memcmp(input,verify,steps*2) != 0 ) {
-          LogAnError(stderr, "%s: WARNING - %s predictor reverse failed %s\n",
+          LogAnError(stderr, "%s: ERROR - %s predictor reverse failed %s\n",
                       name.c_str(), pred.name, description.c_str() );
       }
-  #endif
+#endif
 
       // allow extra room, just in case
       std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
@@ -4398,7 +4402,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
       // compress
       size_t inSize = steps*2;
       outBytes = steps*4;
-      if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, 9 ) ) {
+      if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, Z_BEST_COMPRESSION ) ) {
         LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
       }
       
@@ -4535,10 +4539,10 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
 #endif
 
   // convert float buffer to int
-  for (uint32_t i = 0; i < numPoints; ++i ) {
+  for (uint32_t i = 0; i < numPoints*outputChannels; ++i ) {
     // bitDepth is always 8.8
     // but stored as float
-    auto value = *( clut->GetData(i) );
+    icFloatNumber value = *( clut->GetData(i) );
     if (bytes == 1)
       input8[i] = ClipU8( value * 255.0 );
     else
@@ -4570,15 +4574,15 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
       applyOnePredictor( pred, input8, output,
                          dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, false );
 
-  #if ALWAYS_TEST_REVERSE
+#if ALWAYS_TEST_REVERSE
       // apply reverse predictor for verification
       applyOnePredictor( pred, output, verify,
                          dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, true );
       if ( memcmp(input8,verify,byteSize) != 0 ) {
-          LogAnError(stderr, "%s: WARNING - %s predictor reverse failed\n",
+          LogAnError(stderr, "%s: ERROR - %s predictor reverse failed\n",
                       sigDesc.c_str(), pred.name );
       }
-  #endif
+#endif
 
       // allow extra room, just in case
       std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*byteSize ] );
@@ -4587,7 +4591,7 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
       // compress
       size_t inSize = byteSize;
       outBytes = 2*byteSize;
-      if ( !deflateBuffer( output, compressed, inSize, outBytes, 9 ) ) {
+      if ( !deflateBuffer( output, compressed, inSize, outBytes, Z_BEST_COMPRESSION ) ) {
         LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
       }
       
