@@ -98,6 +98,11 @@ Could thread most of the predictors for CLUT.
 NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
+FUTURE: gbd tag (and existing gbd0..3) from X-Rite
+FUTURE: targ characterization target text
+    mostlyspaces, numbers, decimal, negative, NL
+    some text
+    simple huffman or text mode may do best on this
 
 
 TODO: output to file?
@@ -119,18 +124,22 @@ From old notes: pred then bytesplit usually compresses better
 
 NOTE:
 A2B -- neutral (white or black) to chromatic
-      always 3 channels out
+      almost always 3 channels out  (link profiles can be other)
 
 B2A - darks (high ink, 255) to light (no ink, 0)
       darks (0 signal) to light (255 signal) for RGB/spectral
       always 3 channels in
 
-  increasing: left to right, min might be best
-  decreasing: right to left, max may be best
+  increasing: left to right (prev), min might be best
+  decreasing: right to left (next), max may be best
   can I specialize a 3 channel operation for LAB?
   can I get statistics from table to determine best approach?
+    can I determine a rough fit from the colorspaces?
+    CMYK = high to low?
+    RGB = low to high?
 
 TODO - analyze tables where "none" was the winner: are they really bad, or is there a missed pattern?
+      Well, there was a bug - now fixed.
       some are really, really bad
       some are just small, or incredibly simplistic (esp. 1D luts)
       quantization
@@ -138,12 +147,12 @@ TODO - analyze tables where "none" was the winner: are they really bad, or is th
       edge sharpening along gamut boundary
       tile edge artifacts
       noise in dark areas
-      
  */
 
  
 bool gTestCLUT = true;
 bool gTest1DLUT = true;
+bool gTestOther = true;
 
 /******************************************************************************/
 
@@ -411,8 +420,65 @@ std::vector<predictor_desc> predictorList =
  { "Median3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
+};
 
-// TODO - down3D ?
+/******************************************************************************/
+
+typedef void func_text_predictor( const uint8_t *input, uint8_t *output, int bitDepth, size_t count );
+
+static func_text_predictor null_forward;
+static func_text_predictor null_reverse;
+static func_text_predictor prev_forward;
+static func_text_predictor prev_reverse;
+static func_text_predictor bytesplitPrev_forward;
+static func_text_predictor bytesplitPrev_reverse;
+
+/******************************************************************************/
+
+template<func_text_predictor fun>
+void splittextwrap(const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+    if (bitDepth == 8)
+        fun(input,output,8,count);
+
+    if (bitDepth == 16) {
+      size_t half = count;
+      std::vector<uint8_t> temp( 2*half );
+      fun(input,&temp[0],16,count);
+      bytesplit16( &temp[0], output, half );
+    }
+}
+
+template<func_text_predictor fun>
+void unsplittextwrap(const uint8_t *input, uint8_t *output, int bitDepth, size_t count)
+{
+    if (bitDepth == 8)
+        fun(input,output,8,count);
+
+    if (bitDepth == 16) {
+      size_t half = count;
+      std::vector<uint8_t> temp( 2*half );
+      byteunsplit16( input, &temp[0], half );
+      fun(&temp[0],output,16,count);
+    }
+}
+
+/******************************************************************************/
+
+struct text_predictor_desc {
+    const char *name;
+    func_text_predictor *forward;
+    func_text_predictor *reverse;
+};
+
+std::vector<text_predictor_desc> text_predictorList =
+{
+ { "None", null_forward, null_reverse },
+ { "Previous", prev_forward, prev_reverse },  // probably useless
+
+ { "ByteSplit", splittextwrap<null_forward>, unsplittextwrap<null_reverse> },
+ { "PrevSplit", splittextwrap<prev_forward>, unsplittextwrap<prev_reverse> },
+ { "SplitPrev", bytesplitPrev_forward, bytesplitPrev_reverse },
 
 };
 
@@ -422,6 +488,7 @@ typedef std::map<std::string,int> predictor_statistics;
 
 predictor_statistics stats1D;
 predictor_statistics statsND;
+predictor_statistics statsOther;
 
 /******************************************************************************/
 /******************************************************************************/
@@ -547,7 +614,8 @@ bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
 /******************************************************************************/
 
 static
-bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes, int level = 9 )
+bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes,
+                  size_t &out_bytes, int level = Z_BEST_COMPRESSION, int dataType = Z_BINARY )
 {
 
 #ifndef ICC_USE_ZLIB
@@ -568,7 +636,7 @@ bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &ou
     return false;
   }
 
-  zstr.data_type = Z_BINARY;
+  zstr.data_type = dataType;
 
   zstr.next_in = input;
   zstr.avail_in = (uInt) in_bytes;
@@ -948,6 +1016,100 @@ void null_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
   size3 = size3 ? size3 : 1;
   size_t totalBytes = size1*size2*size3*(bitDepth/8)*channels;
   memcpy( output, input, totalBytes );
+}
+
+/******************************************************************************/
+
+static
+void null_forward( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  size_t totalBytes = count*(bitDepth/8);
+  memcpy( output, input, totalBytes );
+}
+
+/******************************************************************************/
+
+static
+void null_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  size_t totalBytes = count*(bitDepth/8);
+  memcpy( output, input, totalBytes );
+}
+
+/******************************************************************************/
+
+static
+void prev_forward( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  if (bitDepth == 8) {
+    output[0] = input[0];
+    for (size_t x = 1; x < count; ++x)
+      output[x] = input[x] - input[x-1];   // overflow/underflow is intentional
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    output16[0] = input16[0];
+    for (size_t x = 1; x < count; ++x)
+      output16[x] = input16[x] - input16[x-1];   // overflow/underflow is intentional
+  }
+}
+
+/******************************************************************************/
+
+static
+void prev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  if (bitDepth == 8) {
+    output[0] = input[0];
+    for (size_t x = 1; x < count; ++x)
+      output[x] = input[x] + output[x-1];   // overflow/underflow is intentional
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    output16[0] = input16[0];
+    for (size_t x = 1; x < count; ++x)
+      output16[x] = input16[x] + output16[x-1];   // overflow/underflow is intentional
+  }
+}
+
+/******************************************************************************/
+
+static
+void bytesplitPrev_forward( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  if (bitDepth == 8) {
+    prev_forward(input,output,8,count);
+    return;
+  }
+
+  if (bitDepth == 16) {
+    size_t half = count;
+    std::vector<uint8_t> temp( 2*half );
+    bytesplit16( input, &temp[0], half );
+    prev_forward( &temp[0],output,8,2*count);
+  }
+}
+
+/******************************************************************************/
+
+static
+void bytesplitPrev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
+{
+  if (bitDepth == 8) {
+    prev_reverse(input,output,8,count);
+    return;
+  }
+
+  if (bitDepth == 16) {
+    size_t half = count;
+    std::vector<uint8_t> temp( 2*half );
+    prev_reverse(input,&temp[0],8,2*count);
+    byteunsplit16( &temp[0], output, half );
+  }
 }
 
 /******************************************************************************/
@@ -4424,7 +4586,6 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
 
 /******************************************************************************/
 
-// output graphic representation of 1D LUTs
 static
 void process1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDesc,
                 const std::string &filename )
@@ -4475,6 +4636,148 @@ void process1DLUT(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sig
   }   // end switch by type
 
 }   // end process1DLUT()
+
+/******************************************************************************/
+
+static
+void testText( uint8_t *data, const std::string &name,
+                const std::string &description, size_t length, uint8_t depth )
+{
+  size_t steps = length * (depth/8);
+  
+  // this won't compress - don't bother
+  if (steps <= 32)
+    return;
+  
+  std::unique_ptr<uint8_t[]> outputBuffer( new uint8_t[ steps ] );
+  uint8_t *output = outputBuffer.get();
+
+#if ALWAYS_TEST_REVERSE
+  std::unique_ptr<uint8_t[]> verifyBuffer( new uint8_t[ steps ] );
+  uint8_t *verify = verifyBuffer.get();
+#endif
+  
+  // print name of the data object and base size
+  printf("%s\t%zu", name.c_str(), steps );
+  
+  size_t minSize = steps*2;
+  text_predictor_desc minPred = text_predictorList[0];
+
+  // iterate over all predictors
+  for (const auto &pred : text_predictorList) {
+    
+    size_t outBytes = steps;  // aka no compression
+    
+    // apply forward predictor
+    pred.forward( data, output, depth, length );
+
+#if ALWAYS_TEST_REVERSE
+    // apply reverse predictor for verification
+    pred.reverse( output, verify, depth, length );
+    if ( memcmp(data,verify,steps) != 0 ) {
+        LogAnError(stderr, "%s: ERROR - %s predictor reverse failed %s\n",
+                    name.c_str(), pred.name, description.c_str() );
+    }
+#endif
+
+    // allow extra room, just in case
+    std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*steps ] );
+    uint8_t *compressed = compressedBuffer.get();
+
+    // compress
+    size_t inSize = steps;
+    outBytes = steps*2;
+    if ( !deflateBuffer( output, compressed, inSize, outBytes, Z_BEST_COMPRESSION, Z_TEXT ) ) {
+      LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
+    }
+    
+    if (outBytes < minSize) {
+      minSize = outBytes;
+      minPred = pred;
+    }
+
+    // report size
+    printf("\t%zu", outBytes );
+  }
+
+  printf("\n"); // and finish the line of results
+  printf("Predictor %s won with %zu bytes\n", minPred.name, minSize );
+  statsOther[ minPred.name ] += 1;
+
+}
+
+
+/******************************************************************************/
+
+static
+void processTextTag(CIccProfile * /* pIcc */, CIccTag *tag, const std::string &sigDesc,
+                const std::string &filename )
+{
+  const size_t bufSize = 64;
+  char buf[bufSize];
+  
+  if (!gTestOther)
+    return;
+
+  if (!tag) {
+    LogAnError(stderr, "%s: ERROR - missing data for %s\n", filename.c_str(), sigDesc.c_str() );
+    return;
+  }
+
+  icTagTypeSignature typeSig = tag->GetType();
+  
+  std::string description;
+  
+  std::string path(":");
+  path += sigDesc;
+  std::string report;
+  if (tag->Validate(path, report, NULL) > icValidateWarning) {
+    LogAnError(stderr,"%s: WARNING - text failed validation:\n%s\n", filename.c_str(), report.c_str() );
+    description = "text tag";
+    return;
+  }
+
+  switch(typeSig) {
+    case icSigTextType:
+      {
+      CIccTagText *data = dynamic_cast<CIccTagText*> (tag);
+      if (data)
+        testText( (uint8_t *)data->GetText(), sigDesc, description, data->Capacity(), 8 );
+      }
+      break;
+      
+    case icSigUtf8TextType:
+      {
+      CIccTagUtf8Text *data = dynamic_cast<CIccTagUtf8Text*> (tag);
+      if (data)
+        testText( (uint8_t *)data->GetText(), sigDesc, description, data->Capacity(), 8 );
+      }
+      break;
+
+    case icSigUtf16TextType:
+      {
+      CIccTagUtf16Text *data = dynamic_cast<CIccTagUtf16Text*> (tag);
+      if (data)
+        testText( (uint8_t *)data->GetText(), sigDesc, description, data->Capacity(), 16 );
+      }
+      break;
+    
+    case icSigZipUtf8TextType:
+    case icSigZipXmlType:
+    case icSigZipXMLType:
+      // it's already compressed
+      break;
+
+    default:
+      // unknown
+      LogAnError(stderr,"%s: Unknown text type %s for tag %s\n",
+         filename.c_str(),
+         icGetSig(buf, bufSize, typeSig), sigDesc.c_str() );
+      break;
+
+  }   // end switch by type
+
+}   // end processTextTag()
 
 /******************************************************************************/
 
@@ -4796,13 +5099,13 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
   const size_t bufSize = 64;
   char buf1[bufSize];
   
-  
-  printf("name\toriginal"); // start label line
-  for (const auto &pred : predictorList) {
-    printf("\t%s", pred.name );
+  if (!gTestOther) {
+    printf("name\toriginal"); // start label line
+    for (const auto &pred : predictorList) {
+      printf("\t%s", pred.name );
+    }
+    printf("\n"); // and finish the labels line
   }
-  printf("\n"); // and finish the labels line
-  
 
   for ( auto &tag: pIcc->m_Tags ) {
     icTagSignature sig = tag.TagInfo.sig;
@@ -4848,6 +5151,15 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         }
         break;
 
+      // text tags
+      case icSigCharTargetTag:
+        {
+        std::string sigDesc = icGetSigStr(buf1, bufSize, sig);
+        CIccTag *pTag = pIcc->FindTag(tag); // load if needed
+        processTextTag(pIcc, pTag, sigDesc, basename );
+        }
+        break;
+
       // ignore everything else
       default:
         break;
@@ -4872,8 +5184,9 @@ void unitTestPredictorInner( const predictor_desc &pred,
                    dimArray, dimensions, bitDepth, channels, pixelCount, false );
   applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                    dimArray, dimensions, bitDepth, channels, pixelCount, true );
-  if ( memcmp(input,verify,pixelCount) != 0 ) {
-    LogAnError(stderr, "ERROR - predictor %s reverse %dbits %dchannels %ddimensions failed unit test\n",
+  size_t bytes = pixelCount*channels*(bitDepth/8);
+  if ( memcmp(input,verify,bytes) != 0 ) {
+    LogAnError(stderr, "ERROR - predictor %s %dbits %dchannels %ddimensions failed unit test\n",
                 pred.name, bitDepth, channels, dimensions );
   }
 }
@@ -4940,23 +5253,6 @@ void unitTestPredictors(void)
   }
 #endif
 
-  // simple compress and decompress to validate zlib
-  size_t compSize = pixelCount3*2;
-  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, 9 )) {
-    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
-  }
-  size_t fullSize = pixelCount3*2;
-  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
-    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
-  }
-  if (fullSize != pixelCount3) {
-    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
-  }
-  if (memcmp( input, verify, pixelCount3) != 0) {
-    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
-  }
-
-
   // iterate over all predictors, 8 and 16 bit
   for (const auto &pred : predictorList) {
     unitTestPredictorMiddle( pred, input, output, verify, pixelCount1, testDim1, dimensionArray1 );
@@ -4969,6 +5265,104 @@ void unitTestPredictors(void)
 
 } // end unitTestPredictors
 
+/******************************************************************************/
+
+#ifndef NDEBUG
+static
+void unitTestTextPredictorInner( const text_predictor_desc &pred,
+                        uint16_t *input, uint16_t *output, uint16_t *verify,
+                        size_t count, uint8_t bitDepth)
+{
+  memset( output, 0, count*2 );
+  memset( verify, 2, count*2 );
+  pred.forward( (uint8_t*)input, (uint8_t*)output, bitDepth, count );
+  pred.reverse( (uint8_t*)output, (uint8_t*)verify, bitDepth, count );
+  size_t bytes = count*(bitDepth/8);
+  if ( memcmp(input,verify,bytes) != 0 ) {
+    LogAnError(stderr, "ERROR - text predictor %s %dbits failed unit test\n",
+                pred.name, bitDepth );
+  }
+}
+#endif      // DEBUG
+
+/******************************************************************************/
+
+// sanity check!
+static
+void unitTestTextPredictors(void)
+{
+#ifndef NDEBUG
+  const uint32_t testLen = 41;
+  
+  std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ testLen*2 ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ testLen*2 ] );
+  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ testLen*2 ] );
+  uint16_t *input = inputBuffer.get();
+  uint16_t *output = outputBuffer.get();
+  uint16_t *verify = verifyBuffer.get();
+
+
+  // fill the input with an odd pattern
+  for (uint32_t i = 0; i < testLen; ++i) {
+    input[i] = (uint16_t)((41*i) & 0xFFFF);
+  }
+
+  // iterate over all predictors, 8 and 16 bit
+  for (const auto &pred : text_predictorList) {
+    unitTestTextPredictorInner( pred, input, output, verify, testLen, 8 );
+    unitTestTextPredictorInner( pred, input, output, verify, testLen, 16 );
+  }
+#endif      // DEBUG
+
+} // end unitTestTextsPredictors
+
+/******************************************************************************/
+
+// sanity check!
+static
+void unitTestZlib(void)
+{
+#ifndef NDEBUG
+
+  uint32_t pixelCount3 = (uint32_t) 12345;
+  
+  std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ pixelCount3*2 ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ pixelCount3*2 ] );
+  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ pixelCount3*2 ] );
+  uint16_t *input = inputBuffer.get();
+  uint16_t *output = outputBuffer.get();
+  uint16_t *verify = verifyBuffer.get();
+
+
+  // fill the input with an odd pattern
+#if 0
+  memset( input, 0xA5, 2*pixelCount4 ); // pattern for DEBUGGING
+#else
+  for (uint32_t i = 0; i < pixelCount3; ++i) {
+    input[i] = (uint16_t)((41*i) & 0xFFFF);
+  }
+#endif
+
+  // simple compress and decompress to validate zlib
+  size_t compSize = pixelCount3*2;
+  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, Z_BEST_COMPRESSION )) {
+    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
+  }
+  size_t fullSize = pixelCount3*2;
+  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
+    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
+  }
+  if (fullSize != pixelCount3) {
+    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
+  }
+  if (memcmp( input, verify, pixelCount3) != 0) {
+    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
+  }
+#endif      // DEBUG
+
+} // end unitTestZlib
+
+/******************************************************************************/
 
 // sanity check!
 static
@@ -5030,6 +5424,7 @@ void unitTestMedians(void)
 #endif      // DEBUG
 } // end unitTestMedians
 
+/******************************************************************************/
 
 // sanity check!
 static
@@ -5084,6 +5479,7 @@ void printUsage(void)
   printf("\t-silent         don't output any warnings or errors.\n");
   printf("\t-clut           test only n-dimensional luts\n");
   printf("\t-1dlut          test only 1 dimensional luts\n");
+  printf("\t-other          test only non-lut tags (text, etc.)\n");
   printf("\t-V              print usage and version.\n");
   printf("\t-help           print usage and version.\n");
   printf("compressionResearch built with IccProfLib version " ICCPROFLIBVER "\n\n");
@@ -5106,10 +5502,17 @@ filename_list parse_arguments( int argc, char *argv[] )
     else if ( (strcasecmp( argv[c], "-clut" ) == 0 ) ) {
       gTest1DLUT = false;
       gTestCLUT = true;
+      gTestOther = false;
+    }
+    else if ( (strcasecmp( argv[c], "-other" ) == 0 ) ) {
+      gTest1DLUT = false;
+      gTestCLUT = false;
+      gTestOther = true;
     }
     else if ( (strcasecmp( argv[c], "-1dlut" ) == 0 ) ) {
       gTestCLUT = false;
       gTest1DLUT = true;
+      gTestOther = false;
     }
     else if ( strcasecmp( argv[c], "-V" ) == 0
             || strcasecmp( argv[c], "--V" ) == 0
@@ -5158,12 +5561,15 @@ int main(int argc, char* argv[])
   
   filename_list fileList = parse_arguments(argc,argv);
 
-#if 0
   unitTestSplits();
   unitTestMedians();
+  unitTestZlib();
+  unitTestTextPredictors();
+#if 0
   unitTestPredictors();
 #endif
 
+  // iterate over filenames on the command line
   for (auto &file : fileList) {
     std::string sanitizedFile = icSanitizeFileName( file );
 
@@ -5206,6 +5612,13 @@ int main(int argc, char* argv[])
   if (gTestCLUT) {
     printf("\nND statistics\n");
     for (const auto &entry: statsND) {
+      printf("%s : %d\n", entry.first.c_str(), entry.second );
+    }
+  }
+  
+  if (gTestOther) {
+    printf("\nOther statistics\n");
+    for (const auto &entry: statsOther) {
       printf("%s : %d\n", entry.first.c_str(), entry.second );
     }
   }
