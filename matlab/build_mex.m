@@ -195,7 +195,15 @@ function [linkArgs, runtimeFiles] = find_optional_dependencies( ...
   if ~isempty(tripletMatch)
     triplet = strtrim(tripletMatch{1});
   end
-  tripletRoot = fullfile(buildDir, 'vcpkg_installed', triplet);
+  cachedInstalledRoot = '';
+  installedMatch = regexp(cacheText, ...
+    '(?m)^VCPKG_INSTALLED_DIR:[^=]*=([^\r\n]+)\s*$', 'tokens', 'once');
+  if ~isempty(installedMatch)
+    cachedInstalledRoot = strtrim(installedMatch{1});
+  end
+  installedRoot = iccdev.qa.select_vcpkg_installed_root( ...
+    buildDir, cachedInstalledRoot, triplet);
+  tripletRoot = fullfile(installedRoot, triplet);
   staticTriplet = ~isempty(strfind(triplet, '-static')); %#ok<STREMP>
   if debugBuild
     libraryCandidates = {
