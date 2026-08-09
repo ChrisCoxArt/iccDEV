@@ -583,8 +583,11 @@ static
 size_t deflateOutputUpperBound( size_t bytes )
 {
   // conservative upper bound of output buffer size needed, based on zLib code
-  // size_t outBytes = bytes + ((bytes + 7) >> 3) + ((bytes + 63) >> 6) + 11;    // very conservative
-  size_t outBytes = bytes + (bytes >> 12) + (bytes >> 14) + 11; // most likely for default settings
+  // size_t outBytes = bytes + ((bytes + 7) >> 3) + ((bytes + 63) >> 6) + 11; // conservative
+  
+  // more likely bound given default parameters
+  size_t outBytes = bytes + (bytes >> 12) + (bytes >> 14) + 11;
+  
   return outBytes;
 }
 
@@ -5390,9 +5393,7 @@ static
 void unitTestZlib(void)
 {
 #ifndef NDEBUG
-
   uint32_t pixelCount3 = (uint32_t) 12345;
-  
   
   size_t outSize = deflateOutputUpperBound(pixelCount3*4);
   std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ pixelCount3*2 ] );
@@ -5401,7 +5402,6 @@ void unitTestZlib(void)
   uint16_t *input = inputBuffer.get();
   uint16_t *output = outputBuffer.get();
   uint16_t *verify = verifyBuffer.get();
-
 
   // fill the input with an odd pattern
 #if 0
@@ -5412,20 +5412,22 @@ void unitTestZlib(void)
   }
 #endif
 
-  // simple compress and decompress to validate zlib
-  size_t compSize = outSize;
-  if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, Z_BEST_COMPRESSION )) {
-    LogAnError(stderr, "ERROR - zlib deflate failed\n" );
-  }
-  size_t fullSize = pixelCount3*2;
-  if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
-    LogAnError(stderr, "ERROR - zlib inflate failed\n" );
-  }
-  if (fullSize != pixelCount3) {
-    LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
-  }
-  if (memcmp( input, verify, pixelCount3) != 0) {
-    LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
+  for (size_t i = pixelCount3-10; i <= pixelCount3; ++i) {
+    // simple compress and decompress to validate zlib
+    size_t compSize = outSize;
+    if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, i, compSize, Z_BEST_COMPRESSION )) {
+      LogAnError(stderr, "ERROR - zlib deflate failed\n" );
+    }
+    size_t fullSize = i*2;
+    if (!inflateBuffer( (uint8_t*)output, (uint8_t*)verify, compSize, fullSize )) {
+      LogAnError(stderr, "ERROR - zlib inflate failed\n" );
+    }
+    if (fullSize != i) {
+      LogAnError(stderr, "ERROR - zlib failed unit test size\n" );
+    }
+    if (memcmp( input, verify, i) != 0) {
+      LogAnError(stderr, "ERROR - zlib failed unit test comparison\n" );
+    }
   }
 #endif      // DEBUG
 
