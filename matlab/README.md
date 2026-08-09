@@ -9,6 +9,7 @@ ICC color profile library, built as a MEX extension.
 - **Color transforms** - build multi-profile CMM pipelines and apply pixel transforms
 - **Thread-safe apply** - create per-thread apply handles
 - **MATLAB OOP** - classes in `+iccdev` package namespace
+- **Profile plots** - render data from the `iccProfilePlot` visualization model
 - **NumPy-compatible** - handles column-major <-> row-major transpose automatically
 - **Compatible** - MATLAB R2015b+ and GNU Octave 6+
 
@@ -17,6 +18,9 @@ ICC color profile library, built as a MEX extension.
 - MATLAB R2015b+ (with MEX compiler) or GNU Octave 6+
 - C++17 compiler (MSVC, GCC, or Clang)
 - IccProfLib2 built (static library)
+
+`iccdev.plot` additionally requires MATLAB R2016b+ or GNU Octave 7.1+ for
+`jsondecode`, plus a Java-enabled runtime for shell-free process execution.
 
 ## Quick Start
 
@@ -105,9 +109,11 @@ cmm.close();
 | Function | Description |
 |----------|-------------|
 | `iccdev.sig_to_str(sig)` | Convert 4-byte ICC signature to ASCII string |
+| `iccdev.plot(profile, ...)` | Render all graph visualizations exposed by `iccProfilePlot` |
 | `iccdev.qa.check_luminance_normalization()` | Reproduce spectral-viewing luminance scaling and warning-window checks |
 | `iccdev.docker_available(image)` | Check Docker daemon and image availability |
 | `iccdev.docker_validate(profile, ...)` | Run containerized dump and round-trip validation |
+| `add_docker_path(directory)` | Add a user-selected Docker CLI directory to the current MATLAB process |
 | `build_mex(...)` | Build the MEX extension |
 | `run_local_qa()` | Run local MEX regression and stress checks |
 | `run_gamma_qa()` | Verify issue #815 curveType u8Fixed8 gamma decoding |
@@ -188,6 +194,22 @@ build_mex('BuildDir', fullfile(repo_root, 'msvc'));
 When `ICC_USE_ZLIB=ON`, `build_mex` reads `CMakeCache.txt`, links the matching
 vcpkg zlib import library, and copies its runtime DLL beside `icc_mex`.
 
+Build the data-first plotting CLI when using `iccdev.plot`:
+
+```powershell
+cmake --build $Build --config Release --target iccProfilePlot --parallel
+```
+
+Then render every graph exposed by a profile:
+
+```matlab
+plots = iccdev.plot(profile_path);
+```
+
+Use `'Visible', 'off'` for automated checks. `iccdev.plot` searches
+`ICCDEV_BUILD_DIR`, common repository build directories, and `PATH`; use the
+`BuildDir` or `PlotTool` option to select an explicit build.
+
 ### Linux / macOS
 
 ```matlab
@@ -215,6 +237,7 @@ missing-profile smoke checks with:
 
 ```matlab
 run_local_qa();
+test_plot();
 ```
 
 Verify the ICC.1 `curveType` gamma calculation used by issue
@@ -259,6 +282,16 @@ Validate the same profile with the published container:
 run_docker_qa();
 run('matlab/examples/docker_interop.m');
 ```
+
+If Docker is installed but is not on the PATH inherited by MATLAB Desktop,
+select its CLI directory explicitly:
+
+```matlab
+add_docker_path(docker_cli_directory);
+```
+
+The helper validates the directory and executable, updates only the current
+MATLAB process, and does not run Docker or QA automatically.
 
 Reproduce the issue #1811 spectral-viewing luminance calculations without
 building the MEX gateway:
