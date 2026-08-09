@@ -98,11 +98,26 @@ Could thread most of the predictors for CLUT.
 NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
-FUTURE: gbd tag (and existing gbd0..3) from X-Rite
-FUTURE: targ characterization target text
-    mostlyspaces, numbers, decimal, negative, NL
-    some text
-    simple huffman or text mode may do best on this
+FUTURE: ncl2 tag - reorder text and binary data for improved compression
+      count, count device coords, count pcs coords, prefix string, suffix string,
+              names[], device values[], PCS values[]
+      compress text and binary separately? Or single stream?
+FUTURE: gbd tag (and existing gbd0..3)
+FUTURE: D2B, B2D for v5   'mpet' need to find large LUTs
+
+FUTURE: most other large tags are proprietary
+    CXF /zxml - GMacBeth already compressed
+    agfa/data  - AGFA, mix of text, int, float
+    ucmT/ucmT  - Canon, looks like a LUT
+    DEVD/MSBN - Monaco (now X-Rite), mixed int and float
+    DEVS/MSBN - Monaco, huge, mixed, but mostly float
+    SAMo  -  ancient SAME, not worth the hassle)
+    CIED/text - GMacBeth, text, aka 'targ' measurements
+    DevD/text - GMacBeth, text, aka 'targ' inks
+    CL00/Cli3 - Candela (now Pictographics?), compressed or encrypted?
+    CL00/CLo4 - Candela, compressed or encrypted?
+        same header in both CL00
+        "A3415375 E600D66C 79C25155 E50BDADB 8E7183A1 ED17CA67 8192AAD1 F2CCEFF4 617BC8EC 543A332B 81FBF582 DB9B5467 "
 
 
 TODO: output to file?
@@ -565,6 +580,17 @@ void LogAnError(FILE *stream, const char* format, ...)
 /******************************************************************************/
 
 static
+size_t deflateOutputUpperBound( size_t bytes )
+{
+  // conservative upper bound of output buffer size needed, based on zLib code
+  // size_t outBytes = bytes + ((bytes + 7) >> 3) + ((bytes + 63) >> 6) + 11;    // very conservative
+  size_t outBytes = bytes + (bytes >> 12) + (bytes >> 14) + 11; // most likely for default settings
+  return outBytes;
+}
+
+/******************************************************************************/
+
+static
 bool inflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes, size_t &out_bytes )
 {
 
@@ -625,7 +651,13 @@ bool deflateBuffer( uint8_t *input, uint8_t *output, size_t in_bytes,
   z_stream zstr;
   memset(&zstr, 0, sizeof(zstr));
 
+#if 0
+  zstat = deflateInit2( &zstr, level, Z_DEFLATED, -15, 9, Z_DEFAULT_STRATEGY );    // saves 6 bytes per buffer, at loss of identifier and checksum, still worse on large buffers - HOW?
+//  zstat = deflateInit2( &zstr, level, Z_DEFLATED, 15, 9, Z_DEFAULT_STRATEGY );    // slightly worse than default for large tables - HOW?
+//  zstat = deflateInit2( &zstr, level, Z_DEFLATED, 15, 9, Z_FILTERED );    // worse all round
+#else
   zstat = deflateInit(&zstr, level);
+#endif
   if (zstat != Z_OK) {
     return false;
   }
@@ -4558,12 +4590,13 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
 #endif
 
       // allow extra room, just in case
-      std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ 2*steps ] );
+      size_t outSize = deflateOutputUpperBound(steps*2);
+      std::unique_ptr<uint16_t[]> compressedBuffer( new uint16_t[ outSize ] );
       uint16_t *compressed = compressedBuffer.get();
 
       // compress
       size_t inSize = steps*2;
-      outBytes = steps*4;
+      outBytes = outSize;
       if ( !deflateBuffer( (uint8_t*)output, (uint8_t*)compressed, inSize, outBytes, Z_BEST_COMPRESSION ) ) {
         LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
       }
@@ -4681,12 +4714,13 @@ void testText( uint8_t *data, const std::string &name,
 #endif
 
     // allow extra room, just in case
-    std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*steps ] );
+    size_t outSize = deflateOutputUpperBound(steps);
+    std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ outSize ] );
     uint8_t *compressed = compressedBuffer.get();
 
     // compress
     size_t inSize = steps;
-    outBytes = steps*2;
+    outBytes = outSize;
     if ( !deflateBuffer( output, compressed, inSize, outBytes, Z_BEST_COMPRESSION, Z_TEXT ) ) {
       LogAnError(stderr, "%s: ERROR - could not deflate %s\n", name.c_str(), description.c_str() );
     }
@@ -4888,16 +4922,17 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
 #endif
 
       // allow extra room, just in case
-      std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ 2*byteSize ] );
+      size_t outSize = deflateOutputUpperBound(byteSize);
+      std::unique_ptr<uint8_t[]> compressedBuffer( new uint8_t[ outSize ] );
       uint8_t *compressed = compressedBuffer.get();
 
       // compress
       size_t inSize = byteSize;
-      outBytes = 2*byteSize;
+      outBytes = outSize;
       if ( !deflateBuffer( output, compressed, inSize, outBytes, Z_BEST_COMPRESSION ) ) {
         LogAnError(stderr, "%s: ERROR - could not deflate\n", sigDesc.c_str() );
       }
-      
+
       if (outBytes < minSize) {
         minSize = outBytes;
         minPred = pred;
@@ -5092,12 +5127,17 @@ std::string remove_path( const std::string& filename )
 
 /******************************************************************************/
 
+const uint32_t icSigCIED = 0x43494544;
+const uint32_t icSigDevD = 0x44657644;
+const uint32_t icSigCXF  = 0x43784620;
+
 // create graphic representation of LUTs, named colors, etc.
 static
 void processProfile( CIccProfile *pIcc, const std::string &basename )
 {
   const size_t bufSize = 64;
   char buf1[bufSize];
+  char buf2[bufSize];
   
   if (!gTestOther) {
     printf("name\toriginal"); // start label line
@@ -5153,6 +5193,8 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 
       // text tags
       case icSigCharTargetTag:
+      case icSigCIED:
+      case icSigDevD:
         {
         std::string sigDesc = icGetSigStr(buf1, bufSize, sig);
         CIccTag *pTag = pIcc->FindTag(tag); // load if needed
@@ -5160,8 +5202,33 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         }
         break;
 
-      // ignore everything else
+      
+      // Named Color List, can be large
+      case icSigNamedColor2Tag:
+        break;
+      
+      // 3D gamut boundary data, X-Rite and V5
+      case icSigGamutBoundaryDescription0Tag:
+      case icSigGamutBoundaryDescription1Tag:
+      case icSigGamutBoundaryDescription2Tag:
+      case icSigGamutBoundaryDescription3Tag:
+        // TODO - compress this!
+        break;
+      
+      
+      // CXF - already compressed xml
+      case icSigCXF:
+        break;
+
+      // look for large tags that we don't know about
       default:
+        if (tag.TagInfo.size > 20*1024) {
+          const char *sigDesc = icGetSigStr(buf1, bufSize, sig);
+          CIccTag *pTag = pIcc->FindTag(tag); // load if needed
+          icTagTypeSignature typeSig = pTag->GetType();
+          const char *typeDesc = icGetSigStr(buf2, bufSize, typeSig);
+          printf("Unknown large Tag %s / %s : %u bytes\n", sigDesc, typeDesc, tag.TagInfo.size );
+        }
         break;
 
     }   // end switch over tag signatures
@@ -5326,8 +5393,10 @@ void unitTestZlib(void)
 
   uint32_t pixelCount3 = (uint32_t) 12345;
   
+  
+  size_t outSize = deflateOutputUpperBound(pixelCount3*4);
   std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ pixelCount3*2 ] );
-  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ pixelCount3*2 ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ outSize/2 ] );
   std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ pixelCount3*2 ] );
   uint16_t *input = inputBuffer.get();
   uint16_t *output = outputBuffer.get();
@@ -5344,7 +5413,7 @@ void unitTestZlib(void)
 #endif
 
   // simple compress and decompress to validate zlib
-  size_t compSize = pixelCount3*2;
+  size_t compSize = outSize;
   if (!deflateBuffer( (uint8_t*)input, (uint8_t*)output, pixelCount3, compSize, Z_BEST_COMPRESSION )) {
     LogAnError(stderr, "ERROR - zlib deflate failed\n" );
   }
