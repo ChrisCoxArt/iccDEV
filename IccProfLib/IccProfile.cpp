@@ -802,27 +802,47 @@ void CIccProfile::CopyAttach(CIccProfile* pProfile, bool bSharedIO)
 
 /**
 ******************************************************************************
-* Name: CIccProfile::ReadTags
-* 
-* Purpose: This will read the all the tags from the IO object into the
-*  CIccProfile object. The IO object must have been attached before
-*		calling this function.
-* 
-* Return: 
-*  true - CIccProfile object now contains all tag data,
-*  false - No IO object attached or tags cannot be read.
+* Name: CIccProfile::loadTags
+*
+* Purpose: Shared implementation behind ReadTags() and FindAllTags(). Resolves
+*  the IO to use (m_pAttachIO, or the passed profile's if it has one),
+*  short-circuits when there is no IO (successful iff every tag is already
+*  loaded), and otherwise saves the IO position, loops LoadTag over m_Tags,
+*  and restores the position on every path.
+*
+* Args:
+*  pProfile - profile whose m_pAttachIO should be preferred, or NULL to use
+*   this object's own m_pAttachIO,
+*  mode - icLoadTagsFull: pass bReadAll=true to LoadTag() (recursively pulling
+*   the whole nested tree of embedded profiles), abort and return false as soon
+*   as one LoadTag call fails, and revisit (i.e. call LoadTag(), which for an
+*   already-loaded entry means CIccTag::ReadAll()) an entry that already
+*   carries a tag object -- ReadTags()' behavior.
+*   icLoadTagsShallow: pass bReadAll=false, never abort, and skip an entry that
+*   already carries a tag object entirely rather than revisiting it -- at one
+*   level such an entry is already fully satisfied, and LoadTag()'s
+*   already-loaded branch calls CIccTag::ReadAll() unconditionally regardless
+*   of bReadAll, so revisiting it would still recurse into a nested embedded
+*   profile's full tree -- FindAllTags()' behavior.
+*
+* Return:
+*  true - every tag was already loaded or was successfully loaded by this call,
+*  false - no IO object attached and something was still unloaded, or (in
+*   icLoadTagsFull mode) a LoadTag call failed, or (in icLoadTagsShallow mode)
+*   at least one attempted LoadTag call failed, or the IO position could not be
+*   restored.
 *******************************************************************************
 */
-bool CIccProfile::ReadTags(CIccProfile* pProfile)
+bool CIccProfile::loadTags(CIccProfile *pProfile, IccLoadTagsMode mode)
 {
 	CIccIO *pIO = m_pAttachIO;
-	
+
 	if (pProfile && pProfile->m_pAttachIO) {
 		pIO = pProfile->m_pAttachIO;
 	}
 
   TagEntryList::iterator i;
-  //If there is no IO handle then ReadTags is successful if they have all been
+  //If there is no IO handle then loading is successful if they have all been
   //loaded in
   if (!pIO) {
     for (i = m_Tags.begin(); i != m_Tags.end(); i++) {
@@ -837,14 +857,78 @@ bool CIccProfile::ReadTags(CIccProfile* pProfile)
   if (pos < 0)
     return false;
 
+  const bool bReadAll = (mode == icLoadTagsFull);
+  const bool bStopOnError = (mode == icLoadTagsFull);
+  const bool bSkipLoaded = (mode == icLoadTagsShallow);
+
+  bool bAllOk = true;
 	for (i=m_Tags.begin(); i!=m_Tags.end(); i++) {
-		if (!LoadTag((IccTagEntry*)&(i->TagInfo), pIO, true)) {
-			pIO->Seek(pos, icSeekSet);
-			return false;
+		if (bSkipLoaded && i->pTag) {
+			// Already satisfied at one level -- do NOT call LoadTag() here. Its
+			// already-loaded branch would call CIccTag::ReadAll() unconditionally,
+			// which for a loaded CIccTagEmbeddedProfile entry recurses into the
+			// nested profile's full tree regardless of bReadAll. This is what makes
+			// a second FindAllTags() call on an already-loaded profile safe.
+			continue;
+		}
+
+		if (!LoadTag((IccTagEntry*)&(i->TagInfo), pIO, bReadAll)) {
+			if (bStopOnError) {
+				pIO->Seek(pos, icSeekSet);
+				return false;
+			}
+			bAllOk = false;
 		}
 	}
 
-	return pIO->Seek(pos, icSeekSet) >= 0;
+	return pIO->Seek(pos, icSeekSet) >= 0 && bAllOk;
+}
+
+/**
+******************************************************************************
+* Name: CIccProfile::ReadTags
+*
+* Purpose: This will read the all the tags from the IO object into the
+*  CIccProfile object. The IO object must have been attached before
+*		calling this function.
+*
+* Return:
+*  true - CIccProfile object now contains all tag data,
+*  false - No IO object attached or tags cannot be read.
+*******************************************************************************
+*/
+bool CIccProfile::ReadTags(CIccProfile* pProfile)
+{
+	return loadTags(pProfile, icLoadTagsFull);
+}
+
+/**
+******************************************************************************
+* Name: CIccProfile::FindAllTags
+*
+* Purpose: Loads every not-yet-loaded tag in m_Tags one level deep, using this
+*  object's own attached IO. Never descends into nested embedded profiles
+*  (unlike ReadTags(), which recursively pulls the whole nested tree), and
+*  never revisits an entry that already carries a tag object -- an
+*  already-loaded entry is left exactly as it is, so a second call on an
+*  already-fully-loaded profile does nothing (in particular, it does not
+*  descend into a nested embedded profile the first call merely attached).
+*  Unlike ReadTags(), a single unreadable tag does not abort the rest: every
+*  remaining tag is attempted regardless of earlier failures, so one malformed
+*  tag costs only its own entry.
+*
+* Return:
+*  true - every tag is loaded: either they all already were, or every load
+*   attempted by this call succeeded.
+*  false - there was no IO to load from and at least one tag was still
+*   unloaded, or at least one load attempted by this call failed, or the IO
+*   position could not be read or restored.  Tags that did load are loaded
+*   either way.
+*******************************************************************************
+*/
+bool CIccProfile::FindAllTags()
+{
+	return loadTags(NULL, icLoadTagsShallow);
 }
 
 /**
