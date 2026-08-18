@@ -99,7 +99,8 @@ NEXT: test on many, many profiles, find best predictors
 
 FUTURE: test LZMA compressor
 FUTURE: ncl2 tag - reorder text and binary data for improved compression
-      count, count device coords, count pcs coords, prefix string, suffix string,
+      probably should define as new "nclz" tag
+      count colors, count device coords, count pcs coords, prefix string, suffix string,
               names[], device values[], PCS values[]
       compress text and binary separately? Or single stream?
 FUTURE: gbd tag (and existing gbd0..3)
@@ -107,11 +108,11 @@ FUTURE: D2B, B2D for v5   'mpet' need to find large LUTs
 
 FUTURE: most other large tags are proprietary
     CXF /zxml - GMacBeth already compressed
-    agfa/data  - AGFA, mix of text, int, float
-    ucmT/ucmT  - Canon, looks like a LUT
+    agfa/data - AGFA, mix of text, int, float
+    ucmT/ucmT - Canon, looks like a LUT
     DEVD/MSBN - Monaco (now X-Rite), mixed int and float
     DEVS/MSBN - Monaco, huge, mixed, but mostly float
-    SAMo  -  ancient SAME, not worth the hassle)
+    SAMo  -  ancient SAME, not worth the hassle
     CIED/text - GMacBeth, text, aka 'targ' measurements
     DevD/text - GMacBeth, text, aka 'targ' inks
     CL00/Cli3 - Candela (now Pictographics?), compressed or encrypted?
@@ -203,6 +204,10 @@ static func_predictor gamutbin_forward;
 static func_predictor gamutbin_reverse;
 static func_predictor gamutbinxor_forward;
 static func_predictor gamutbinxor_reverse;
+static func_predictor wavelet53_forward;
+static func_predictor wavelet53_reverse;
+static func_predictor waveletHaar_forward;
+static func_predictor waveletHaar_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -364,6 +369,8 @@ std::vector<predictor_desc> predictorList =
  { "GamutBinaryXOR", PREDICTOR_TYPE_1D, true, gamutbinxor_forward, gamutbinxor_reverse },
  { "Previous", PREDICTOR_TYPE_1D, false, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, false, next_forward, next_reverse },
+ { "Wavelet53", PREDICTOR_TYPE_1D, false, wavelet53_forward, wavelet53_reverse },
+ { "WaveletHaar", PREDICTOR_TYPE_1D, false, waveletHaar_forward, waveletHaar_reverse },
 
  { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
  { "Next2D", PREDICTOR_TYPE_2D, false, next2D_forward, next2D_reverse },
@@ -386,6 +393,9 @@ std::vector<predictor_desc> predictorList =
  { "PrevSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
  { "NextSplit", PREDICTOR_TYPE_1D, false, splitwrap<next_forward>, unsplitwrap<next_reverse> },
  { "NextSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
+ // wavelets reorder channels internally
+ { "Wavelet53Split", PREDICTOR_TYPE_1D, false, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
+ { "WaveletHaarSplit", PREDICTOR_TYPE_1D, false, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
  
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
  { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
@@ -486,6 +496,7 @@ struct text_predictor_desc {
     func_text_predictor *reverse;
 };
 
+// unlikely to do better on text, but can at least try...
 std::vector<text_predictor_desc> text_predictorList =
 {
  { "None", null_forward, null_reverse },
@@ -4474,6 +4485,363 @@ void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
   } // end 16 bit
 
 }
+/******************************************************************************/
+/******************************************************************************/
+
+// Forward LeGall/CDF 5/3 Integer Lifting Transform (In-Place)
+template<typename T>
+void wavelet53_forward_inner( T* x, size_t n ) {
+  if (n < 2) return;
+
+  // Predict step (odd samples)
+  // d_i = x[2i+1] - floor((x[2i] + x[2i+2]) / 2)
+  for (size_t i = 1; i < (n - 1); i += 2) {
+    x[i] -= (x[i - 1] + x[i + 1]) / 2;
+  }
+  // Right boundary extension (symmetric)
+  x[n - 1] -= x[n - 2];
+
+  // Update step (even samples)
+  // s_i = x[2i] + floor((d_{i-1} + d_i + 2) / 4)
+  x[0] += x[1] / 2; // Left boundary
+  for (size_t i = 2; i < (n&~1); i += 2) {
+    x[i] += (x[i - 1] + x[i + 1] + 2) / 4;
+  }
+}
+
+/******************************************************************************/
+
+// Inverse LeGall/CDF 5/3 Integer Lifting Transform (In-Place)
+template<typename T>
+void wavelet53_reverse_inner( T* x, size_t n ) {
+  if (n < 2) return;
+
+  // Undo Update step (even samples)
+  x[0] -= x[1] / 2;
+  for (size_t i = 2; i < (n&~1); i += 2) {
+    x[i] -= (x[i - 1] + x[i + 1] + 2) / 4;
+  }
+
+  // Undo Predict step (odd samples)
+  x[n - 1] += x[n - 2];
+  for (size_t i = 1; i < (n - 1); i += 2) {
+    x[i] += (x[i - 1] + x[i + 1]) / 2;
+  }
+}
+
+/******************************************************************************/
+
+// Interleave into working order
+template<typename T>
+void interleave2( T* x, size_t n )
+{
+  std::vector<T> temp(n);
+  size_t half = n/2;
+  for (size_t i = 0; i < half; ++i) {
+    temp[2*i+0] = x[i];        // Low pass
+    temp[2*i+1] = x[i + half]; // High pass
+  }
+  if ((n&1) != 0)
+    temp[n-1] = x[n-1];
+  memcpy(x,&temp[0],n*sizeof(T));
+}
+
+/******************************************************************************/
+
+// De-interleave into [Low | High] temporary buffer then write back
+template<typename T>
+void deinterleave2( T* x, size_t n )
+{
+  std::vector<T> temp(n);
+  size_t half = n/2;
+  for (size_t i = 0; i < half; ++i) {
+    temp[i]         = x[2*i+0]; // Low pass
+    temp[i + half]  = x[2*i+1]; // High pass
+  }
+  if ((n&1) != 0)
+    temp[n-1] = x[n-1];
+  memcpy(x,&temp[0],n*sizeof(T));
+}
+
+const size_t kWaveletMinimumSize = 16;
+
+/******************************************************************************/
+
+// Forward CDF 5/3 Integer Transform (In-Place)
+template<typename T>
+void wavelet53_forward_mid( T* x, size_t n ) {
+
+  // recursive prediction on lowpass side of result
+  for (size_t k = n; k > kWaveletMinimumSize; k /= 2) {
+    wavelet53_forward_inner(x,k);
+    deinterleave2(x,k);
+  }
+
+//  std::reverse(x,x+n);
+}
+
+/******************************************************************************/
+
+// Inverse CDF 5/3 Integer Transform (In-Place)
+template<typename T>
+void wavelet53_reverse_mid( T* x, size_t n ) {
+
+//  std::reverse(x,x+n);
+
+  // calc transform sizes we need to reverse
+  std::vector<size_t> sizes;
+  for (size_t k = n; k > kWaveletMinimumSize; k /= 2)
+    sizes.push_back(k);
+
+  // undo recursive prediction on lowpass side of result
+  for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
+    interleave2(x,*rk);
+    wavelet53_reverse_inner(x,*rk);
+  }
+}
+
+/******************************************************************************/
+
+static
+void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+
+  if (bitDepth == 8) {
+    // reorder channels to be planar in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output[c*size1+x] = input[x*colStep+c];
+      }
+    }
+    
+    // transform each channel
+    for (int c = 0; c < channels; ++c) {
+      wavelet53_forward_mid<uint8_t>(output+c*size1,size1);
+    }
+  }
+
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    // reorder channels to be planar in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output16[c*size1+x] = input16[x*colStep+c];
+      }
+    }
+    
+    // transform each channel
+    for (int c = 0; c < channels; ++c) {
+      wavelet53_forward_mid<uint16_t>(output16+c*size1,size1);
+    }
+
+  }
+}
+
+/******************************************************************************/
+
+static
+void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  // copy input to temp
+  size_t byteCount = size1*channels*(bitDepth/8);
+  std::vector<uint8_t> temp( byteCount );
+  uint8_t *tempPtr = &temp[0];
+  memcpy( tempPtr, input, byteCount );
+
+  if (bitDepth == 8) {
+    
+    // reverse transform each channel
+    for (int c = 0; c < channels; ++c) {
+      wavelet53_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+    }
+    
+    // interleave channels in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output[x*colStep+c] = tempPtr[c*size1+x];
+      }
+    }
+  }
+  
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)tempPtr;
+    uint16_t *output16 = (uint16_t*)output;
+    
+    // reverse transform each channel
+    for (int c = 0; c < channels; ++c) {
+      wavelet53_reverse_mid<uint16_t>(input16+c*size1,size1);
+    }
+    
+    // interleave channels in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output16[x*colStep+c] = input16[c*size1+x];
+      }
+    }
+  }
+
+}
+
+/******************************************************************************/
+
+// Forward Haar Integer Lifting Transform (In-Place)
+template<typename T>
+void waveletHaar_forward_inner( T* x, size_t n ) {
+  if (n < 2) return;
+
+  // Step 1: Predict (Calculate difference / high-pass)
+  for (size_t i = 1; i < n; i += 2) {
+    x[i] -= x[i - 1];
+  }
+
+  // Step 2: Update (Calculate average / low-pass)
+  for (size_t i = 0; i < (n - 1); i += 2) {
+    x[i] += x[i + 1] / 2; // Inplace floor-averaged sum
+  }
+}
+
+/******************************************************************************/
+
+// Inverse Haar Integer Lifting Transform (In-Place)
+template<typename T>
+void waveletHaar_reverse_inner( T* x, size_t n ) {
+  if (n < 2) return;
+
+  // Undo Update
+  for (size_t i = 0; i < n - 1; i += 2) {
+    x[i] -= x[i + 1] / 2;
+  }
+
+  // Undo Predict
+  for (size_t i = 1; i < n; i += 2) {
+    x[i] += x[i - 1];
+  }
+}
+
+/******************************************************************************/
+
+template<typename T>
+void waveletHaar_forward_mid( T* x, size_t n ) {
+
+  // recursive prediction on lowpass side of result
+  for (size_t k = n; k > kWaveletMinimumSize; k /= 2) {
+    waveletHaar_forward_inner(x,k);
+    deinterleave2(x,k);
+  }
+}
+
+/******************************************************************************/
+
+template<typename T>
+void waveletHaar_reverse_mid( T* x, size_t n ) {
+
+  // calc transform sizes we need to reverse
+  std::vector<size_t> sizes;
+  for (size_t k = n; k > kWaveletMinimumSize; k /= 2)
+    sizes.push_back(k);
+
+  // undo recursive prediction on lowpass side of result
+  for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
+    interleave2(x,*rk);
+    waveletHaar_reverse_inner(x,*rk);
+  }
+}
+
+/******************************************************************************/
+
+static
+void waveletHaar_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+
+  if (bitDepth == 8) {
+    // reorder channels to be planar in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output[c*size1+x] = input[x*colStep+c];
+      }
+    }
+    
+    // transform each channel
+    for (int c = 0; c < channels; ++c) {
+      waveletHaar_forward_mid<uint8_t>(output+c*size1,size1);
+    }
+  }
+
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    // reorder channels to be planar in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output16[c*size1+x] = input16[x*colStep+c];
+      }
+    }
+    
+    // transform each channel
+    for (int c = 0; c < channels; ++c) {
+      waveletHaar_forward_mid<uint16_t>(output16+c*size1,size1);
+    }
+  }
+
+}
+
+/******************************************************************************/
+
+static
+void waveletHaar_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  // copy input to temp
+  size_t byteCount = size1*channels*(bitDepth/8);
+  std::vector<uint8_t> temp( byteCount );
+  uint8_t *tempPtr = &temp[0];
+  memcpy( tempPtr, input, byteCount );
+
+  if (bitDepth == 8) {
+    
+    // reverse transform each channel
+    for (int c = 0; c < channels; ++c) {
+      waveletHaar_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+    }
+    
+    // interleave channels in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output[x*colStep+c] = tempPtr[c*size1+x];
+      }
+    }
+  }
+  
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)tempPtr;
+    uint16_t *output16 = (uint16_t*)output;
+    
+    // reverse transform each channel
+    for (int c = 0; c < channels; ++c) {
+      waveletHaar_reverse_mid<uint16_t>(input16+c*size1,size1);
+    }
+    
+    // interleave channels in output
+    for (int c = 0; c < channels; ++c) {
+      for (size_t x = 0; x < size1; ++x) {
+        output16[x*colStep+c] = input16[c*size1+x];
+      }
+    }
+  }
+
+}
 
 /******************************************************************************/
 /******************************************************************************/
@@ -5130,9 +5498,12 @@ std::string remove_path( const std::string& filename )
 
 /******************************************************************************/
 
+// third party tags not defined in ICC source
 const uint32_t icSigCIED = 0x43494544;
 const uint32_t icSigDevD = 0x44657644;
-const uint32_t icSigCXF  = 0x43784620;
+const uint32_t icSigCXF  = 0x43784620;    // 'CxF '
+
+/******************************************************************************/
 
 // create graphic representation of LUTs, named colors, etc.
 static
@@ -5157,7 +5528,7 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
 // Switching by data type is easier from a programmming standpoint.
 // But name will limit us to known tags and ignore bogus tags.
 
-    switch (sig) {
+    switch ((uint32_t)sig) {
 
       // 1D LUTs
       case icSigRedTRCTag:
@@ -5194,7 +5565,8 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         }
         break;
 
-      // text tags
+      // text tags that tend to be excessively large
+      // should offer "txtz" type, "ztxt"?
       case icSigCharTargetTag:
       case icSigCIED:
       case icSigDevD:
@@ -5205,11 +5577,13 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         }
         break;
 
-      
+
       // Named Color List, can be large
       case icSigNamedColor2Tag:
+        // TODO - write me!
         break;
-      
+
+
       // 3D gamut boundary data, X-Rite and V5
       case icSigGamutBoundaryDescription0Tag:
       case icSigGamutBoundaryDescription1Tag:
@@ -5217,9 +5591,9 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
       case icSigGamutBoundaryDescription3Tag:
         // TODO - compress this!
         break;
-      
-      
-      // CXF - already compressed xml
+
+
+      // CXF - already compressed xml, still huge
       case icSigCXF:
         break;
 
