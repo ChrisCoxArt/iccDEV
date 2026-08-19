@@ -372,6 +372,19 @@ std::vector<predictor_desc> predictorList =
  { "Wavelet53", PREDICTOR_TYPE_1D, false, wavelet53_forward, wavelet53_reverse },
  { "WaveletHaar", PREDICTOR_TYPE_1D, false, waveletHaar_forward, waveletHaar_reverse },
 
+// splits should only be used if depth > 8
+ { "GamutBinarySplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
+ { "GamutBinaryXORSplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
+ { "SplitPrev", PREDICTOR_TYPE_1D, false, bytesplitPrev_forward, bytesplitPrev_reverse },
+ { "SplitPrevChan", PREDICTOR_TYPE_1D, false, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, false, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
+ { "PrevSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
+ { "NextSplit", PREDICTOR_TYPE_1D, false, splitwrap<next_forward>, unsplitwrap<next_reverse> },
+ { "NextSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
+ // wavelets reorder channels internally
+ { "Wavelet53Split", PREDICTOR_TYPE_1D, false, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
+ { "WaveletHaarSplit", PREDICTOR_TYPE_1D, false, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
+
  { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
  { "Next2D", PREDICTOR_TYPE_2D, false, next2D_forward, next2D_reverse },
  { "Up", PREDICTOR_TYPE_2D, false, up_forward, up_reverse },
@@ -385,18 +398,6 @@ std::vector<predictor_desc> predictorList =
  { "MinGrad", PREDICTOR_TYPE_2D, false, MinGrad_forward, MinGrad_reverse },
 
 // splits should only be used if depth > 8
- { "GamutBinarySplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
- { "GamutBinaryXORSplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
- { "SplitPrev", PREDICTOR_TYPE_1D, false, bytesplitPrev_forward, bytesplitPrev_reverse },
- { "SplitPrevChan", PREDICTOR_TYPE_1D, false, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
- { "PrevSplit", PREDICTOR_TYPE_1D, false, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
- { "PrevSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
- { "NextSplit", PREDICTOR_TYPE_1D, false, splitwrap<next_forward>, unsplitwrap<next_reverse> },
- { "NextSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
- // wavelets reorder channels internally
- { "Wavelet53Split", PREDICTOR_TYPE_1D, false, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
- { "WaveletHaarSplit", PREDICTOR_TYPE_1D, false, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
- 
  { "Prev2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
  { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
  { "Next2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<next2D_forward>, unsplitwrap<next2D_reverse> },
@@ -1104,6 +1105,15 @@ void prev_forward( const uint8_t *input, uint8_t *output, int bitDepth, size_t c
 
 /******************************************************************************/
 
+template<typename T>
+void prev_forward_inplace( T *input, size_t count )
+{
+  for (size_t x = count-1; x > 0; --x)
+    input[x] -= input[x-1];   // overflow/underflow is intentional
+}
+
+/******************************************************************************/
+
 static
 void prev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
 {
@@ -1120,6 +1130,15 @@ void prev_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t c
     for (size_t x = 1; x < count; ++x)
       output16[x] = input16[x] + output16[x-1];   // overflow/underflow is intentional
   }
+}
+
+/******************************************************************************/
+
+template<typename T>
+void prev_reverse_inplace( T *input, size_t count )
+{
+  for (size_t x = 1; x < count; ++x)
+    input[x] += input[x-1];   // overflow/underflow is intentional
 }
 
 /******************************************************************************/
@@ -4489,6 +4508,7 @@ void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
 /******************************************************************************/
 
 // Forward LeGall/CDF 5/3 Integer Lifting Transform (In-Place)
+// 0123456789ABCDEF -> 02468ACE00000001
 template<typename T>
 void wavelet53_forward_inner( T* x, size_t n ) {
   if (n < 2) return;
@@ -4563,7 +4583,7 @@ void deinterleave2( T* x, size_t n )
   memcpy(x,&temp[0],n*sizeof(T));
 }
 
-const size_t kWaveletMinimumSize = 16;
+const size_t kWaveletMinimumSize = 8;
 
 /******************************************************************************/
 
@@ -4572,7 +4592,7 @@ template<typename T>
 void wavelet53_forward_mid( T* x, size_t n ) {
 
   // recursive prediction on lowpass side of result
-  for (size_t k = n; k > kWaveletMinimumSize; k /= 2) {
+  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2) {
     wavelet53_forward_inner(x,k);
     deinterleave2(x,k);
   }
@@ -4590,7 +4610,7 @@ void wavelet53_reverse_mid( T* x, size_t n ) {
 
   // calc transform sizes we need to reverse
   std::vector<size_t> sizes;
-  for (size_t k = n; k > kWaveletMinimumSize; k /= 2)
+  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2)
     sizes.push_back(k);
 
   // undo recursive prediction on lowpass side of result
@@ -4692,6 +4712,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
 /******************************************************************************/
 
 // Forward Haar Integer Lifting Transform (In-Place)
+// 0123456789ABCDEF -> 02468ACE11111111
 template<typename T>
 void waveletHaar_forward_inner( T* x, size_t n ) {
   if (n < 2) return;
@@ -4731,7 +4752,7 @@ template<typename T>
 void waveletHaar_forward_mid( T* x, size_t n ) {
 
   // recursive prediction on lowpass side of result
-  for (size_t k = n; k > kWaveletMinimumSize; k /= 2) {
+  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2) {
     waveletHaar_forward_inner(x,k);
     deinterleave2(x,k);
   }
@@ -4744,7 +4765,7 @@ void waveletHaar_reverse_mid( T* x, size_t n ) {
 
   // calc transform sizes we need to reverse
   std::vector<size_t> sizes;
-  for (size_t k = n; k > kWaveletMinimumSize; k /= 2)
+  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2)
     sizes.push_back(k);
 
   // undo recursive prediction on lowpass side of result
@@ -6013,6 +6034,20 @@ int main(int argc, char* argv[])
 #if 0
   unitTestPredictors();
 #endif
+
+#if 0
+std::vector<uint8_t> lut(256);
+std::vector<uint8_t> out(256);
+uint8_t *lutPtr = &lut[0];
+uint8_t *outPtr = &out[0];
+for (size_t i = 0; i < 256; ++i)
+  lutPtr[i] = (uint8_t)(i &0xFF);
+waveletHaar_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+wavelet53_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+waveletHaar_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+wavelet53_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+#endif
+
 
   // iterate over filenames on the command line
   for (auto &file : fileList) {
