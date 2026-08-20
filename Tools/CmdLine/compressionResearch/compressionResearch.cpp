@@ -208,6 +208,12 @@ static func_predictor wavelet53_forward;
 static func_predictor wavelet53_reverse;
 static func_predictor waveletHaar_forward;
 static func_predictor waveletHaar_reverse;
+static func_predictor linear2_forward;
+static func_predictor linear2_reverse;
+static func_predictor linear3_forward;
+static func_predictor linear3_reverse;
+static func_predictor linear4_forward;
+static func_predictor linear4_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -371,6 +377,9 @@ std::vector<predictor_desc> predictorList =
  { "Next", PREDICTOR_TYPE_1D, false, next_forward, next_reverse },
  { "Wavelet53", PREDICTOR_TYPE_1D, false, wavelet53_forward, wavelet53_reverse },
  { "WaveletHaar", PREDICTOR_TYPE_1D, false, waveletHaar_forward, waveletHaar_reverse },
+ { "Linear2", PREDICTOR_TYPE_1D, false, linear2_forward, linear2_reverse },
+ { "Linear3", PREDICTOR_TYPE_1D, false, linear3_forward, linear3_reverse },
+ { "Linear4", PREDICTOR_TYPE_1D, false, linear4_forward, linear4_reverse },
 
 // splits should only be used if depth > 8
  { "GamutBinarySplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
@@ -384,6 +393,12 @@ std::vector<predictor_desc> predictorList =
  // wavelets reorder channels internally
  { "Wavelet53Split", PREDICTOR_TYPE_1D, false, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
  { "WaveletHaarSplit", PREDICTOR_TYPE_1D, false, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
+ { "Linear2Split", PREDICTOR_TYPE_1D, false, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
+ { "Linear2SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
+ { "Linear3Split", PREDICTOR_TYPE_1D, false, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
+ { "Linear3SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
+ { "Linear4Split", PREDICTOR_TYPE_1D, false, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
+ { "Linear4SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
 
  { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
  { "Next2D", PREDICTOR_TYPE_2D, false, next2D_forward, next2D_reverse },
@@ -4504,28 +4519,405 @@ void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
   } // end 16 bit
 
 }
+
+/******************************************************************************/
+
+// Simple 2 value linear predictor
+// 0123456789ABCDEF -> 0100000000000000
+static
+void linear2_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 2) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] - input[c];
+    }
+    for (size_t x = 2; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev = input + (x-1)*colStep;
+      const uint8_t *prev2 = input + (x-2)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] - (prev[c] + (prev[c] - prev2[c]));   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] - input16[c];
+    }
+    for (size_t x = 2; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev = input16 + (x-1)*colStep;
+      const uint16_t *prev2 = input16 + (x-2)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] - (prev[c] + (prev[c] - prev2[c]));   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void linear2_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 2) {
+    prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] + output[c];
+    }
+    for (size_t x = 2; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev = output + (x-1)*colStep;
+      const uint8_t *prev2 = output + (x-2)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] + (prev[c] + (prev[c] - prev2[c]));   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] + output16[c];
+    }
+    for (size_t x = 2; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev = output16 + (x-1)*colStep;
+      const uint16_t *prev2 = output16 + (x-2)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        out[c] = in[c] + (prev[c] + (prev[c] - prev2[c]));   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+// Simple 3 value linear predictor
+// 0123456789ABCDEF -> 0100000000000000
+static
+void linear3_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 3) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] - input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output[2*colStep+c] = input[2*colStep+c] - (input[1*colStep+c] + (input[1*colStep+c] - input[0*colStep+c]));
+    }
+    for (size_t x = 3; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev1 = input + (x-1)*colStep;
+      const uint8_t *prev2 = input + (x-2)*colStep;
+      const uint8_t *prev3 = input + (x-3)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t)( 3*prev1[c] - 3*prev2[c] + prev3[c] );
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] - input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output16[2*colStep+c] = input16[2*colStep+c] - (input16[1*colStep+c] + (input16[1*colStep+c] - input16[0*colStep+c]));
+    }
+    for (size_t x = 3; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev1 = input16 + (x-1)*colStep;
+      const uint16_t *prev2 = input16 + (x-2)*colStep;
+      const uint16_t *prev3 = input16 + (x-3)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint16_t pred = (uint16_t)( 3*prev1[c] - 3*prev2[c] + prev3[c] );
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void linear3_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 3) {
+    prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] + output[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output[2*colStep+c] = input[2*colStep+c] + (output[1*colStep+c] + (output[1*colStep+c] - output[0*colStep+c]));
+    }
+    for (size_t x = 3; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev1 = output + (x-1)*colStep;
+      const uint8_t *prev2 = output + (x-2)*colStep;
+      const uint8_t *prev3 = output + (x-3)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t)( 3*prev1[c] - 3*prev2[c] + prev3[c] );
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] + output16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output16[2*colStep+c] = input16[2*colStep+c] + (output16[1*colStep+c] + (output16[1*colStep+c] - output16[0*colStep+c]));
+    }
+    for (size_t x = 3; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev1 = output16 + (x-1)*colStep;
+      const uint16_t *prev2 = output16 + (x-2)*colStep;
+      const uint16_t *prev3 = output16 + (x-3)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint16_t pred = (uint16_t)( 3*prev1[c] - 3*prev2[c] + prev3[c] );
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+// Simple 4 value linear predictor
+// 0123456789ABCDEF -> 0100000000000000
+static
+void linear4_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 4) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] - input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output[2*colStep+c] = input[2*colStep+c] - (input[1*colStep+c] + (input[1*colStep+c] - input[0*colStep+c]));
+    }
+    for (int c = 0; c < channels; ++c) {  // 3 point for fourth pixel
+      uint8_t pred = (uint8_t)( 3*input[2*colStep+c] - 3*input[1*colStep+c] + input[c] );
+      output[3*colStep+c] = input[3*colStep+c] - pred;
+    }
+    for (size_t x = 4; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev1 = input + (x-1)*colStep;
+      const uint8_t *prev2 = input + (x-2)*colStep;
+      const uint8_t *prev3 = input + (x-3)*colStep;
+      const uint8_t *prev4 = input + (x-4)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t)( 4*(int)prev1[c] - 6*(int)prev2[c] + 4*(int)prev3[c] - (int)prev4[c] );
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] - input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output16[2*colStep+c] = input16[2*colStep+c] - (input16[1*colStep+c] + (input16[1*colStep+c] - input16[0*colStep+c]));
+    }
+    for (int c = 0; c < channels; ++c) {  // 3 point for fourth pixel
+      uint16_t pred = (uint16_t)( 3*input16[2*colStep+c] - 3*input16[1*colStep+c] + input16[c] );
+      output16[3*colStep+c] = input16[3*colStep+c] - pred;
+    }
+    for (size_t x = 4; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev1 = input16 + (x-1)*colStep;
+      const uint16_t *prev2 = input16 + (x-2)*colStep;
+      const uint16_t *prev3 = input16 + (x-3)*colStep;
+      const uint16_t *prev4 = input16 + (x-4)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint16_t pred = (uint16_t)( 4*(int)prev1[c] - 6*(int)prev2[c] + 4*(int)prev3[c] - (int)prev4[c] );
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void linear4_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 4) {
+    prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output[1*colStep+c] = input[1*colStep+c] + output[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output[2*colStep+c] = input[2*colStep+c] + (output[1*colStep+c] + (output[1*colStep+c] - output[0*colStep+c]));
+    }
+    for (int c = 0; c < channels; ++c) {  // 3 point for fourth pixel
+      uint8_t pred = (uint8_t)( 3*output[2*colStep+c] - 3*output[1*colStep+c] + output[c] );
+      output[3*colStep+c] = input[3*colStep+c] + pred;
+    }
+    for (size_t x = 4; x < size1; ++x) {
+      const uint8_t *in = input + x*colStep;
+      const uint8_t *prev1 = output + (x-1)*colStep;
+      const uint8_t *prev2 = output + (x-2)*colStep;
+      const uint8_t *prev3 = output + (x-3)*colStep;
+      const uint8_t *prev4 = output + (x-4)*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t)( 4*(int)prev1[c] - 6*(int)prev2[c] + 4*(int)prev3[c] - (int)prev4[c] );
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {    // prev for second pixel
+      output16[1*colStep+c] = input16[1*colStep+c] + output16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // 2 point for third pixel
+      output16[2*colStep+c] = input16[2*colStep+c] + (output16[1*colStep+c] + (output16[1*colStep+c] - output16[0*colStep+c]));
+    }
+    for (int c = 0; c < channels; ++c) {  // 3 point for fourth pixel
+      uint16_t pred = (uint16_t)( 3*output16[2*colStep+c] - 3*output16[1*colStep+c] + output16[c] );
+      output16[3*colStep+c] = input16[3*colStep+c] + pred;
+    }
+    for (size_t x = 4; x < size1; ++x) {
+      const uint16_t *in = input16 + x*colStep;
+      const uint16_t *prev1 = output16 + (x-1)*colStep;
+      const uint16_t *prev2 = output16 + (x-2)*colStep;
+      const uint16_t *prev3 = output16 + (x-3)*colStep;
+      const uint16_t *prev4 = output16 + (x-4)*colStep;
+      uint16_t *out = output16 + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint16_t pred = (uint16_t)( 4*(int)prev1[c] - 6*(int)prev2[c] + 4*(int)prev3[c] - (int)prev4[c] );
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
 /******************************************************************************/
 /******************************************************************************/
 
 // Forward LeGall/CDF 5/3 Integer Lifting Transform (In-Place)
-// 0123456789ABCDEF -> 02468ACE00000001
+// 0123456789ABCDEF -> 048C000000000000
+// assumes a nearly linear ramp
 template<typename T>
 void wavelet53_forward_inner( T* x, size_t n ) {
   if (n < 2) return;
 
   // Predict step (odd samples)
+  // Right boundary extension (symmetric)
+  if (n > 2)
+    x[n-1] -= (x[n-2] - x[n-3]) + x[n-2]; // extrapolation from 2 previous terms
+  else
+    x[n-1] -= x[n-2];
   // d_i = x[2i+1] - floor((x[2i] + x[2i+2]) / 2)
   for (size_t i = 1; i < (n - 1); i += 2) {
-    x[i] -= (x[i - 1] + x[i + 1]) / 2;
+    x[i] -= (x[i-1] + x[i+1]) / 2;
   }
-  // Right boundary extension (symmetric)
-  x[n - 1] -= x[n - 2];
 
   // Update step (even samples)
   // s_i = x[2i] + floor((d_{i-1} + d_i + 2) / 4)
   x[0] += x[1] / 2; // Left boundary
   for (size_t i = 2; i < (n&~1); i += 2) {
-    x[i] += (x[i - 1] + x[i + 1] + 2) / 4;
+    x[i] += (x[i-1] + x[i+1] + 2) / 4;
   }
 }
 
@@ -4539,19 +4931,24 @@ void wavelet53_reverse_inner( T* x, size_t n ) {
   // Undo Update step (even samples)
   x[0] -= x[1] / 2;
   for (size_t i = 2; i < (n&~1); i += 2) {
-    x[i] -= (x[i - 1] + x[i + 1] + 2) / 4;
+    x[i] -= (x[i-1] + x[i+1] + 2) / 4;
   }
 
   // Undo Predict step (odd samples)
-  x[n - 1] += x[n - 2];
+  // Right boundary extension (symmetric)
   for (size_t i = 1; i < (n - 1); i += 2) {
-    x[i] += (x[i - 1] + x[i + 1]) / 2;
+    x[i] += (x[i-1] + x[i+1]) / 2;
   }
+  if (n > 2)
+    x[n-1] += (x[n-2] - x[n-3]) + x[n-2]; // extrapolation from 2 previous terms
+  else
+    x[n-1] += x[n-2];
 }
 
 /******************************************************************************/
 
 // Interleave into working order
+// Must handle odd number of bytes
 template<typename T>
 void interleave2( T* x, size_t n )
 {
@@ -4569,6 +4966,7 @@ void interleave2( T* x, size_t n )
 /******************************************************************************/
 
 // De-interleave into [Low | High] temporary buffer then write back
+// Must handle odd number of bytes
 template<typename T>
 void deinterleave2( T* x, size_t n )
 {
@@ -4622,6 +5020,30 @@ void wavelet53_reverse_mid( T* x, size_t n ) {
 
 /******************************************************************************/
 
+template<typename T>
+void deinterleaveChannels( const T *input, T *output, int channels, size_t count, size_t colStep )
+{
+  for (int c = 0; c < channels; ++c) {
+    for (size_t x = 0; x < count; ++x) {
+      output[c*count+x] = input[x*colStep+c];
+    }
+  }
+}
+
+/******************************************************************************/
+
+template<typename T>
+void interleaveChannels( const T *input, T *output, int channels, size_t count, size_t colStep )
+{
+  for (int c = 0; c < channels; ++c) {
+    for (size_t x = 0; x < count; ++x) {
+      output[x*colStep+c] = input[c*count+x];
+    }
+  }
+}
+
+/******************************************************************************/
+
 static
 void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
@@ -4630,11 +5052,7 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
 
   if (bitDepth == 8) {
     // reorder channels to be planar in output
-    for (int c = 0; c < channels; ++c) {
-      for (size_t x = 0; x < size1; ++x) {
-        output[c*size1+x] = input[x*colStep+c];
-      }
-    }
+    deinterleaveChannels(input,output,channels,size1,colStep);
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
@@ -4644,20 +5062,16 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
 
 
   if (bitDepth == 16) {
-    uint16_t *input16 = (uint16_t*)input;
+    const uint16_t *input16 = (const uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
+    
     // reorder channels to be planar in output
-    for (int c = 0; c < channels; ++c) {
-      for (size_t x = 0; x < size1; ++x) {
-        output16[c*size1+x] = input16[x*colStep+c];
-      }
-    }
+    deinterleaveChannels(input16,output16,channels,size1,colStep);
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
       wavelet53_forward_mid<uint16_t>(output16+c*size1,size1);
     }
-
   }
 }
 
@@ -4682,11 +5096,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     }
     
     // interleave channels in output
-    for (int c = 0; c < channels; ++c) {
-      for (size_t x = 0; x < size1; ++x) {
-        output[x*colStep+c] = tempPtr[c*size1+x];
-      }
-    }
+    interleaveChannels(tempPtr,output,channels,size1,colStep);
   }
   
 
@@ -4700,11 +5110,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     }
     
     // interleave channels in output
-    for (int c = 0; c < channels; ++c) {
-      for (size_t x = 0; x < size1; ++x) {
-        output16[x*colStep+c] = input16[c*size1+x];
-      }
-    }
+    interleaveChannels(input16,output16,channels,size1,colStep);
   }
 
 }
@@ -4712,7 +5118,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
 /******************************************************************************/
 
 // Forward Haar Integer Lifting Transform (In-Place)
-// 0123456789ABCDEF -> 02468ACE11111111
+// 0123456789ABCDEF -> 149D222211111111
 template<typename T>
 void waveletHaar_forward_inner( T* x, size_t n ) {
   if (n < 2) return;
@@ -6044,8 +6450,14 @@ for (size_t i = 0; i < 256; ++i)
   lutPtr[i] = (uint8_t)(i &0xFF);
 waveletHaar_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 wavelet53_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+linear2_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+linear3_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+linear4_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 waveletHaar_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 wavelet53_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+linear2_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+linear3_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+linear4_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 #endif
 
 
