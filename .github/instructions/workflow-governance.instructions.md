@@ -86,6 +86,17 @@ out or execute PR-controlled content. Use trusted workflow metadata only, pass
 IDs through `env:`, and mutate PR state with least-privilege `issues: write` or
 `pull-requests: write` permissions.
 
+## Fork Agent-Configuration Boundary
+
+Treat custom instructions, agent instructions, and agent skills from fork PR
+heads as untrusted.
+
+The trusted-base `Fork Automation Gate` must reject fork changes to
+`.github/copilot-instructions.md`, `.github/instructions/**`,
+`.github/skills/**`, `.github/prompts/**`, `.github/agents/**`, `.agents/**`,
+and every `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`. Check both the current and
+previous path to catch renames.
+
 For `pull_request` workflows that must build or test PR code, keep repo-local
 workflow helpers trusted: check out `.github/scripts` from
 `${{ github.event.pull_request.base.sha || github.sha }}` into a separate
