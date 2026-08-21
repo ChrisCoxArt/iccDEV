@@ -2843,7 +2843,35 @@ icStatusCMM CIccPcsXform::ConnectLast(CIccXform* pFromXform, icColorSpaceSignatu
  **************************************************************************
  * Name: CIccPcsXform::Optimize
  * 
- * Purpose: 
+ * Purpose:
+ *  Gives each step in the chain its one chance to precompute invariant state.
+ *
+ *  Runs after Connect()/Optimize() have finished building the list and before
+ *  GetNewApply(), so a step can build immutable data here and treat it as
+ *  read-only in Apply(). Doing that work lazily on first Apply() instead would
+ *  be a data race: Apply() is const and runs concurrently on every worker
+ *  thread of a CIccThreadedCmm.
+ **************************************************************************
+ */
+icStatusCMM CIccPcsXform::Begin()
+{
+  if (m_list) {
+    CIccPcsStepList::iterator i;
+
+    for (i = m_list->begin(); i != m_list->end(); i++) {
+      if (i->ptr && !i->ptr->BeginStep())
+        return icCmmStatInvalidLut;
+    }
+  }
+
+  return icCmmStatOk;
+}
+
+/**
+**************************************************************************
+ * Name: CIccPcsXform::Optimize
+ *
+ * Purpose:
  *  Analyzes and concatenates/removes transforms in pcs transformation chain
  **************************************************************************
  */
@@ -5415,20 +5443,55 @@ CIccPcsStepSparseMatrix::CIccPcsStepSparseMatrix(icUInt16Number nRows, icUInt16N
   m_nBytesPerMatrix = nBytesPerMatrix;
   m_nChannels = 0;
   m_vals = new icFloatNumber[m_nBytesPerMatrix/sizeof(icFloatNumber)];
+  m_pMtx = NULL;   // built by BeginStep(), once m_vals has been populated
 }
 
 
 /**
 **************************************************************************
 * Name: CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix
-* 
-* Purpose: 
+*
+* Purpose:
 *  Destructor
 **************************************************************************
 */
 CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix()
 {
+  delete m_pMtx;
   delete [] m_vals;
+}
+
+
+/**
+**************************************************************************
+* Name: CIccPcsStepSparseMatrix::BeginStep
+*
+* Purpose:
+*  Builds the sparse matrix wrapper once, before any Apply().
+*
+*  The matrix is parsed from m_vals, which is fixed by the time the step list is
+*  built, so the CIccSparseMatrix it produces is identical for every pixel.
+*  Apply() used to construct one per pixel with bInitFromData=true, and
+*  CIccSparseMatrix::Init() (IccSparseMatrix.cpp:145) unconditionally deletes and
+*  re-news its m_Data accessor -- so that was a heap allocation and free on every
+*  pixel, plus a dimension re-parse and the 4096-dimension bounds test.
+*
+*  It is held on the step rather than in a CIccApplyPcsStep because it is
+*  immutable from here on and MultiplyVector() is const, so every thread can
+*  share the one instance. Contrast CIccPcsStepSrcSparseMatrix, whose matrix
+*  wraps per-pixel source data and therefore cannot be shared.
+**************************************************************************
+*/
+bool CIccPcsStepSparseMatrix::BeginStep()
+{
+  // Idempotent: BeginStep() can be reached more than once, and rebuilding from
+  // the same m_vals yields the same matrix.
+  delete m_pMtx;
+
+  m_pMtx = new (std::nothrow) CIccSparseMatrix((icUInt8Number*)m_vals,
+                                               m_nBytesPerMatrix,
+                                               icSparseMatrixFloatNum, true);
+  return m_pMtx != NULL;
 }
 
 
@@ -5443,9 +5506,10 @@ CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix()
 */
 void CIccPcsStepSparseMatrix::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
-  CIccSparseMatrix mtx((icUInt8Number*)m_vals, m_nBytesPerMatrix, icSparseMatrixFloatNum, true);
-
-  mtx.MultiplyVector(pDst, pSrc);
+  // Matrix built once in BeginStep(). This used to construct a CIccSparseMatrix
+  // here, which allocated and freed on every pixel -- see BeginStep().
+  if (m_pMtx)
+    m_pMtx->MultiplyVector(pDst, pSrc);
 }
 
 
@@ -5611,6 +5675,29 @@ icStatusCMM CIccXformMonochrome::Begin()
 		m_ApplyCurvePtr = m_Curve;
 	}
 
+	// Apply() used to rebuild this on every pixel, in both directions, from
+	// compile-time constants: icXyzToPcs plus, for a Lab PCS, XyzToLab and its
+	// three cube roots, behind a virtual UseLegacyPCS() call. Nothing in it
+	// depends on the source colour, and both m_pProfile->m_Header.pcs and
+	// UseLegacyPCS() are fixed by the time Begin() runs.
+	//
+	// Idempotent: recomputing from the same constants yields the same values, so
+	// reaching Begin() a second time is harmless.
+	m_PcsWhite[0] = icFloatNumber(icPerceptualRefWhiteX);
+	m_PcsWhite[1] = icFloatNumber(icPerceptualRefWhiteY);
+	m_PcsWhite[2] = icFloatNumber(icPerceptualRefWhiteZ);
+
+	icXyzToPcs(m_PcsWhite);
+
+	if (m_pProfile->m_Header.pcs==icSigLabData) {
+		if (UseLegacyPCS()) {
+			CIccPCSUtil::XyzToLab2(m_PcsWhite, m_PcsWhite, true);
+		}
+		else {
+			CIccPCSUtil::XyzToLab(m_PcsWhite, m_PcsWhite, true);
+		}
+	}
+
 	return icCmmStatOk;
 }
 
@@ -5634,6 +5721,9 @@ void CIccXformMonochrome::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel,
   if (m_bSrcPcsConversion)
 	  SrcPixel = CheckSrcAbs(pApply, SrcPixel);
 
+	// m_PcsWhite is computed once in Begin(). Both branches below used to rebuild
+	// it here on every pixel -- icXyzToPcs, and for a Lab PCS XyzToLab's three
+	// cube roots behind a virtual UseLegacyPCS() call -- entirely from constants.
 	if (m_bInput) {
 		Pixel[0] = SrcPixel[0];
 
@@ -5641,43 +5731,24 @@ void CIccXformMonochrome::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel,
 			Pixel[0] = m_ApplyCurvePtr->Apply(Pixel[0]);
 		}
 
-		DstPixel[0] = icFloatNumber(icPerceptualRefWhiteX); 
-		DstPixel[1] = icFloatNumber(icPerceptualRefWhiteY);
-		DstPixel[2] = icFloatNumber(icPerceptualRefWhiteZ);
-
-		icXyzToPcs(DstPixel);
-
-		if (m_pProfile->m_Header.pcs==icSigLabData) {
-			if (UseLegacyPCS()) {
-				CIccPCSUtil::XyzToLab2(DstPixel, DstPixel, true);
-			}
-			else {
-				CIccPCSUtil::XyzToLab(DstPixel, DstPixel, true);
-			}
-		}
-
-		DstPixel[0] *= Pixel[0];
-		DstPixel[1] *= Pixel[0];
-		DstPixel[2] *= Pixel[0];
+		DstPixel[0] = m_PcsWhite[0] * Pixel[0];
+		DstPixel[1] = m_PcsWhite[1] * Pixel[0];
+		DstPixel[2] = m_PcsWhite[2] * Pixel[0];
 	}
 	else {
-		Pixel[0] = icFloatNumber(icPerceptualRefWhiteX); 
-		Pixel[1] = icFloatNumber(icPerceptualRefWhiteY);
-		Pixel[2] = icFloatNumber(icPerceptualRefWhiteZ);
-
-		icXyzToPcs(Pixel);
-
+		// The divide is kept rather than turned into a precomputed reciprocal:
+		// x/w and x*(1/w) are not bit-identical, and the cube roots hoisted above
+		// dominate a single division. Preserving exact output keeps the harness
+		// checksum usable as a strict equality oracle for the rest of this branch.
+		//
+		// The header test selects which source component to read rather than
+		// computing anything, so it stays; folding it into another member would
+		// buy nothing measurable.
 		if (m_pProfile->m_Header.pcs==icSigLabData) {
-			if (UseLegacyPCS()) {
-				CIccPCSUtil::XyzToLab2(Pixel, Pixel, true);
-			}
-			else {
-				CIccPCSUtil::XyzToLab(Pixel, Pixel, true);
-			}
-			DstPixel[0] = SrcPixel[0]/Pixel[0];
+			DstPixel[0] = SrcPixel[0]/m_PcsWhite[0];
 		}
 		else {
-			DstPixel[0] = SrcPixel[1]/Pixel[1];
+			DstPixel[0] = SrcPixel[1]/m_PcsWhite[1];
 		}
 
 		if (m_ApplyCurvePtr) {
