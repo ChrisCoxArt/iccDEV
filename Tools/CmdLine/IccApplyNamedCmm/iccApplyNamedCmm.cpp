@@ -200,7 +200,7 @@ void Usage()
 {
   printf("iccApplyNamedCmm built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
 
-  printf("Usage 1: iccApplyNamedCmm -cfg config_file_path\n");
+  printf("Usage 1: iccApplyNamedCmm {--evidence-json} -cfg config_file_path\n");
   printf("  Where config_file_path is a json formatted ICC profile application configuration file\n\n");
   printf("Usage 2: iccApplyNamedCmm (-exportcfg/-exportcfganddata config_file_path} {-debugcalc} data_file_path final_data_encoding{:FmtPrecision{:FmtDigits}} interpolation {{-ENV:Name value} profile_file_path Rendering_intent {-PCC connection_conditions_path}}\n\n");
   
@@ -265,12 +265,80 @@ void Usage()
   printf(" +2000000 - NamedColor over gray  (icSigNmclSpectralOverGrayMbr 'spcg')\n");
 }
 
+static std::string GetProfileId(const char* profilePath)
+{
+  if (!profilePath || !profilePath[0])
+    return std::string();
+
+  CIccProfile* pProfile = OpenIccProfile(profilePath);
+  if (!pProfile)
+    return std::string();
+
+  CIccInfo Fmt;
+  std::string id;
+  if (Fmt.IsProfileIDCalculated(&pProfile->m_Header.profileID))
+    id = Fmt.GetProfileID(&pProfile->m_Header.profileID);
+  delete pProfile;
+  return id;
+}
+
+static void EmitTransformEvidenceJson(const char* inputPath, const char* profilePath,
+                                      const char* outputPath)
+{
+  std::string inputDigest;
+  std::string outputDigest;
+  std::string profileId = GetProfileId(profilePath);
+  bool hasInputDigest = icSha256File(inputPath, inputDigest);
+  bool hasOutputDigest = icSha256File(outputPath, outputDigest);
+
+  printf("{");
+  printf("\"schema\":\"iccdev-qa-evidence/v1\",");
+  printf("\"tool\":\"iccApplyNamedCmm\",");
+  printf("\"input\":\"%s\",", icJsonEscape(inputPath).c_str());
+  printf("\"profile\":\"%s\",", icJsonEscape(profilePath).c_str());
+  printf("\"output\":\"%s\",", icJsonEscape(outputPath).c_str());
+  printf("\"qaFlags\":[\"ICCDEV_FLAG_TRANSFORM\"],");
+  if (hasInputDigest)
+    printf("\"inputDigest\":\"%s\",", inputDigest.c_str());
+  else
+    printf("\"inputDigest\":null,");
+  if (!profileId.empty())
+    printf("\"profileId\":\"%s\",", icJsonEscape(profileId).c_str());
+  else
+    printf("\"profileId\":null,");
+  if (hasOutputDigest)
+    printf("\"outputDigest\":\"%s\",", outputDigest.c_str());
+  else
+    printf("\"outputDigest\":null,");
+  printf("\"transform\":{");
+  if (hasInputDigest)
+    printf("\"inputDigest\":\"%s\",", inputDigest.c_str());
+  else
+    printf("\"inputDigest\":null,");
+  if (!profileId.empty())
+    printf("\"profileId\":\"%s\",", icJsonEscape(profileId).c_str());
+  else
+    printf("\"profileId\":null,");
+  if (hasOutputDigest)
+    printf("\"outputDigest\":\"%s\"", outputDigest.c_str());
+  else
+    printf("\"outputDigest\":null");
+  printf("}}\n");
+}
 
 //===================================================
 
 int main(int argc, const char* argv[])
 {
   int minargs = 2;
+  bool bEvidenceJson = false;
+
+  if (argc > 1 && !stricmp(argv[1], "--evidence-json")) {
+    bEvidenceJson = true;
+    argv++;
+    argc--;
+  }
+
   if (argc < minargs) {
     Usage();
     return 0;
@@ -430,6 +498,21 @@ int main(int argc, const char* argv[])
       }
     }
   }
+  // Usage 2 has no destination file -- CIccCfgDataApply::fromArgs clears
+  // m_dstFile unconditionally -- and icOpenRegularWriteFile() returns stdout
+  // for an empty name.  The transformed dataset would therefore go to the same
+  // stream as the evidence: --evidence-json there emitted colour data with a
+  // JSON object stapled to the end, which no parser accepts, and an
+  // outputDigest that was always null.  --evidence-json is a -cfg-with-dstFile
+  // mode, the only form docs/tools-cli-reference.md shows.  Checked here, where
+  // both config paths join, so the refusal costs no transform and writes
+  // nothing.
+  if (bEvidenceJson && cfgApply.m_dstFile.empty()) {
+    fprintf(stderr, "--evidence-json requires a configuration with dstFile set:"
+                    " the transform output would share stdout with the evidence\n");
+    return EXIT_FAILURE;
+  }
+
   LogDebuggerPtr pDebugger;
   
   if (cfgApply.m_debugCalc) {
@@ -709,6 +792,14 @@ int main(int argc, const char* argv[])
 
     return EXIT_FAILURE;
   }
+
+  if (bEvidenceJson) {
+    const char* profilePath = cfgProfiles.m_profiles.empty() ? "" :
+      cfgProfiles.m_profiles[0]->m_iccFile.c_str();
+    EmitTransformEvidenceJson(cfgApply.m_srcFile.c_str(), profilePath,
+                              cfgApply.m_dstFile.c_str());
+  }
+
 
   delete pMruCmm;
 
