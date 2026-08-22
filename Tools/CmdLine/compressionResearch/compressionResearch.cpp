@@ -87,9 +87,10 @@
 
 /*
 NOTE
-Profiling: 90.1% in deflate
-            8.6% in all predictors
-            0.7% in FindTag/LoadTag
+Profiling: 96.6% in deflate
+            2.8% in all predictors
+            0.2% in Process1DLut
+            0.2% in FindTag/LoadTag
             inflate only used in unit tests, not in release build.
 Median3D is really slow, could special case.
 Could thread most of the predictors for CLUT.
@@ -214,6 +215,8 @@ static func_predictor linear3_forward;
 static func_predictor linear3_reverse;
 static func_predictor linear4_forward;
 static func_predictor linear4_reverse;
+static func_predictor identity_forward;
+static func_predictor identity_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -354,112 +357,121 @@ void unsplitchannelswrap(const uint8_t *input, uint8_t *output, int bitDepth, in
 
 /******************************************************************************/
 
+// bitfield flags
+enum {
+  FLAG_NONE = 0,
+  FLAG_1D_ONLY = 1,
+  FLAG_GAMUT_ONLY = 2,
+};
+
 struct predictor_desc {
     const char *name;
     predictor_type type;
-    bool gamutOnly;
+    uint32_t flags;
     func_predictor *forward;
     func_predictor *reverse;
 };
 
 std::vector<predictor_desc> predictorList =
 {
- { "None", PREDICTOR_TYPE_NULL, false, null_forward, null_reverse },
+ { "None", PREDICTOR_TYPE_NULL, FLAG_NONE, null_forward, null_reverse },
 #if 0 && !defined(NDEBUG)
 // these test the outer loops of the predictors
- { "None1", PREDICTOR_TYPE_1D, false, null_forward, null_reverse },
- { "None2", PREDICTOR_TYPE_2D, false, null_forward, null_reverse },
- { "None3", PREDICTOR_TYPE_3D, false, null_forward, null_reverse },
+ { "None1", PREDICTOR_TYPE_1D, FLAG_NONE, null_forward, null_reverse },
+ { "None2", PREDICTOR_TYPE_2D, FLAG_NONE, null_forward, null_reverse },
+ { "None3", PREDICTOR_TYPE_3D, FLAG_NONE, null_forward, null_reverse },
 #endif
- { "GamutBinary", PREDICTOR_TYPE_1D, true, gamutbin_forward, gamutbin_reverse },
- { "GamutBinaryXOR", PREDICTOR_TYPE_1D, true, gamutbinxor_forward, gamutbinxor_reverse },
- { "Previous", PREDICTOR_TYPE_1D, false, prev_forward, prev_reverse },
- { "Next", PREDICTOR_TYPE_1D, false, next_forward, next_reverse },
- { "Wavelet53", PREDICTOR_TYPE_1D, false, wavelet53_forward, wavelet53_reverse },
- { "WaveletHaar", PREDICTOR_TYPE_1D, false, waveletHaar_forward, waveletHaar_reverse },
- { "Linear2", PREDICTOR_TYPE_1D, false, linear2_forward, linear2_reverse },
- { "Linear3", PREDICTOR_TYPE_1D, false, linear3_forward, linear3_reverse },
- { "Linear4", PREDICTOR_TYPE_1D, false, linear4_forward, linear4_reverse },
+ { "Identity", PREDICTOR_TYPE_1D, FLAG_1D_ONLY, identity_forward, identity_reverse },
+ { "GamutBinary", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbin_forward, gamutbin_reverse },
+ { "GamutBinaryXOR", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbinxor_forward, gamutbinxor_reverse },
+ { "Previous", PREDICTOR_TYPE_1D, FLAG_NONE, prev_forward, prev_reverse },
+ { "Next", PREDICTOR_TYPE_1D, FLAG_NONE, next_forward, next_reverse },
+ { "Wavelet53", PREDICTOR_TYPE_1D, FLAG_NONE, wavelet53_forward, wavelet53_reverse },
+ { "WaveletHaar", PREDICTOR_TYPE_1D, FLAG_NONE, waveletHaar_forward, waveletHaar_reverse },
+ { "Linear2", PREDICTOR_TYPE_1D, FLAG_NONE, linear2_forward, linear2_reverse },
+ { "Linear3", PREDICTOR_TYPE_1D, FLAG_NONE, linear3_forward, linear3_reverse },
+ { "Linear4", PREDICTOR_TYPE_1D, FLAG_NONE, linear4_forward, linear4_reverse },
 
 // splits should only be used if depth > 8
- { "GamutBinarySplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
- { "GamutBinaryXORSplit", PREDICTOR_TYPE_1D, true, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
- { "SplitPrev", PREDICTOR_TYPE_1D, false, bytesplitPrev_forward, bytesplitPrev_reverse },
- { "SplitPrevChan", PREDICTOR_TYPE_1D, false, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
- { "PrevSplit", PREDICTOR_TYPE_1D, false, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
- { "PrevSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
- { "NextSplit", PREDICTOR_TYPE_1D, false, splitwrap<next_forward>, unsplitwrap<next_reverse> },
- { "NextSplitChan", PREDICTOR_TYPE_1D, false, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
+ { "IdentitySplit", PREDICTOR_TYPE_1D, FLAG_1D_ONLY, splitwrap<identity_forward>, unsplitwrap<identity_reverse> },
+ { "GamutBinarySplit", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
+ { "GamutBinaryXORSplit", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, splitwrap<gamutbinxor_forward>, unsplitwrap<gamutbinxor_reverse> },
+ { "SplitPrev", PREDICTOR_TYPE_1D, FLAG_NONE, bytesplitPrev_forward, bytesplitPrev_reverse },
+ { "SplitPrevChan", PREDICTOR_TYPE_1D, FLAG_NONE, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
+ { "PrevSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
+ { "PrevSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
+ { "NextSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<next_forward>, unsplitwrap<next_reverse> },
+ { "NextSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
  // wavelets reorder channels internally
- { "Wavelet53Split", PREDICTOR_TYPE_1D, false, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
- { "WaveletHaarSplit", PREDICTOR_TYPE_1D, false, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
- { "Linear2Split", PREDICTOR_TYPE_1D, false, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
- { "Linear2SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
- { "Linear3Split", PREDICTOR_TYPE_1D, false, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
- { "Linear3SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
- { "Linear4Split", PREDICTOR_TYPE_1D, false, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
- { "Linear4SplitChan", PREDICTOR_TYPE_1D, false, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
+ { "Wavelet53Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<wavelet53_forward>, unsplitwrap<wavelet53_reverse> },
+ { "WaveletHaarSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
+ { "Linear2Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
+ { "Linear2SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
+ { "Linear3Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
+ { "Linear3SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
+ { "Linear4Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
+ { "Linear4SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
 
- { "Previous2D", PREDICTOR_TYPE_2D, false, prev2D_forward, prev2D_reverse },
- { "Next2D", PREDICTOR_TYPE_2D, false, next2D_forward, next2D_reverse },
- { "Up", PREDICTOR_TYPE_2D, false, up_forward, up_reverse },
- { "Down", PREDICTOR_TYPE_2D, false, down_forward, down_reverse },
- { "Min", PREDICTOR_TYPE_2D, false, min_forward, min_reverse },
- { "Max", PREDICTOR_TYPE_2D, false, max_forward, max_reverse },
- { "AvgUpLeft", PREDICTOR_TYPE_2D, false, avgUpLeft_forward, avgUpLeft_reverse },
- { "Median", PREDICTOR_TYPE_2D, false, median3_forward, median3_reverse },
- { "MED", PREDICTOR_TYPE_2D, false, MED_forward, MED_reverse },
- { "Paeth", PREDICTOR_TYPE_2D, false, Paeth_forward, Paeth_reverse },
- { "MinGrad", PREDICTOR_TYPE_2D, false, MinGrad_forward, MinGrad_reverse },
-
-// splits should only be used if depth > 8
- { "Prev2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
- { "Prev2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
- { "Next2DByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<next2D_forward>, unsplitwrap<next2D_reverse> },
- { "Next2DByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<next2D_forward>, unsplitchannelswrap<next2D_reverse> },
- { "UpByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<up_forward>, unsplitwrap<up_reverse> },
- { "UpByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<up_forward>, unsplitchannelswrap<up_reverse> },
- { "DownByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<down_forward>, unsplitwrap<down_reverse> },
- { "DownByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
- { "MinByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<min_forward>, unsplitwrap<min_reverse> },
- { "MinByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
- { "MaxByteSplit", PREDICTOR_TYPE_2D, false, splitwrap<max_forward>, unsplitwrap<max_reverse> },
- { "MaxByteSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<max_forward>, unsplitchannelswrap<max_reverse> },
- { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, false, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
- { "AvgUpLeftSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<avgUpLeft_forward>, unsplitchannelswrap<avgUpLeft_reverse> },
- { "MedianSplit", PREDICTOR_TYPE_2D, false, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
- { "MedianSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<median3_forward>, unsplitchannelswrap<median3_reverse> },
- { "MEDSplit", PREDICTOR_TYPE_2D, false, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
- { "MEDSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MED_forward>, unsplitchannelswrap<MED_reverse> },
- { "PaethSplit", PREDICTOR_TYPE_2D, false, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
- { "PaethSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
- { "MinGradSplit", PREDICTOR_TYPE_2D, false, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
- { "MinGradSplitChan", PREDICTOR_TYPE_2D, false, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
-
-
- { "Prev3D", PREDICTOR_TYPE_3D, false, prev3D_forward, prev3D_reverse },
- { "Next3D", PREDICTOR_TYPE_3D, false, next3D_forward, next3D_reverse },
- { "Up3D", PREDICTOR_TYPE_3D, false, up3D_forward, up3D_reverse },
- { "Down3D", PREDICTOR_TYPE_3D, false, down3D_forward, down3D_reverse },
- { "Min3D", PREDICTOR_TYPE_3D, false, min3D_forward, min3D_reverse },
- { "Max3D", PREDICTOR_TYPE_3D, false, max3D_forward, max3D_reverse },
- { "Median3D", PREDICTOR_TYPE_3D, false, median3D_forward, median3D_reverse },
+ { "Previous2D", PREDICTOR_TYPE_2D, FLAG_NONE, prev2D_forward, prev2D_reverse },
+ { "Next2D", PREDICTOR_TYPE_2D, FLAG_NONE, next2D_forward, next2D_reverse },
+ { "Up", PREDICTOR_TYPE_2D, FLAG_NONE, up_forward, up_reverse },
+ { "Down", PREDICTOR_TYPE_2D, FLAG_NONE, down_forward, down_reverse },
+ { "Min", PREDICTOR_TYPE_2D, FLAG_NONE, min_forward, min_reverse },
+ { "Max", PREDICTOR_TYPE_2D, FLAG_NONE, max_forward, max_reverse },
+ { "AvgUpLeft", PREDICTOR_TYPE_2D, FLAG_NONE, avgUpLeft_forward, avgUpLeft_reverse },
+ { "Median", PREDICTOR_TYPE_2D, FLAG_NONE, median3_forward, median3_reverse },
+ { "MED", PREDICTOR_TYPE_2D, FLAG_NONE, MED_forward, MED_reverse },
+ { "Paeth", PREDICTOR_TYPE_2D, FLAG_NONE, Paeth_forward, Paeth_reverse },
+ { "MinGrad", PREDICTOR_TYPE_2D, FLAG_NONE, MinGrad_forward, MinGrad_reverse },
 
 // splits should only be used if depth > 8
- { "Prev3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<prev3D_forward>, unsplitwrap<prev3D_reverse> },
- { "Prev3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<prev3D_forward>, unsplitchannelswrap<prev3D_reverse> },
- { "Next3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<next3D_forward>, unsplitwrap<next3D_reverse> },
- { "Next3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<next3D_forward>, unsplitchannelswrap<next3D_reverse> },
- { "Up3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<up3D_forward>, unsplitwrap<up3D_reverse> },
- { "Up3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<up3D_forward>, unsplitchannelswrap<up3D_reverse> },
- { "Down3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<down3D_forward>, unsplitwrap<down3D_reverse> },
- { "Down3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<down3D_forward>, unsplitchannelswrap<down3D_reverse> },
- { "Min3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
- { "Min3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
- { "Max3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
- { "Max3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
- { "Median3DSplit", PREDICTOR_TYPE_3D, false, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
- { "Median3DSplitChan", PREDICTOR_TYPE_3D, false, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
+ { "Prev2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
+ { "Prev2DSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<prev2D_forward>, unsplitchannelswrap<prev2D_reverse> },
+ { "Next2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<next2D_forward>, unsplitwrap<next2D_reverse> },
+ { "Next2DSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<next2D_forward>, unsplitchannelswrap<next2D_reverse> },
+ { "UpSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<up_forward>, unsplitwrap<up_reverse> },
+ { "UpSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<up_forward>, unsplitchannelswrap<up_reverse> },
+ { "DownSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<down_forward>, unsplitwrap<down_reverse> },
+ { "DownSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<down_forward>, unsplitchannelswrap<down_reverse> },
+ { "MinSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<min_forward>, unsplitwrap<min_reverse> },
+ { "MinSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<min_forward>, unsplitchannelswrap<min_reverse> },
+ { "MaxSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<max_forward>, unsplitwrap<max_reverse> },
+ { "MaxSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<max_forward>, unsplitchannelswrap<max_reverse> },
+ { "AvgUpLeftSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<avgUpLeft_forward>, unsplitwrap<avgUpLeft_reverse> },
+ { "AvgUpLeftSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<avgUpLeft_forward>, unsplitchannelswrap<avgUpLeft_reverse> },
+ { "MedianSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<median3_forward>, unsplitwrap<median3_reverse> },
+ { "MedianSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<median3_forward>, unsplitchannelswrap<median3_reverse> },
+ { "MEDSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<MED_forward>, unsplitwrap<MED_reverse> },
+ { "MEDSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<MED_forward>, unsplitchannelswrap<MED_reverse> },
+ { "PaethSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<Paeth_forward>, unsplitwrap<Paeth_reverse> },
+ { "PaethSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
+ { "MinGradSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
+ { "MinGradSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
+
+
+ { "Prev3D", PREDICTOR_TYPE_3D, FLAG_NONE, prev3D_forward, prev3D_reverse },
+ { "Next3D", PREDICTOR_TYPE_3D, FLAG_NONE, next3D_forward, next3D_reverse },
+ { "Up3D", PREDICTOR_TYPE_3D, FLAG_NONE, up3D_forward, up3D_reverse },
+ { "Down3D", PREDICTOR_TYPE_3D, FLAG_NONE, down3D_forward, down3D_reverse },
+ { "Min3D", PREDICTOR_TYPE_3D, FLAG_NONE, min3D_forward, min3D_reverse },
+ { "Max3D", PREDICTOR_TYPE_3D, FLAG_NONE, max3D_forward, max3D_reverse },
+ { "Median3D", PREDICTOR_TYPE_3D, FLAG_NONE, median3D_forward, median3D_reverse },
+
+// splits should only be used if depth > 8
+ { "Prev3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<prev3D_forward>, unsplitwrap<prev3D_reverse> },
+ { "Prev3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<prev3D_forward>, unsplitchannelswrap<prev3D_reverse> },
+ { "Next3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<next3D_forward>, unsplitwrap<next3D_reverse> },
+ { "Next3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<next3D_forward>, unsplitchannelswrap<next3D_reverse> },
+ { "Up3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<up3D_forward>, unsplitwrap<up3D_reverse> },
+ { "Up3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<up3D_forward>, unsplitchannelswrap<up3D_reverse> },
+ { "Down3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<down3D_forward>, unsplitwrap<down3D_reverse> },
+ { "Down3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<down3D_forward>, unsplitchannelswrap<down3D_reverse> },
+ { "Min3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<min3D_forward>, unsplitwrap<min3D_reverse> },
+ { "Min3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<min3D_forward>, unsplitchannelswrap<min3D_reverse> },
+ { "Max3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<max3D_forward>, unsplitwrap<max3D_reverse> },
+ { "Max3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
+ { "Median3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
+ { "Median3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
 
 };
 
@@ -906,6 +918,11 @@ void apply2DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
                         uint8_t channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = reverse ? pred.reverse : pred.forward;
+  
+  if ((pred.flags & FLAG_1D_ONLY) != 0) {
+    // we shouldn't be called with this!
+    predFunc = null_forward;  // forward and back are the same: memcpy
+  }
 
   size_t tiles = 1;
   for (int i = (int)nDimensions-1; i > 1; --i) {
@@ -937,6 +954,11 @@ void apply3DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
                         uint8_t channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = reverse ? pred.reverse : pred.forward;
+  
+  if ((pred.flags & FLAG_1D_ONLY) != 0) {
+    // we shouldn't be called with this!
+    predFunc = null_forward;  // forward and back are the same: memcpy
+  }
 
   size_t tiles = 1;
   for (int i = (int)nDimensions-1; i > 2; --i) {
@@ -999,6 +1021,7 @@ void applyOnePredictor( const predictor_desc &pred, const uint8_t *input, uint8_
 
 /******************************************************************************/
 
+// TODO - this is byte order specific!
 static
 void bytesplit16( const uint8_t *input, uint8_t *output, size_t count )
 {
@@ -1011,6 +1034,7 @@ void bytesplit16( const uint8_t *input, uint8_t *output, size_t count )
 
 /******************************************************************************/
 
+// TODO - this is byte order specific!
 static
 void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count )
 {
@@ -1023,6 +1047,7 @@ void byteunsplit16( const uint8_t *input, uint8_t *output, size_t count )
 
 /******************************************************************************/
 
+// TODO - this is byte order specific!
 static
 void bytesplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count )
 {
@@ -1041,6 +1066,7 @@ void bytesplitchannels16( const uint8_t *input, uint8_t *output, int channels, s
 
 /******************************************************************************/
 
+// TODO - this is byte order specific!
 static
 void byteunsplitchannels16( const uint8_t *input, uint8_t *output, int channels, size_t count )
 {
@@ -4893,6 +4919,241 @@ void linear4_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 }
 
 /******************************************************************************/
+
+template<typename T>
+bool isIdentity( T* x, size_t n ) {
+  if (x[0] != T(0) || x[n-1] != T(-1))
+    return false;
+  
+  // now we know the endpoints match identity, check the rest
+  for (size_t i = 1; i < (n-1); ++i) {
+    T pred = (i * T(-1)) / (n-1);
+    T value = x[i];
+    if (value != pred)
+      return false;
+  }
+  
+  return true;
+}
+
+/******************************************************************************/
+
+template<typename T>
+bool isReverseIdentity( T* x, size_t n ) {
+  if (x[0] != T(-1) || x[n-1] != T(0))
+    return false;
+  
+  // now we know the endpoints match reverse identity, check the rest
+  for (size_t i = 1; i < (n-1); ++i) {
+    T pred = T(-1) - T((i * T(-1)) / (n-1));
+    T value = x[i];
+    if (value != pred)
+      return false;
+  }
+
+  return true;
+}
+
+/******************************************************************************/
+
+// TODO - this is byte order specific!
+template<typename T>
+bool isIdentity00FF( T* x, size_t n ) {
+  if (x[0] != T(0) || x[n-1] != T(0x00FF))
+    return false;
+  
+  // now we know the endpoints match identity, check the rest
+  for (size_t i = 1; i < (n-1); ++i) {
+    T pred = (i * T(0x00FF)) / (n-1);
+    T value = x[i];
+    if (value != pred)
+      return false;
+  }
+  
+  return true;
+}
+
+/******************************************************************************/
+
+// TODO - this is byte order specific!
+template<typename T>
+bool isReverseIdentity00FF( T* x, size_t n ) {
+  if (x[0] != T(0x00FF) || x[n-1] != T(0))
+    return false;
+  
+  // now we know the endpoints match reverse identity, check the rest
+  for (size_t i = 1; i < (n-1); ++i) {
+    T pred = T(0x00FF) - T((i * T(0x00FF)) / (n-1));
+    T value = x[i];
+    if (value != pred)
+      return false;
+  }
+
+  return true;
+}
+
+/******************************************************************************/
+
+template<typename T>
+void FillIdentity( T* x, size_t n ) {
+  for (size_t i = 0; i < n; ++i) {
+    T pred = (i * T(-1)) / (n-1);
+    x[i] = pred;
+  }
+}
+
+/******************************************************************************/
+
+template<typename T>
+void FillReverseIdentity( T* x, size_t n ) {
+  for (size_t i = 0; i < n; ++i) {
+    T pred = T(-1) - ((i * T(-1)) / (n-1));
+    x[i] = pred;
+  }
+}
+
+/******************************************************************************/
+
+// TODO - this is byte order specific!
+template<typename T>
+void FillIdentity00FF( T* x, size_t n ) {
+  for (size_t i = 0; i < n; ++i) {
+    T pred = (i * T(0x00FF)) / (n-1);
+    x[i] = pred;
+  }
+}
+
+/******************************************************************************/
+
+// TODO - this is byte order specific!
+template<typename T>
+void FillReverseIdentity00FF( T* x, size_t n ) {
+  for (size_t i = 0; i < n; ++i) {
+    T pred = T(0x00FF) - ((i * T(0x00FF)) / (n-1));
+    x[i] = pred;
+  }
+}
+
+/******************************************************************************/
+
+template<typename T>
+bool isZero( T* x, size_t n ) {
+  for (size_t i = 0; i < n; ++i) {
+    if (x[i] != 0)
+      return false;
+  }
+  return true;
+}
+
+/******************************************************************************/
+
+static
+bool isRemainderZero( const uint8_t *input, size_t count, int bitDepth )
+{
+  if (bitDepth == 8) {
+    return isZero(input+1,count-1);
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    return isZero(input16+1,count-1);
+  }
+
+  return false;
+}
+
+/******************************************************************************/
+
+// Just detect identity curves and make the output really simple
+// Unfortunately, this rarely happens in real profiles, and adding tolerances won't exactly reproduce the input...
+// some round, some don't, and some round in ways that don't make sense.  But they still compress with other predictors.
+// 0123456789ABCDEF -> 0000000000000000
+static
+void identity_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+// test for 0-FF identity
+// test for FF-0 reverse identity
+// set flag and zero the rest of the buffer
+// else call null and fail
+
+  if (bitDepth == 8) {
+    if (channels == 1 && colStep == (size_t)channels) {
+      if (isIdentity(input,size1)) {
+        memset(output,0,size1);
+        return;
+      } else if (isReverseIdentity(input,size1)) {
+        memset(output,0,size1);
+        output[0] = 1;
+        return;
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    if (channels == 1 && colStep == (size_t)channels) {
+      if (isIdentity(input16,size1)) {
+        memset(output16,0,size1*2);
+        return;
+      } else if (isReverseIdentity(input16,size1)) {
+        memset(output16,0,size1*2);
+        output[0] = 1;
+        return;
+      } else if (isIdentity00FF(input16,size1)) {
+        memset(output16,0,size1*2);
+        output[0] = 2;
+        return;
+      } else if (isReverseIdentity00FF(input16,size1)) {
+        memset(output16,0,size1*2);
+        output[0] = 3;
+        return;
+      }
+    }
+  }
+
+  null_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+}
+
+/******************************************************************************/
+
+static
+void identity_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  uint8_t keyValue = input[0];
+  if ( channels != 1 || colStep != (size_t)channels
+      || keyValue > 3 || !isRemainderZero(input,size1,bitDepth) ) {
+// this is BUGGY - a 2D or 3D table can have a row of full zeros!
+// we really should never apply this to 2D or 3D data!
+    null_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    if (keyValue == 0)
+      FillIdentity(output,size1);
+    else if (keyValue == 1)
+      FillReverseIdentity(output,size1);
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *output16 = (uint16_t*)output;
+    if (keyValue == 0)
+      FillIdentity(output16,size1);
+    else if (keyValue == 1)
+      FillReverseIdentity(output16,size1);
+    else if (keyValue == 2)
+      FillIdentity00FF(output16,size1);
+    else if (keyValue == 3)
+      FillReverseIdentity00FF(output16,size1);
+  }
+}
+
+/******************************************************************************/
 /******************************************************************************/
 
 // Forward LeGall/CDF 5/3 Integer Lifting Transform (In-Place)
@@ -4994,8 +5255,6 @@ void wavelet53_forward_mid( T* x, size_t n ) {
     wavelet53_forward_inner(x,k);
     deinterleave2(x,k);
   }
-
-//  std::reverse(x,x+n);
 }
 
 /******************************************************************************/
@@ -5003,8 +5262,6 @@ void wavelet53_forward_mid( T* x, size_t n ) {
 // Inverse CDF 5/3 Integer Transform (In-Place)
 template<typename T>
 void wavelet53_reverse_mid( T* x, size_t n ) {
-
-//  std::reverse(x,x+n);
 
   // calc transform sizes we need to reverse
   std::vector<size_t> sizes;
@@ -5049,7 +5306,6 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-
   if (bitDepth == 8) {
     // reorder channels to be planar in output
     deinterleaveChannels(input,output,channels,size1,colStep);
@@ -5112,8 +5368,57 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     // interleave channels in output
     interleaveChannels(input16,output16,channels,size1,colStep);
   }
-
 }
+
+/******************************************************************************/
+
+#if 0
+static
+void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  // apply to each row, from input to temp
+  size_t bytes = bitDepth / 8;
+  for (size_t y = 0; y < size2; ++y) {
+    const uint8_t *inY = input + y*rowStep*bytes;
+    uint8_t *outY = output + y*rowStep*bytes;
+    wavelet53_forward(inY,outY,bitDepth,channels,size1,0,0,colStep,0,0);
+  }   // end y loop for rows
+
+  // apply to each column, from temp to output
+// TODO - MUST CHANGE CHANNEL COUNT since they are already deinterleaved
+  for (size_t x = 0; x < size1; ++x) {
+    //const uint8_t *inX = input + x*colStep*bytes;
+    uint8_t *outX = output + x*colStep*bytes;
+    wavelet53_forward(outX,outX,bitDepth,channels,size2,0,0,rowStep,0,0);
+  }   // end x loop for columns
+}
+
+/******************************************************************************/
+
+static
+void wavelet53_2Dreverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  // reverse each column, from input to temp
+// TODO - MUST CHANGE CHANNEL COUNT since they are already deinterleaved
+  size_t bytes = bitDepth / 8;
+  for (size_t x = 0; x < size1; ++x) {
+    const uint8_t *inX = input + x*colStep*bytes;
+    uint8_t *outX = output + x*colStep*bytes;
+    wavelet53_reverse(inX,outX,bitDepth,channels,size2,0,0,rowStep,0,0);
+  }   // end x loop for columns
+
+  // reverse  each row, from temp to output
+  for (size_t y = 0; y < size2; ++y) {
+    //const uint8_t *inY = input + y*rowStep*bytes;
+    uint8_t *outY = output + y*rowStep*bytes;
+    wavelet53_reverse(outY,outY,bitDepth,channels,size1,0,0,colStep,0,0);
+  }   // end y loop for rows
+}
+#endif
 
 /******************************************************************************/
 
@@ -5372,7 +5677,7 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
     size_t outBytes = steps*2;  // aka no compression
     
     // 1D LUTs never use the gamut predictors
-    if (!pred.gamutOnly) {
+    if ( ((pred.flags & FLAG_GAMUT_ONLY) == 0) ) {
       // apply forward predictor
       applyOnePredictor( pred, (uint8_t*)input, (uint8_t*)output,
                          dimensionArray, 1, 16, 1, steps, false );
@@ -5704,7 +6009,8 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
     
     size_t outBytes = byteSize; // aka no compression
     
-    if (!pred.gamutOnly || isGamut) {
+    if ( ((pred.flags & FLAG_1D_ONLY) == 0)
+      && (isGamut || ((pred.flags & FLAG_GAMUT_ONLY) == 0)) )  {
       // apply forward predictor
       applyOnePredictor( pred, input8, output,
                          dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, false );
@@ -6072,8 +6378,8 @@ void unitTestPredictorMiddle( const predictor_desc &pred,
                         size_t pixelCount, uint8_t dimensions, uint32_t *dimArray )
 {
   unitTestPredictorInner( pred,input,output,verify,pixelCount,dimensions,dimArray, 8, 1 );
+  unitTestPredictorInner( pred,input,output,verify,pixelCount,dimensions,dimArray, 8, 3 );
   unitTestPredictorInner( pred,input,output,verify,pixelCount,dimensions,dimArray, 16, 1 );
-  unitTestPredictorInner( pred,input,output,verify,pixelCount,dimensions,dimArray, 16, 3 );
   unitTestPredictorInner( pred,input,output,verify,pixelCount,dimensions,dimArray, 16, 3 );
 }
 #endif      // DEBUG
@@ -6437,7 +6743,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 0
+#if 1
   unitTestPredictors();
 #endif
 
