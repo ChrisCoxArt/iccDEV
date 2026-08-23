@@ -241,6 +241,8 @@ static func_predictor Paeth_forward;
 static func_predictor Paeth_reverse;
 static func_predictor MinGrad_forward;
 static func_predictor MinGrad_reverse;
+static func_predictor wavelet53_2Dforward;
+static func_predictor wavelet53_2Dreverse;
 
 // 3D
 static func_predictor min3D_forward;
@@ -386,11 +388,11 @@ std::vector<predictor_desc> predictorList =
  { "GamutBinaryXOR", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbinxor_forward, gamutbinxor_reverse },
  { "Previous", PREDICTOR_TYPE_1D, FLAG_NONE, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, FLAG_NONE, next_forward, next_reverse },
- { "Wavelet53", PREDICTOR_TYPE_1D, FLAG_NONE, wavelet53_forward, wavelet53_reverse },
- { "WaveletHaar", PREDICTOR_TYPE_1D, FLAG_NONE, waveletHaar_forward, waveletHaar_reverse },
  { "Linear2", PREDICTOR_TYPE_1D, FLAG_NONE, linear2_forward, linear2_reverse },
  { "Linear3", PREDICTOR_TYPE_1D, FLAG_NONE, linear3_forward, linear3_reverse },
  { "Linear4", PREDICTOR_TYPE_1D, FLAG_NONE, linear4_forward, linear4_reverse },
+ { "Wavelet53", PREDICTOR_TYPE_1D, FLAG_NONE, wavelet53_forward, wavelet53_reverse },
+ { "WaveletHaar", PREDICTOR_TYPE_1D, FLAG_NONE, waveletHaar_forward, waveletHaar_reverse },
 
 // splits should only be used if depth > 8
  { "IdentitySplit", PREDICTOR_TYPE_1D, FLAG_1D_ONLY, splitwrap<identity_forward>, unsplitwrap<identity_reverse> },
@@ -423,6 +425,7 @@ std::vector<predictor_desc> predictorList =
  { "MED", PREDICTOR_TYPE_2D, FLAG_NONE, MED_forward, MED_reverse },
  { "Paeth", PREDICTOR_TYPE_2D, FLAG_NONE, Paeth_forward, Paeth_reverse },
  { "MinGrad", PREDICTOR_TYPE_2D, FLAG_NONE, MinGrad_forward, MinGrad_reverse },
+ { "Wavelet53_2D", PREDICTOR_TYPE_2D, FLAG_NONE, wavelet53_2Dforward, wavelet53_2Dreverse },
 
 // splits should only be used if depth > 8
  { "Prev2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<prev2D_forward>, unsplitwrap<prev2D_reverse> },
@@ -447,7 +450,8 @@ std::vector<predictor_desc> predictorList =
  { "PaethSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
  { "MinGradSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
  { "MinGradSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
-
+ { "Wavelet53_2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavelet53_2Dforward>, unsplitwrap<wavelet53_2Dreverse> },
+ { "Wavelet53_2DplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<wavelet53_2Dforward>, unsplitchannelswrap<wavelet53_2Dreverse> },
 
  { "Prev3D", PREDICTOR_TYPE_3D, FLAG_NONE, prev3D_forward, prev3D_reverse },
  { "Next3D", PREDICTOR_TYPE_3D, FLAG_NONE, next3D_forward, next3D_reverse },
@@ -849,20 +853,6 @@ inline T median( std::vector<T> p ) {
 
 // This is used for verification, not production code
 template<typename T>
-T bruteForceMedian( std::initializer_list<T> input )
-{
-  std::vector<T> p( input );
-  size_t count = p.size();
-  size_t half = count >> 1;
-  std::sort(p.begin(),p.end());
-  if ( (count & 1) != 0 )
-    return p[ half ];
-  else
-   return (p[half-1] + p[half])/2;
-}
-
-// This is used for verification, not production code
-template<typename T>
 T bruteForceMedian( std::vector<T> p )
 {
   size_t count = p.size();
@@ -874,6 +864,14 @@ T bruteForceMedian( std::vector<T> p )
    return (p[half-1] + p[half])/2;
 }
 
+// This is used for verification, not production code
+template<typename T>
+T bruteForceMedian( std::initializer_list<T> input )
+{
+  std::vector<T> p( input );
+  return bruteForceMedian( p );
+}
+
 /******************************************************************************/
 /******************************************************************************/
 
@@ -882,11 +880,16 @@ void apply1DPredictor( const predictor_desc &pred, const uint8_t *input, uint8_t
                         int channels, size_t pixelCount, bool reverse )
 {
   func_predictor *predFunc = reverse ? pred.reverse : pred.forward;
-  
+
   // shortcut the simplest case, because we'll use this a lot for 1D LUTs
   if (nDimensions == 1) {
     predFunc( input, output, bitDepth, channels, pixelCount, 0, 0, channels, 0, 0 );
     return;
+  }
+
+  // don't use 1D only predictors when the input is more than 1 dimension
+  if ((pred.flags & FLAG_1D_ONLY) != 0 && nDimensions > 1) {
+    predFunc = null_forward;  // forward and back are the same: memcpy
   }
 
   size_t tiles = 1;
@@ -1100,10 +1103,7 @@ void null_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int chan
                 size_t size1, size_t size2, size_t size3,
                 size_t /*colStep*/, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-  size2 = size2 ? size2 : 1;
-  size3 = size3 ? size3 : 1;
-  size_t totalBytes = size1*size2*size3*(bitDepth/8)*channels;
-  memcpy( output, input, totalBytes );
+  null_forward(input,output,bitDepth,channels,size1,size2,size3,0,0,0);
 }
 
 /******************************************************************************/
@@ -1120,8 +1120,7 @@ void null_forward( const uint8_t *input, uint8_t *output, int bitDepth, size_t c
 static
 void null_reverse( const uint8_t *input, uint8_t *output, int bitDepth, size_t count )
 {
-  size_t totalBytes = count*(bitDepth/8);
-  memcpy( output, input, totalBytes );
+  null_forward(input,output,bitDepth,count);
 }
 
 /******************************************************************************/
@@ -5277,24 +5276,57 @@ void wavelet53_reverse_mid( T* x, size_t n ) {
 
 /******************************************************************************/
 
+// output is always linear
 template<typename T>
-void deinterleaveChannels( const T *input, T *output, int channels, size_t count, size_t colStep )
+void deinterleaveChannels( const T *input, T *output, int channels,
+                      size_t pixels, size_t inColStep )
 {
+  if (inColStep == (size_t)channels && channels == 1) {
+    memcpy(output,input,pixels*sizeof(T));
+    return;
+  }
+  
   for (int c = 0; c < channels; ++c) {
-    for (size_t x = 0; x < count; ++x) {
-      output[c*count+x] = input[x*colStep+c];
+    for (size_t x = 0; x < pixels; ++x) {
+      output[c*pixels+x] = input[x*inColStep+c];
     }
   }
 }
 
 /******************************************************************************/
 
+// input is always linear
 template<typename T>
-void interleaveChannels( const T *input, T *output, int channels, size_t count, size_t colStep )
+void interleaveChannels( const T *input, T *output, int channels,
+                    size_t pixels, size_t outColStep )
 {
+  if (outColStep == (size_t)channels && channels == 1) {
+    memcpy(output,input,pixels*sizeof(T));
+    return;
+  }
+
   for (int c = 0; c < channels; ++c) {
-    for (size_t x = 0; x < count; ++x) {
-      output[x*colStep+c] = input[c*count+x];
+    for (size_t x = 0; x < pixels; ++x) {
+      output[x*outColStep+c] = input[c*pixels+x];
+    }
+  }
+}
+
+/******************************************************************************/
+
+// copy between rows and columns
+template<typename T>
+void stepCopy( const T *input, T *output, int channels,
+          size_t pixels, size_t inColStep, size_t outColStep )
+{
+  if (inColStep == outColStep && inColStep == (size_t)channels) {
+    memcpy(output,input,pixels*channels*sizeof(T));
+    return;
+  }
+
+  for (size_t x = 0; x < pixels; ++x) {
+    for (int c = 0; c < channels; ++c) {
+      output[x*outColStep+c] = input[x*inColStep+c];
     }
   }
 }
@@ -5306,20 +5338,28 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
+  // copy input to temp
+  size_t bytes = bitDepth / 8;
+  size_t byteCount = size1*channels*bytes;
+  std::vector<uint8_t> temp( byteCount );
+  uint8_t *tempPtr = &temp[0];
+
   if (bitDepth == 8) {
     // reorder channels to be planar in output
-    deinterleaveChannels(input,output,channels,size1,colStep);
+    deinterleaveChannels(input,tempPtr,channels,size1,colStep);
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_forward_mid<uint8_t>(output+c*size1,size1);
+      wavelet53_forward_mid<uint8_t>(tempPtr+c*size1,size1);
     }
+    
+    // copy from row temp to output
+    stepCopy( tempPtr, output, channels, size1, channels, colStep );
   }
-
 
   if (bitDepth == 16) {
     const uint16_t *input16 = (const uint16_t*)input;
-    uint16_t *output16 = (uint16_t*)output;
+    uint16_t *output16 = (uint16_t*)tempPtr;
     
     // reorder channels to be planar in output
     deinterleaveChannels(input16,output16,channels,size1,colStep);
@@ -5328,6 +5368,9 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
     for (int c = 0; c < channels; ++c) {
       wavelet53_forward_mid<uint16_t>(output16+c*size1,size1);
     }
+    
+    // copy from row temp to output
+    stepCopy( output16, (uint16_t*)output, channels, size1, channels, colStep );
   }
 }
 
@@ -5339,12 +5382,13 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
   // copy input to temp
-  size_t byteCount = size1*channels*(bitDepth/8);
+  size_t bytes = bitDepth / 8;
+  size_t byteCount = size1*channels*bytes;
   std::vector<uint8_t> temp( byteCount );
   uint8_t *tempPtr = &temp[0];
-  memcpy( tempPtr, input, byteCount );
 
   if (bitDepth == 8) {
+    stepCopy( input, tempPtr, channels, size1, colStep, channels );
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
@@ -5354,31 +5398,32 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     // interleave channels in output
     interleaveChannels(tempPtr,output,channels,size1,colStep);
   }
-  
 
   if (bitDepth == 16) {
-    uint16_t *input16 = (uint16_t*)tempPtr;
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *temp16 = (uint16_t*)tempPtr;
     uint16_t *output16 = (uint16_t*)output;
+    stepCopy( input16, temp16, channels, size1, colStep, channels );
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_reverse_mid<uint16_t>(input16+c*size1,size1);
+      wavelet53_reverse_mid<uint16_t>(temp16+c*size1,size1);
     }
     
     // interleave channels in output
-    interleaveChannels(input16,output16,channels,size1,colStep);
+    interleaveChannels(temp16,output16,channels,size1,colStep);
   }
 }
 
 /******************************************************************************/
 
-#if 0
 static
 void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
 {
-  // apply to each row, from input to temp
+  // apply to each row
+  // deinterleaves channels along the way
   size_t bytes = bitDepth / 8;
   for (size_t y = 0; y < size2; ++y) {
     const uint8_t *inY = input + y*rowStep*bytes;
@@ -5386,12 +5431,12 @@ void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, i
     wavelet53_forward(inY,outY,bitDepth,channels,size1,0,0,colStep,0,0);
   }   // end y loop for rows
 
-  // apply to each column, from temp to output
-// TODO - MUST CHANGE CHANNEL COUNT since they are already deinterleaved
-  for (size_t x = 0; x < size1; ++x) {
-    //const uint8_t *inX = input + x*colStep*bytes;
-    uint8_t *outX = output + x*colStep*bytes;
-    wavelet53_forward(outX,outX,bitDepth,channels,size2,0,0,rowStep,0,0);
+  // apply to each column
+  // alter size and channels, since they are already deinterleaved
+  for (size_t x = 0; x < size1*channels; ++x) {
+    //const uint8_t *inX = input + x*bytes;
+    uint8_t *outX = output + x*bytes;
+    wavelet53_forward(outX,outX,bitDepth,1,size2,0,0,rowStep,0,0);
   }   // end x loop for columns
 }
 
@@ -5402,23 +5447,22 @@ void wavelet53_2Dreverse( const uint8_t *input, uint8_t *output, int bitDepth, i
                 size_t size1, size_t size2, size_t /*size3*/,
                 size_t colStep, size_t rowStep, size_t /*planeStep*/ )
 {
-  // reverse each column, from input to temp
-// TODO - MUST CHANGE CHANNEL COUNT since they are already deinterleaved
+  // reverse each column
+  // alter size and channels, since they are already deinterleaved
   size_t bytes = bitDepth / 8;
-  for (size_t x = 0; x < size1; ++x) {
-    const uint8_t *inX = input + x*colStep*bytes;
-    uint8_t *outX = output + x*colStep*bytes;
-    wavelet53_reverse(inX,outX,bitDepth,channels,size2,0,0,rowStep,0,0);
+  for (size_t x = 0; x < size1*channels; ++x) {
+    const uint8_t *inX = input + x*bytes;
+    uint8_t *outX = output + x*bytes;
+    wavelet53_reverse(inX,outX,bitDepth,1,size2,0,0,rowStep,0,0);
   }   // end x loop for columns
 
-  // reverse  each row, from temp to output
+  // reverse  each row
   for (size_t y = 0; y < size2; ++y) {
     //const uint8_t *inY = input + y*rowStep*bytes;
     uint8_t *outY = output + y*rowStep*bytes;
     wavelet53_reverse(outY,outY,bitDepth,channels,size1,0,0,colStep,0,0);
   }   // end y loop for rows
 }
-#endif
 
 /******************************************************************************/
 
@@ -6729,7 +6773,7 @@ int main(int argc, char* argv[])
 
 #ifndef ICC_USE_ZLIB
   printf("ERROR - %s requires ZLIB!\n", argv[0] );
-  return 1;
+  return -1;
 #endif
 
   if (argc <= 1) {
