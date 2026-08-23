@@ -105,6 +105,38 @@ Windows presets place iccDEV `.exe` and `.dll` runtime artifacts together under
 example `out\vs2022-x64\bin\Release\iccToXml.exe`; no manual PATH update is
 required for iccDEV project DLLs.
 
+For a reproducible Release build and `iccBenchApply` performance report, run:
+
+```powershell
+.\.github\scripts\iccdev-windows-release-report.ps1 `
+  -BuildDir out\windows-msvc-release-report `
+  -Threads '1,2,4,8,16'
+```
+
+The script records host and Visual Studio details, configure and build timing,
+compiler warnings, project artifact counts and size, profile-generation time,
+and the `iccBenchApply` suite's median/minimum/maximum throughput and scaling.
+It writes JSON, Markdown, raw benchmark CSV, and command logs under the build
+directory's `reports` folder. Use an otherwise idle machine for comparisons;
+the report records results but does not assert a performance threshold.
+If application-control policy blocks locally built unsigned executables or
+dependencies, run the report on an approved Windows build host or CI runner;
+do not disable the machine policy. `-ProfileRoot` can reuse a Testing tree
+generated elsewhere, but it cannot bypass executable-signing policy.
+
+Windows filesystems are case-insensitive by default, while the repository has
+legacy paths that differ only by case. For a genuinely clean Git checkout, use
+WSL2 storage rather than `/mnt/c` or `/mnt/e`, and preserve LF line endings:
+
+```bash
+git config --global core.autocrlf false
+git clone https://github.com/InternationalColorConsortium/iccDEV.git
+```
+
+Keep Windows build output on a native Windows volume when measuring MSVC or
+ClangCL; the WSL2 checkout recommendation is for collision-free Git and Unix
+script work, not for benchmarking through a network-mounted source tree.
+
 ## Windows ClangCL
 
 Use the Visual Studio LLVM toolset with the same vcpkg-managed dependencies as
@@ -306,6 +338,121 @@ cmake --preset vs2022-clangcl-x64-qa-flags -S Build/Cmake -B out/vs2022-clangcl-
 cmake --preset mingw-x64-qa-flags -S Build/Cmake -B out/mingw-x64-qa-flags
 ```
 
+### Linux AVX2 and AVX-512 CLUT build
+
+Linux and WSL2 can use paired Clang presets for portable, AVX2, and AVX-512
+CLUT comparisons. The presets hold the compiler, Release configuration, QA
+flags, enabled tools and tests, disabled wxWidgets UI, and disabled AVX2
+diagnostics constant:
+
+```bash
+cmake --preset linux-clang-clut-baseline-qa-flags \
+  -S Build/Cmake -B out/clut-baseline
+cmake --preset linux-clang-clut-avx2-qa-flags \
+  -S Build/Cmake -B out/clut-avx2
+cmake --preset linux-clang-clut-avx512-qa-flags \
+  -S Build/Cmake -B out/clut-avx512
+
+cmake --build out/clut-baseline --parallel "$(nproc)"
+cmake --build out/clut-avx2 --parallel "$(nproc)"
+cmake --build out/clut-avx512 --parallel "$(nproc)"
+```
+
+The AVX-512 preset inherits the AVX2 preset so AVX2 remains the intermediate
+runtime fallback. The focused CLUT test uses distinct values at every grid
+point so its expected output checks both corner selection and interpolation
+weights. Its eight-, nine-, eleven-, and fourteen-output fixtures validate
+fallback behavior, while the fifteen-output fixture covers a full AVX2 vector
+plus a masked tail and the corresponding AVX-512 path.
+
+To inspect AVX2 dispatch or set source breakpoints, add
+`-DICC_AVX2_CLUT_DEBUG=ON`. This emits the CPU decision, output channel count,
+corner offsets, interpolation weights, and per-kernel elapsed nanoseconds
+through `IccSignatureUtils.h`. It is intentionally diagnostic-only: trace
+logging and timing are compiled out when the option is `OFF`, so do not use a
+debug-trace build for throughput benchmarks.
+
+### Windows AVX2 CLUT build
+
+`vs2022-clangcl-x64-avx2-qa-flags` enables the optional AVX2 3D CLUT
+interpolation implementation. It compiles the AVX2 code in a separate
+translation unit and dispatches only after CPUID and XGETBV verify OS AVX
+state, so the resulting binary retains the scalar/SSE fallback on other x64
+CPUs.
+
+```cmd
+set VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg
+cmake --preset vs2022-clangcl-x64-clut-baseline-qa-flags -S Build/Cmake -B out/vs2022-clangcl-x64-clut-baseline-qa-flags
+cmake --preset vs2022-clangcl-x64-avx2-qa-flags -S Build/Cmake -B out/vs2022-clangcl-x64-avx2-qa-flags
+cmake --build out/vs2022-clangcl-x64-clut-baseline-qa-flags --config Release --target IccProfLib2 -- /m /maxcpucount
+cmake --build out/vs2022-clangcl-x64-avx2-qa-flags --config Release -- /m /maxcpucount
+ctest --test-dir out/vs2022-clangcl-x64-avx2-qa-flags -C Release --output-on-failure --no-tests=error -R "^iccdev\.clut-eight-output-regression$"
+ctest --test-dir out/vs2022-clangcl-x64-avx2-qa-flags -C Release --output-on-failure --no-tests=error
+```
+
+The Visual Studio presets run vcpkg manifest installation during
+configuration, so separate `vcpkg integrate install` and `vcpkg install`
+commands are not required. The dedicated CLUT comparison presets suppress the
+repository's existing Microsoft CRT compatibility deprecations; other Windows
+presets continue to report them.
+
+The preset is intentionally opt-in. Enable `ICCDEV_ENABLE_AVX2=ON` only for
+x86-64 compiler targets that accept the required ISA flag; CMake validates the
+compiler flag during configuration. Native MSVC reports an explicit skip and
+keeps SSE2 because its measured AVX2 path was slower; use ClangCL on Windows.
+The focused regression converts valid 3D
+RGB-to-8CLR, RGB-to-9CLR, RGB-to-BCLR, RGB-to-ECLR, and RGB-to-FCLR ICC v5
+fixtures and verifies their expected CLUT outputs. On an AVX2-capable x86-64
+host, the fifteen-output fixture enters the AVX2 helper; eight, nine, eleven,
+and fourteen outputs validate SSE2 fallback.
+
+For an interleaved Release comparison across every supported output count:
+
+```powershell
+.github\scripts\iccdev-windows-clut-avx2-benchmark.ps1 `
+  -BaselineBuildDir out\vs2022-clangcl-x64-clut-baseline-qa-flags `
+  -Avx2BuildDir out\vs2022-clangcl-x64-avx2-qa-flags `
+  -Iterations 20000000 -Repetitions 11 `
+  -AffinityCpu 30 `
+  -OutputPath out\clut-avx2-benchmark.tsv
+```
+
+Every result row must report `output_vector_match=True`. The helper compares
+the raw float bits for each output lane; a rounded aggregate checksum is not a
+sufficient correctness check. Keep both benchmark builds on ClangCL; comparing
+native MSVC against ClangCL also measures a compiler change.
+
+For a Windows debugging session, use the dedicated diagnostics preset:
+
+```cmd
+cmake --preset vs2022-clangcl-x64-avx2-diagnostics -S Build/Cmake -B out/vs2022-clangcl-x64-avx2-diagnostics
+cmake --build out/vs2022-clangcl-x64-avx2-diagnostics --config Debug -- /m /maxcpucount
+ctest --test-dir out/vs2022-clangcl-x64-avx2-diagnostics -C Debug --output-on-failure --no-tests=error -R "^iccdev\.clut-eight-output-regression$"
+```
+
+Set source breakpoints in
+`IccTraceAvx2ClutDispatch()` or `IccTraceAvx2ClutKernel()` in
+`IccSignatureUtils.h` to inspect the selected path and kernel inputs.
+
+### Windows AVX-512 CLUT build
+
+`vs2022-clangcl-x64-avx512-qa-flags` adds the experimental AVX-512
+implementation while retaining AVX2 and scalar/SSE fallbacks. The AVX-512
+translation unit is compiled separately, and runtime dispatch requires CPUID
+AVX-512F support plus XGETBV confirmation that XMM, YMM, opmask, and ZMM state
+are enabled by the operating system.
+
+```cmd
+cmake --preset vs2022-clangcl-x64-avx512-qa-flags -S Build/Cmake -B out/vs2022-clangcl-x64-avx512-qa-flags
+cmake --build out/vs2022-clangcl-x64-avx512-qa-flags --config Release -- /m /maxcpucount
+ctest --test-dir out/vs2022-clangcl-x64-avx512-qa-flags -C Release --output-on-failure --no-tests=error -R "^iccdev\.clut-eight-output-regression$"
+ctest --test-dir out/vs2022-clangcl-x64-avx512-qa-flags -C Release --output-on-failure --no-tests=error
+```
+
+`ICCDEV_ENABLE_AVX512=ON` is independently opt-in and defaults to `OFF`.
+The Windows preset also enables AVX2 so AVX2-capable systems retain that
+intermediate fallback when AVX-512 is unavailable.
+
 ## Runtime packaging
 
 Top-level CMake builds can also emit runtime packages with CPack without changing
@@ -332,7 +479,7 @@ smoke and uploads the `reficcmax-runtime-packages-linux` artifact.
 rather than from `__declspec` annotations: MSVC is deliberately excluded from the
 `ICCPROFLIBDLL_EXPORTS` definition in `Build/Cmake/IccProfLib/CMakeLists.txt`.
 That arrangement dates from #764, and the same file records why hidden visibility
-is not used on GCC/Clang — `ICCPROFLIB_API` annotations are incomplete
+is not used on GCC/Clang -- `ICCPROFLIB_API` annotations are incomplete
 (~308 partial uses across 43 headers) and `IccXML` has none at all.
 
 ### Exported global data (#1888, fixed in #2219)

@@ -63,12 +63,11 @@ endfunction()
 add_custom_target(check-fast
   COMMAND "${CMAKE_CTEST_COMMAND}"
           ${ICCDEV_CTEST_CONFIG_ARGS}
-          --label-exclude slow
-          --label-exclude known-red
+          --label-exclude "slow|known-red"
           --output-on-failure
           --no-tests=error
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-  COMMENT "Run iccDEV CTest suite excluding slow tests"
+  COMMENT "Run iccDEV CTest suite excluding slow and known-red tests"
   VERBATIM
 )
 add_dependencies(check-fast build-test-binaries)
@@ -159,6 +158,39 @@ function(iccdev_add_iccconnect_thread_test)
       ENVIRONMENT_MODIFICATION "${_iccconnect_windows_env_mods}"
     )
   endif()
+endfunction()
+
+function(iccdev_add_clut_avx512_sixteen_output_test)
+  if(NOT ICCDEV_AVX512_EFFECTIVE)
+    return()
+  endif()
+
+  set(_avx512_source
+    "${ICCDEV_REPO_ROOT}/IccProfLib/IccTagLutAvx512.cpp")
+  iccdev_add_regression_executable(iccClutAvx512SixteenOutputTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/clut-avx512-sixteen-output.cpp"
+    "${_avx512_source}"
+  )
+  target_compile_features(iccClutAvx512SixteenOutputTest PRIVATE cxx_std_17)
+  target_include_directories(iccClutAvx512SixteenOutputTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib")
+  if(MSVC)
+    set_source_files_properties("${_avx512_source}"
+      PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+  else()
+    set_source_files_properties("${_avx512_source}"
+      PROPERTIES COMPILE_OPTIONS "-mavx512f")
+  endif()
+
+  add_test(
+    NAME iccdev.clut-avx512-sixteen-output
+    COMMAND "$<TARGET_FILE:iccClutAvx512SixteenOutputTest>"
+  )
+  set_tests_properties(iccdev.clut-avx512-sixteen-output PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 30
+    LABELS "iccdev;clut;avx512;regression"
+  )
 endfunction()
 
 function(iccdev_add_iccconnect_config_parser_test)
@@ -5850,6 +5882,7 @@ if(WIN32)
   endif()
 
   iccdev_add_iccconnect_thread_test()
+  iccdev_add_clut_avx512_sixteen_output_test()
   iccdev_add_iccconnect_config_parser_test()
   iccdev_add_cmmsearch_init_pcc_test()
   iccdev_add_cmmsearch_rebegin_test()
@@ -5947,6 +5980,45 @@ if(WIN32)
   iccdev_add_qa_evidence_helpers_test()
   iccdev_add_windows_iccdevcmm_smoke_test()
   iccdev_add_zip_utf8_text_zlib_test()
+
+  if(TARGET iccFromXml AND TARGET iccDumpProfile AND TARGET iccApplyNamedCmm)
+    add_test(
+      NAME iccdev.clut-eight-output-regression
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DICCDEV_TEST_OUTDIR=${ICCDEV_TEST_OUTDIR}/iccdev-clut-eight-output-regression"
+        "-DICCDEV_FROM_XML=$<TARGET_FILE:iccFromXml>"
+        "-DICCDEV_DUMP_PROFILE=$<TARGET_FILE:iccDumpProfile>"
+        "-DICCDEV_APPLY_NAMED_CMM=$<TARGET_FILE:iccApplyNamedCmm>"
+        "-DICCDEV_FIXTURE_XML_8=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-8-output.xml"
+        "-DICCDEV_FIXTURE_XML_9=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-9-output.xml"
+        "-DICCDEV_FIXTURE_XML_11=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-11-output.xml"
+        "-DICCDEV_FIXTURE_XML_14=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-14-output.xml"
+        "-DICCDEV_FIXTURE_XML_15=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-15-output.xml"
+        "-DICCDEV_FIXTURE_INPUT=${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-8-output.txt"
+        -P "${CMAKE_CURRENT_LIST_DIR}/RunClutEightOutputRegression.cmake"
+    )
+    set_tests_properties(iccdev.clut-eight-output-regression PROPERTIES
+      WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+      TIMEOUT 60
+      LABELS "iccdev;clut;high-channel;regression"
+    )
+    if(WIN32)
+      set(_clut_windows_env_mods
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccFromXml>"
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccDumpProfile>"
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccApplyNamedCmm>"
+      )
+      foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+        list(APPEND _clut_windows_env_mods
+          "PATH=path_list_prepend:${_runtime_path}")
+      endforeach()
+      set_tests_properties(iccdev.clut-eight-output-regression PROPERTIES
+        ENVIRONMENT_MODIFICATION "${_clut_windows_env_mods}"
+      )
+    endif()
+    add_dependencies(check iccFromXml iccDumpProfile iccApplyNamedCmm)
+  endif()
 
   return()
 endif()
@@ -6151,6 +6223,7 @@ set(ICCDEV_TEST_ENV
 )
 
 iccdev_add_iccconnect_thread_test()
+iccdev_add_clut_avx512_sixteen_output_test()
 iccdev_add_iccconnect_config_parser_test()
 iccdev_add_cmmsearch_init_pcc_test()
 iccdev_add_cmmsearch_rebegin_test()
@@ -6269,6 +6342,16 @@ function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
     LABELS "${LABELS}"
   )
 endfunction()
+
+if(TARGET iccFromXml AND TARGET iccDumpProfile AND TARGET iccApplyNamedCmm)
+  iccdev_add_script_test(
+    iccdev.clut-eight-output-regression
+    60
+    "iccdev;clut;high-channel;regression;sanitizer"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-clut-eight-output-regression-tests.sh"
+  )
+endif()
 
 iccdev_add_script_test(
   iccdev.create-profiles
