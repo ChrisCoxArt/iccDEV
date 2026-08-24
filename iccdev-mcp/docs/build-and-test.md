@@ -183,24 +183,22 @@ export ICCDEV_PROFILE_DIRS=/path/to/custom/profiles
 
 ### Docker Runtime
 
-The regression Docker image includes the Python MCP package, REST dependencies,
-iccDEV CLI tools, runtime libraries, maintainer utilities, and `Testing/`
-profiles. Use it when you want the MCP server without a local CMake tool build.
+The unified `iccdev` image includes the Python MCP package, REST dependencies,
+CLI tools, runtime libraries, maintainer utilities, and `Testing/` profiles.
+Use it when you want the MCP server without a local CMake tool build.
 
-The Docker workflow publishes branch and immutable tags from `master` and
-`ci-qa-flags`, and from the protected `ci-qa-pr-docker-testing` branch through a
-manual dispatch. It promotes the verified regression digest to `latest` only
-after all required image checks succeed. Other feature branches build and smoke
-test locally on the runner without pushing or attesting images.
+`ci-docker` publishes `latest` and an immutable SHA tag from `master`; a `v*`
+release also publishes its release tag. Branch and workflow-run tags are not
+published.
 
 ```bash
 # MCP stdio mode
-docker run --rm -i ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest \
+docker run --rm -i ghcr.io/internationalcolorconsortium/iccdev:latest \
   iccdev-mcp-entrypoint mcp
 
 # REST API mode
 docker run --rm -p 127.0.0.1:8080:8080 \
-  ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest \
+  ghcr.io/internationalcolorconsortium/iccdev:latest \
   iccdev-mcp-entrypoint rest
 
 # Health check
@@ -210,9 +208,9 @@ curl -fsS http://127.0.0.1:8080/api/health
 Build the image locally from a checkout:
 
 ```bash
-docker build -t iccdev-ci-regression:mcp-local -f Dockerfile.ci-regression .
+docker build -t iccdev:mcp-local -f Dockerfile .
 docker run --rm -p 127.0.0.1:8080:8080 \
-  iccdev-ci-regression:mcp-local iccdev-mcp-entrypoint rest
+  iccdev:mcp-local iccdev-mcp-entrypoint rest
 curl -fsS http://127.0.0.1:8080/api/health
 curl -fsS http://127.0.0.1:8080/api/tools
 ```
@@ -228,7 +226,7 @@ validation ABI can correctly report fewer available tools. Validate discovered
 capabilities instead of a fixed total:
 
 ```bash
-docker run --rm --entrypoint python iccdev-ci-regression:mcp-local -c '
+docker run --rm --entrypoint python iccdev:mcp-local -c '
 from iccdev_mcp.cli_tools import TOOL_BINARIES
 from iccdev_mcp.server import health_check
 health = health_check()
