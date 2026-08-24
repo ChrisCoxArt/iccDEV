@@ -1,7 +1,7 @@
 /** @file
 File:       IccJsonTypes.h
 
-Contains:   Compatibility forwarding header for the JSON type aliases.
+Contains:   Shared JSON type aliases.
 
 Version:    V1
 
@@ -57,14 +57,9 @@ Copyright:  (c) see Software License
  *
  */
 
-#ifndef _ICCPROFLIB_JSON_TYPES_H
-#define _ICCPROFLIB_JSON_TYPES_H
+#ifndef _ICCJSONTYPES_H
+#define _ICCJSONTYPES_H
 
-#if __has_include("../IccJSON/IccLibJSON/IccJsonTypes.h")
-#include "../IccJSON/IccLibJSON/IccJsonTypes.h"
-#elif __has_include("../IccJSON2/IccJsonTypes.h")
-#include "../IccJSON2/IccJsonTypes.h"
-#else
 #include <functional>
 #include <nlohmann/json.hpp>
 
@@ -93,6 +88,5 @@ using json = nlohmann::basic_json<unordered_map>;
 #endif
 
 } // namespace iccJson
-#endif
 
 #endif

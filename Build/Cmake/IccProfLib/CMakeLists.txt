@@ -141,9 +141,7 @@ SET( HEADERS_PUBLIC
   ${SRC_PATH}/IccProfLib/IccArrayFactory.h
   ${SRC_PATH}/IccProfLib/IccCAM.h
   ${SRC_PATH}/IccProfLib/IccCValidation.h
-  # Issue #2154: relocated from Tools/CmdLine so IccConnect stops reaching across
-  # the tree for it. Header-only (all inline), so no CFILES entry and no export.
-  ${SRC_PATH}/IccProfLib/IccCmdLineUtil.h
+  ${SRC_PATH}/IccProfLib/IccFileUtil.h
   ${SRC_PATH}/IccProfLib/IccCmm.h
   ${SRC_PATH}/IccProfLib/IccCmmThread.h
   ${SRC_PATH}/IccProfLib/IccColorimetry.h
@@ -186,6 +184,7 @@ SET( HEADERS_PUBLIC
   ${SRC_PATH}/IccProfLib/IccSearch.h
   ${SRC_PATH}/IccProfLib/IccCmmSearch.h
   ${SRC_PATH}/IccProfLib/icProfileHeader.h
+  ${SRC_PATH}/Tools/CmdLine/IccCmdLineUtil.h
 )
 
 IF(ENABLE_INSTALL_RIM)

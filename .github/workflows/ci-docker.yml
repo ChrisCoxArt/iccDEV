@@ -24,22 +24,6 @@ env:
       - master
     tags:
       - 'v*'
-    paths:
-      - 'Dockerfile'
-      - '.dockerignore'
-      - 'docker/**'
-      - 'iccdev-mcp/docker/**'
-      - 'Build/**'
-      - 'IccConnect/**'
-      - 'IccJSON/**'
-      - 'IccProfLib/**'
-      - 'IccXML/**'
-      - 'Testing/**'
-      - 'Tools/**'
-      - 'cfl/**'
-      - 'python/**'
-      - '.github/scripts/preflight-safety-checks.sh'
-      - '.github/workflows/ci-docker.yml'
   workflow_dispatch:
 
 concurrency:
