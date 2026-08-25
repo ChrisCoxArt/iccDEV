@@ -28,6 +28,9 @@ security automation.
 - For maintainer infrastructure, prefer a conservative security-review loop:
   run the relevant local scanners, patch confirmed findings, retest, and record
   any accepted scanner noise with a clear rationale.
+- Runner-reduction changes must retain trusted-base sanitizer sourcing,
+  sanitization for every workflow output, and path-gated coverage for container
+  changes.
 
 ## Loop
 
@@ -38,7 +41,16 @@ security automation.
    surface.
 5. Fix confirmed findings.
 6. Repeat only the checks affected by the fix.
-7. Prepare a concise handoff.
+7. Freeze the head and record the evidence in
+   `docs/governance/UPSTREAM_PR_READINESS.md` before requesting review.
+8. Prepare a concise handoff.
+
+For focused local iteration, run
+`.github/scripts/preflight-safety-checks.sh --fast-lane=matlab` for MATLAB-only
+work, or plain `--fast-lane` for other changed workflow/script surfaces. These
+skip local CodeQL database/query work. Do not add unrelated CTest coverage:
+MATLAB-only changes use the focused MATLAB build and QA, while the full local
+or hosted preflight remains the final workflow security signal.
 
 ## SAST Selection
 
@@ -68,9 +80,14 @@ Choose the smallest dynamic check that proves the changed behavior:
 - ASAN/UBSAN/IntSan command for parser or untrusted input changes.
 - Docker runtime smoke and image vulnerability/secret scan for container
   changes.
+- MCP runtime changes must validate every affected Docker image variant. Assert
+  that discovered CLI tools match `TOOL_BINARIES` and inspect optional-capability
+  flags; do not use a fixed health-tool count shared across variants.
 - Dockerfile checks must not be advisory-only when container files changed:
   run `hadolint` and Trivy config, then build, scan, or smoke the affected image
   when practical.
+- Confirm that `container_changed` selects the read-only Docker PR verification
+  lane and that the aggregate PR status requires its result when selected.
 - For Docker PR fast lanes, validate the same helper checks that the publishing
   workflow validates, including patch checkers, applicators, environment
   banners, and healthcheck semantics.
@@ -100,6 +117,7 @@ Prefer a short human-golfed report over raw logs.
 - `../../../docs/ctest.md`
 - `../../../docs/codeql.md`
 - `../../../docs/regression-workflow-governance.md`
+- `../../../docs/governance/UPSTREAM_PR_READINESS.md`
 - `../../prompts/pre-pr-security-cycle.prompt.md`
 - `../../prompts/audit-workflow-governance.prompt.md`
 - `../../prompts/build-and-test.prompt.md`

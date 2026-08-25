@@ -8,7 +8,7 @@ command-line tools.
 - Workflow: `.github/workflows/ci-afl-smoke.yml`
 - Driver: `.github/scripts/iccdev-afl-smoke.sh`
 - AFL++ source: `https://github.com/AFLplusplus/AFLplusplus/tree/dev`
-- Container: `ghcr.io/internationalcolorconsortium/iccdev-ci-regression`
+- Container: `ghcr.io/internationalcolorconsortium/iccdev`
 - Container workflow: `.github/workflows/ci-docker.yml`
 - Seeds: `.github/ci/test-data/` and `.github/ci/afl-seeds/`
 - Local patch stacks: `.github/ci/fuzz-patches/afl` and
@@ -38,9 +38,20 @@ version. For Clang/LLVM 22, build AFL++ `dev` with `CC=clang-22`,
 `afl-showmap`, `afl-cc`, `afl-compiler-rt.o`,
 `SanitizerCoveragePCGUARD.so`, and `cmplog-routines-pass.so`.
 
-The current core onboarding target set is
-`dump,toxml,fromxml,tojson,fromjson,roundtrip`. Stabilize those targets before
-adding more command-line tools.
+The target sets differ per lane, and are not interchangeable.
+
+- **AFL** accepts `dump,toxml,fromxml,tojson,fromjson,roundtrip,fromcube` — see
+  the allow-list in `.github/scripts/iccdev-afl-smoke.sh`.
+- **CFL** accepts
+  `dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize`.
+
+The two in-process targets are CFL-only; passing them to the AFL lane is an
+error. The first six CFL
+targets are command-line wrappers. `profilevisualize` and `writerserialize` are
+in-process public-API harnesses: compile the engine sources separately, include
+only public headers, and do not include a CLI implementation or call
+`processLuts()`. `writerserialize` additionally links `Mini{PDF,SVG,TIFF}.cpp`,
+whose serialization entries are not reachable through `IccVizModel` alone.
 
 Manual dispatches should expose the same operator controls on AFL and CFL:
 `target_ref` for a branch, tag, or ref, optional `target_sha` for a full
@@ -50,7 +61,7 @@ PRs, and `none` when comparing raw branch behavior.
 Expose CFL runtime as seconds per target, not LibFuzzer iteration or execution
 counts, so the manual UI matches AFL's duration model.
 
-The regression image packages the compiler runtime needed by its packaged
+The unified image packages the compiler runtime needed by its packaged
 AFL++ wrapper for short local smoke checks. The AFL workflow should still
 rebuild and probe AFL++ wrappers against the selected LLVM major version. Avoid
 broad AFL++ `source-only` or full LLVM builds in the smoke workflow when they
@@ -78,7 +89,7 @@ shellcheck .github/scripts/iccdev-afl-smoke.sh
 actionlint .github/workflows/ci-afl-smoke.yml
 yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' .github/workflows/ci-afl-smoke.yml
 .github/scripts/iccdev-afl-smoke.sh --seconds 10 --targets dump --exec-timeout-ms 30000
-cfl/build.sh --targets dump,toxml,fromxml,tojson,fromjson,roundtrip --seconds 30
+cfl/build.sh --targets dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize --seconds 30
 ```
 
 Run `.github/scripts/preflight-safety-checks.sh --require-tools` before pushing
@@ -89,7 +100,7 @@ bootstrap probe documented in `docs/afl-fuzzing.md`.
 
 When changing fuzz patch stacks, the patch checker, the patch applicator, or
 `cfl/` build behavior, verify that `.github/workflows/ci-docker.yml` still
-rebuilds and tests the regression image for those paths.
+rebuilds and tests the unified image for those paths.
 
 ## Handoff
 

@@ -41,8 +41,13 @@ cmake_minimum_required(VERSION 3.18...3.29)
 # cmake_policy(SET CMP0112 NEW)  # Respect parent scope in script mode
 # cmake_policy(SET CMP0156 NEW)  # Allow ALIAS targets for link dependencies
 
-# Emit warnings on deprecated or legacy CMake features
-set(CMAKE_WARN_DEPRECATED TRUE)
+# CMake 4.4+ manages deprecation messages through diagnostic categories.
+if(POLICY CMP0218 AND COMMAND cmake_diagnostic)
+  cmake_policy(SET CMP0218 NEW)
+  cmake_diagnostic(SET CMD_DEPRECATED WARN)
+else()
+  set(CMAKE_WARN_DEPRECATED TRUE)
+endif()
 
 # Optional: clean up obsolete warnings (only enable if really needed)
 # set(CMAKE_POLICY_WARNING_CMP0012 TRUE)
@@ -137,11 +142,11 @@ project(RefIccMAX LANGUAGES C CXX)
 set(PROJECT_UP_NAME "REFICCMAX")
 set(PROJECT_DOWN_NAME "reficcmax")
 
-# Version components (4-part version: 2.3.2.2)
+# Version components (4-part version: 2.3.2.3)
 set(${PROJECT_UP_NAME}_MAJOR_VERSION 2)
 set(${PROJECT_UP_NAME}_MINOR_VERSION 3)
 set(${PROJECT_UP_NAME}_MICRO_VERSION 2)
-set(${PROJECT_UP_NAME}_PATCH_VERSION 2)
+set(${PROJECT_UP_NAME}_PATCH_VERSION 3)
 
 # Composite versions
 set(${PROJECT_UP_NAME}_VERSION
@@ -538,11 +543,27 @@ if(ICC_JSON_ORDERED AND _ICC_JSON_ORDERED_DEFAULT)
 endif()
 option(ICC_TRACE_NAN_ENABLED      "Enable tracing NaN inputs in debug builds"           OFF)
 option(ICC_CLUT_DEBUG             "Enable CLUT debugging support"                       OFF)
+option(ICC_AVX2_CLUT_DEBUG        "Enable AVX2 CLUT dispatch and timing diagnostics"    OFF)
 option(ICC_ENABLE_ASSERTS         "Enable ICC_ASSERT traps and debug assertions"        OFF)
 option(ICC_LOG_SAFE               "Enable ICC_LOG_SAFE_VAL bounds-checked logging"      OFF)
 option(ICC_VERBOSE_CALC_APPLY     "Enable verbose CIccMpeCalculator Apply debugging"    OFF)
 option(ICC_USE_ZLIB               "Enable zlib-backed compressed ICC text tags"         ON)
 option(ICCDEV_ENABLE_QA_FLAGS     "Enable opt-in maintainer QA evidence options"        OFF)
+option(ICCDEV_ENABLE_STRICT_WARNINGS
+  "Enable the compiler-specific strict warning tier on supported toolchains"
+  ON)
+option(ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS
+  "Suppress Microsoft CRT compatibility warnings in scoped comparison builds"
+  OFF)
+option(ICCDEV_ENABLE_AVX2
+  "Build runtime-dispatched AVX2 CLUT interpolation on supported x86-64 toolchains"
+  OFF)
+option(ICCDEV_ENABLE_AVX512
+  "Build runtime-dispatched AVX-512 CLUT interpolation on supported x86-64 toolchains"
+  OFF)
+option(ICCDEV_ENABLE_PERF_MONITORING
+  "Build opt-in aggregate CLUT and threaded-CMM performance telemetry"
+  OFF)
 option(ENABLE_SANITIZERS          "Enable runtime sanitizers (ASan, UBSan, etc.)"       OFF)
 option(ENABLE_ASAN                "Enable AddressSanitizer only"                        OFF)
 option(ENABLE_FUZZING             "Enable libFuzzer harnesses (Clang only)"             OFF)
@@ -736,6 +757,12 @@ if(ICCDEV_ENABLE_QA_FLAGS)
   add_compile_definitions(ICCDEV_ENABLE_QA_FLAGS=1)
 endif()
 
+if(ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS AND MSVC)
+  add_compile_definitions(
+    _CRT_NONSTDC_NO_WARNINGS
+    _CRT_SECURE_NO_WARNINGS)
+endif()
+
 # ----------------------------------------------------------------------
 # Build Status Output
 # ----------------------------------------------------------------------
@@ -753,11 +780,16 @@ message(STATUS "ENABLE_IIS_TOOLS           = ${ENABLE_IIS_TOOLS}")
 message(STATUS "ICCDEV_WINDOWS_UNIFIED_RUNTIME = ${ICCDEV_WINDOWS_UNIFIED_RUNTIME}")
 message(STATUS "ICC_TRACE_NAN_ENABLED      = ${ICC_TRACE_NAN_ENABLED}")
 message(STATUS "ICC_CLUT_DEBUG             = ${ICC_CLUT_DEBUG}")
+message(STATUS "ICC_AVX2_CLUT_DEBUG        = ${ICC_AVX2_CLUT_DEBUG}")
 message(STATUS "ICC_ENABLE_ASSERTS         = ${ICC_ENABLE_ASSERTS}")
 message(STATUS "ICC_LOG_SAFE               = ${ICC_LOG_SAFE}")
 message(STATUS "ICC_VERBOSE_CALC_APPLY     = ${ICC_VERBOSE_CALC_APPLY}")
 message(STATUS "ICC_USE_ZLIB               = ${ICC_USE_ZLIB}")
 message(STATUS "ICCDEV_ENABLE_QA_FLAGS     = ${ICCDEV_ENABLE_QA_FLAGS}")
+message(STATUS "ICCDEV_ENABLE_STRICT_WARNINGS = ${ICCDEV_ENABLE_STRICT_WARNINGS}")
+message(STATUS "ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS = ${ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS}")
+message(STATUS "ICCDEV_ENABLE_AVX2         = ${ICCDEV_ENABLE_AVX2}")
+message(STATUS "ICCDEV_ENABLE_AVX512       = ${ICCDEV_ENABLE_AVX512}")
 message(STATUS "ENABLE_SANITIZERS          = ${ENABLE_SANITIZERS}")
 message(STATUS "ENABLE_ASAN                = ${ENABLE_ASAN}")
 message(STATUS "ENABLE_UBSAN               = ${ENABLE_UBSAN}")
@@ -1332,7 +1364,10 @@ if(APPLE)
     -Wformat-security
     -Wimplicit-fallthrough
     -Wsign-compare
-    -Wnon-virtual-dtor
+    # C++-only: GCC rejects it outright on a C translation unit
+    # ("valid for C++/ObjC++ but not for C"), which -Werror turns into a
+    # hard error and CI's zero-warning grep fails on regardless (#2276).
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
     -Wuninitialized
     -fstack-protector-strong
   )
@@ -1345,7 +1380,7 @@ if(APPLE)
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
     set(_iccdev_strict_capable TRUE)
   endif()
-  if(_iccdev_strict_capable)
+  if(ICCDEV_ENABLE_STRICT_WARNINGS AND _iccdev_strict_capable)
     add_compile_options(
       -Werror=uninitialized
       -Wshadow
@@ -1354,8 +1389,10 @@ if(APPLE)
       -Wpointer-arith
     )
     message(STATUS "macOS: strict warnings ENABLED (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
-  else()
+  elseif(ICCDEV_ENABLE_STRICT_WARNINGS)
     message(STATUS "macOS: strict warnings DISABLED -- ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} below floor (GCC 15 / Clang 14). Base hardening still active.")
+  else()
+    message(STATUS "macOS: strict warnings DISABLED by ICCDEV_ENABLE_STRICT_WARNINGS=OFF. Base hardening still active.")
   endif()
 
   _iccdev_configure_fortify_source("macOS")
@@ -1374,7 +1411,10 @@ elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     -Wformat-security
     -Wimplicit-fallthrough
     -Wsign-compare
-    -Wnon-virtual-dtor
+    # C++-only: GCC rejects it outright on a C translation unit
+    # ("valid for C++/ObjC++ but not for C"), which -Werror turns into a
+    # hard error and CI's zero-warning grep fails on regardless (#2276).
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
     -Wuninitialized
   )
   # Hardening flags probed individually: constrained toolchains (e.g. Clang 11
@@ -1393,7 +1433,7 @@ elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
     set(_iccdev_strict_capable TRUE)
   endif()
-  if(_iccdev_strict_capable)
+  if(ICCDEV_ENABLE_STRICT_WARNINGS AND _iccdev_strict_capable)
     add_compile_options(
       -Werror=uninitialized
       -Wshadow
@@ -1405,8 +1445,10 @@ elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
       add_compile_options(-Wlogical-op)
     endif()
     message(STATUS "Linux: strict warnings ENABLED (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
-  else()
+  elseif(ICCDEV_ENABLE_STRICT_WARNINGS)
     message(STATUS "Linux: strict warnings DISABLED -- ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} below floor (GCC 15 / Clang 14). Base hardening still active. Upgrade to match CI diagnostics.")
+  else()
+    message(STATUS "Linux: strict warnings DISABLED by ICCDEV_ENABLE_STRICT_WARNINGS=OFF. Base hardening still active.")
   endif()
 
   # Opt-in: Effective C++ ruleset (currently ~3000 sites; multi-PR cleanup)
@@ -1441,12 +1483,17 @@ elseif(EMSCRIPTEN)
     -Wformat-security
     -Wimplicit-fallthrough
     -Wsign-compare
-    -Wnon-virtual-dtor
+    # C++-only: GCC rejects it outright on a C translation unit
+    # ("valid for C++/ObjC++ but not for C"), which -Werror turns into a
+    # hard error and CI's zero-warning grep fails on regardless (#2276).
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
     -Wuninitialized
   )
 
   # Strict tier (Emscripten ships clang; gate on Clang 14+ for parity with Linux/macOS)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
+  if(ICCDEV_ENABLE_STRICT_WARNINGS
+     AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+     AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
     add_compile_options(
       -Werror=uninitialized
       -Wshadow
@@ -1455,8 +1502,10 @@ elseif(EMSCRIPTEN)
       -Wpointer-arith
     )
     message(STATUS "Emscripten: strict warnings ENABLED (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
-  else()
+  elseif(ICCDEV_ENABLE_STRICT_WARNINGS)
     message(STATUS "Emscripten: strict warnings DISABLED -- ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} below floor (Clang 14).")
+  else()
+    message(STATUS "Emscripten: strict warnings DISABLED by ICCDEV_ENABLE_STRICT_WARNINGS=OFF.")
   endif()
 
   message(STATUS "Emscripten build: Warning flags applied (no ELF hardening).")
@@ -1677,7 +1726,56 @@ function(iccdev_fixup_msvc_compile_pdb TARGET_NAME)
   endif()
 endfunction()
 
+# The one declaration of the iccviz visualization engine (#1975, follow-on to
+# #1754).  IccVizModel is the data-first API (iccviz::Enumerate / RenderGraph /
+# RenderRaster) that Tools/CmdLine/IccProfilePlot exposes to consumers outside
+# the tool: both IccProfilePlot executables drive it and the iccviz regression
+# tests link it from their own translation units.  Each of those three restated
+# the source path and the include directory by hand, so adding a file to the
+# engine meant editing several unrelated CMakeLists -- the same hand-maintained
+# duplication that let the UBSAN silence list drift in #2034.  The fuzz harness
+# on the CFL branch (see the ENABLE_FUZZING notice above) is a fourth consumer
+# of the same shape, which is what makes these sources belong to a target
+# rather than to any one tool.
+#
+# Declared here rather than in Tools/IccProfilePlot because that subdirectory is
+# inside IF(ENABLE_TOOLS) below while Testing is added after ENDIF().  A target
+# declared there would vanish from an ENABLE_TOOLS=OFF build and take the iccviz
+# regression tests with it.
+#
+# INTERFACE rather than OBJECT or STATIC, for two reasons -- note that neither
+# is "so each consumer gets its own sanitizer flags": ENABLE_SANITIZERS folds
+# its flags into CMAKE_C/CXX_FLAGS globally (see FINAL_SAN_FLAGS above), so a
+# shared object library would be instrumented exactly like everything else.
+#
+#  * INTERFACE_SOURCES compile into each consumer, which keeps the compile graph
+#    identical to what the hand-written lists produced -- same objects in the
+#    same targets.  This is a de-duplication of the declarations, not a change
+#    to how anything is built; consolidating the three compiles into one shared
+#    object library is a separate decision, deliberately not taken here.
+#  * Per-target flags do reach the engine this way, and that is the model this
+#    build already uses for fuzzing: ENABLE_FUZZING deliberately does NOT apply
+#    its flags globally, handing them to fuzz targets through
+#    target_compile_options instead.  Options set that way on a consumer reach
+#    an INTERFACE source, because it compiles as part of that consumer; they
+#    would not reach an object library compiled once on its own.
+#
+# IccVizEngineHeaders is split out for consumers that need only the headers --
+# IccVizMath.hpp is header-only, so the degeneracy test compiles no engine
+# source at all and must not be handed IccVizModel.cpp.
+get_filename_component(ICCDEV_ICCVIZ_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../Tools/CmdLine/IccProfilePlot" ABSOLUTE)
+
+add_library(IccVizEngineHeaders INTERFACE)
+target_include_directories(IccVizEngineHeaders INTERFACE "${ICCDEV_ICCVIZ_DIR}")
+
+add_library(IccVizEngine INTERFACE)
+target_link_libraries(IccVizEngine INTERFACE IccVizEngineHeaders)
+target_sources(IccVizEngine INTERFACE "${ICCDEV_ICCVIZ_DIR}/IccVizModel.cpp")
+
 IF(ENABLE_TOOLS)
+  include_directories(${TOP_SOURCE_DIR}/Tools/CmdLine)
+
   # Add XML-related tools
   IF(ENABLE_ICCXML)
     ADD_SUBDIRECTORY(Tools/IccFromXml)
@@ -1700,6 +1798,7 @@ IF(ENABLE_TOOLS)
   ADD_SUBDIRECTORY(Tools/IccDumpProfile)
   ADD_SUBDIRECTORY(Tools/IccPawgReport)
   ADD_SUBDIRECTORY(Tools/IccRoundTrip)
+  ADD_SUBDIRECTORY(Tools/IccBenchApply)
   ADD_SUBDIRECTORY(Tools/IccFromCube)
   ADD_SUBDIRECTORY(Tools/IccV5DspObsToV4Dsp)
   ADD_SUBDIRECTORY(Tools/IccApplyToLink)

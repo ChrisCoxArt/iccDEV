@@ -22,6 +22,10 @@ permissions:
 'on':
   workflow_call:
     inputs:
+      base_sha:
+        description: 'Exact trusted base SHA for workflow helpers'
+        required: true
+        type: string
       target_sha:
         description: 'Exact PR head SHA to verify'
         required: true
@@ -46,20 +50,44 @@ jobs:
       run:
         shell: bash --noprofile --norc {0}
     steps:
+      # preflight: allow-codeql-actions reason=readonly-pr-workflow-checkout
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
         with:
           persist-credentials: false
           fetch-depth: 1
 
+      # preflight: allow-codeql-actions reason=trusted-base-workflow-checkout
+      - name: Check out trusted workflow helpers
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          path: .trusted-workflow
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Check out target SHA
         env:
           BASH_ENV: /dev/null
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          case "$BASE_SHA" in
+            *[!0-9a-fA-F]*)
+              echo "::error title=Invalid base SHA::${BASE_SHA}"
+              exit 1
+              ;;
+          esac
+          if [ "${#BASE_SHA}" -ne 40 ] ||
+             [ "$(git -C .trusted-workflow rev-parse HEAD)" != "$BASE_SHA" ]; then
+            echo "::error title=Trusted base SHA mismatch"
+            exit 1
+          fi
 
           case "$TARGET_SHA" in
             *[!0-9a-fA-F]*)
@@ -81,7 +109,8 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          .github/scripts/check-workflow-cache-policy.sh .github/workflows/ci-docker-pr.yml
+          .trusted-workflow/.github/scripts/check-workflow-cache-policy.sh \
+            .github/workflows/ci-docker-pr.yml
 
   pr-regression-verify:
     name: "Docker PR regression verification"
@@ -90,7 +119,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      packages: read
     defaults:
       run:
         shell: bash --noprofile --norc {0}
@@ -98,22 +126,45 @@ jobs:
       BASH_ENV: /dev/null
       TARGET_SHA: ${{ inputs.target_sha }}
       WARNING_POLICY: ${{ inputs.warning_policy || 'fail' }}
-      TEST_IMAGE: ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest
 
     steps:
+      # preflight: allow-codeql-actions reason=readonly-pr-workflow-checkout
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
         with:
           persist-credentials: false
           fetch-depth: 1
 
+      # preflight: allow-codeql-actions reason=trusted-base-workflow-checkout
+      - name: Check out trusted workflow helpers
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (node24)
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          path: .trusted-workflow
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Verify checked out PR SHA
         env:
           BASH_ENV: /dev/null
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          case "$BASE_SHA" in
+            *[!0-9a-fA-F]*)
+              echo "::error title=Invalid base SHA::${BASE_SHA}"
+              exit 1
+              ;;
+          esac
+          if [ "${#BASE_SHA}" -ne 40 ] ||
+             [ "$(git -C .trusted-workflow rev-parse HEAD)" != "$BASE_SHA" ]; then
+            echo "::error title=Trusted base SHA mismatch"
+            exit 1
+          fi
 
           case "$TARGET_SHA" in
             *[!0-9a-fA-F]*)
@@ -135,23 +186,33 @@ jobs:
             exit 1
           fi
 
-      - name: Pull latest maintainer regression image
+      # preflight: allow-codeql-actions reason=trusted-base-sanitizer
+      # preflight: allow-pr-script-execution reason=build-same-repository-container-pr
+      - name: Build unified PR image
+        id: image
         env:
           BASH_ENV: /dev/null
+          TEST_IMAGE: iccdev-pr:${{ inputs.target_sha }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          source .trusted-workflow/.github/scripts/sanitize-sed.sh
 
-          docker pull "$TEST_IMAGE"
-          docker image inspect \
-            --format 'image={{.Id}} digest={{index .RepoDigests 0}}' \
-            "$TEST_IMAGE"
+          # The trusted checkout is needed only to load this sanitizer. Remove
+          # it so the Docker context and later read-only source mount are clean.
+          rm -rf "$GITHUB_WORKSPACE/.trusted-workflow"
+          test ! -e "$GITHUB_WORKSPACE/.trusted-workflow"
 
-      # preflight: allow-pr-script-execution reason=verify-maintainer-regression-image
-      - name: Verify regression image toolchain
+          docker build \
+            --build-arg "GIT_COMMIT=$TARGET_SHA" \
+            -t "$TEST_IMAGE" .
+          printf 'image=%s\n' "$(sanitize_line "$TEST_IMAGE")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify unified image toolchain
         env:
           BASH_ENV: /dev/null
+          TEST_IMAGE: ${{ steps.image.outputs.image }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -159,12 +220,11 @@ jobs:
 
           docker run --rm "$TEST_IMAGE" bash -lc '
             set -euo pipefail
-            command -v git gh clang clang++ gcc g++ cmake make realpath llvm-symbolizer
+            git config --global credential.helper ""
+            unset GITHUB_TOKEN || true
+            command -v git gh clang clang++ gcc g++ cmake make realpath llvm-symbolizer iccdev-mcp
             command -v afl-fuzz afl-showmap iccdev-fuzz-env
             command -v jq curl shellcheck llvm-cov llvm-profdata file
-            test -x .github/scripts/check-fuzz-patches.sh
-            test -x .github/scripts/iccdev-apply-fuzz-patches.sh
-            test -x .github/scripts/iccdev-fuzz-patch-check-tests.sh
             test -x .github/scripts/iccdev-afl-smoke.sh
             clang --version | sed -n "1p"
             clang++ --version | sed -n "1p"
@@ -174,22 +234,21 @@ jobs:
             afl-fuzz -V 1 2>&1 | sed -n "1p" || true
             fuzz_env_output="$(iccdev-fuzz-env)"
             sed -n "1,40p" <<< "$fuzz_env_output"
-            if ! grep -q "^Patch checker: " <<< "$fuzz_env_output" || grep -q "missing or not executable" <<< "$fuzz_env_output"; then
-              echo "ERROR: iccdev-fuzz-env did not report an executable patch checker" >&2
+            if ! grep -q "^Source mode: upstream checkout without local patches$" <<< "$fuzz_env_output"; then
+              echo "ERROR: iccdev-fuzz-env did not report the unpatched source mode" >&2
               exit 1
             fi
-            .github/scripts/iccdev-fuzz-patch-check-tests.sh
-            .github/scripts/check-fuzz-patches.sh
-            .github/scripts/iccdev-apply-fuzz-patches.sh --mode afl --dry-run --strict
-            .github/scripts/iccdev-apply-fuzz-patches.sh --mode cfl --dry-run --strict
             clang --version | grep -q "clang version 22\\."
             clang++ --version | grep -q "clang version 22\\."
             gcc --version | grep -q " 15\\."
             g++ --version | grep -q " 15\\."
             test "${CC}" = clang
             test "${CXX}" = clang++
+            iccdev-mcp --help >/dev/null
             printf "int main(void) { return 0; }\n" > /tmp/afl-probe.c
             printf "int main(void) { return 0; }\n" > /tmp/afl-probe.cpp
+            # The packaged AFL LLVM plugin targets LLVM 21; retain
+            # Clang 22 as the image default and pair this probe to LLVM 21.
             AFL_CC=clang-21 AFL_CXX=clang++-21 afl-clang-fast -c /tmp/afl-probe.c -o /tmp/afl-probe.o
             AFL_CC=clang-21 AFL_CXX=clang++-21 afl-clang-fast++ -c /tmp/afl-probe.cpp -o /tmp/afl-probexx.o
             printf "#include <stddef.h>\n#include <stdint.h>\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t*, size_t){return 0;}\n" > /tmp/cfl-smoke.cpp
@@ -198,9 +257,10 @@ jobs:
             /tmp/cfl-smoke -max_total_time=1
           '
 
-      - name: Build and test PR tree inside regression image
+      - name: Build and test PR tree inside unified image
         env:
           BASH_ENV: /dev/null
+          TEST_IMAGE: ${{ steps.image.outputs.image }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -221,6 +281,8 @@ jobs:
             -e "WARNING_POLICY=${WARNING_POLICY}" \
             "$TEST_IMAGE" bash -lc '
               set -euo pipefail
+              git config --global credential.helper ""
+              unset GITHUB_TOKEN || true
               work="$(mktemp -d)"
               source_dir="$work/iccDEV"
               mkdir -p "$source_dir"

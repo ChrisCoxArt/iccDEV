@@ -19,11 +19,11 @@ gh run view <RUN_ID> --repo InternationalColorConsortium/iccDEV --log-failed
 | Workflow | Platform | Compiler | Key Differences |
 |----------|----------|----------|-----------------|
 | `ci-pr-action.yml` | ubuntu-24.04 | clang | Gold-standard bash governance |
-| `ci-pr-unix.yml` | ubuntu-24.04 | gcc + clang | Matrix: {gcc, clang} x {Debug, Release} |
+| `ci-pr-unix.yml` | ubuntu-24.04 | GCC 15, Clang 22 | Linux toolchains from the matching signed APT repositories |
 | `ci-pr-win.yml` | windows-latest | MSVC | vcpkg deps, PowerShell governance |
 | `ci-sanitizer-tests.yml` | ubuntu-24.04 | clang | ASan, UBSan, TSan, MSan matrix |
 | `ci-pr-wasm.yml` | ubuntu-24.04 | emcc | Release WASM PR parity gate |
-| `ci-vcpkg-ports.yml` | win/ubuntu/macos | varies | vcpkg overlay port install + verify |
+| `ci-vcpkg-ports.yml` | windows-2022 | MSVC | Required vcpkg overlay port install + verify; Linux/macOS are manual diagnostics |
 
 ### 3. Common Failure Categories
 
@@ -69,10 +69,13 @@ target_compile_options(target PRIVATE
 # MSVC differences:
 - vcpkg handles all dependencies (manifest mode)
 - No LD_LIBRARY_PATH -> DLLs must be in PATH or same directory
+- Local MATLAB reproductions use PowerShell and the repo\msvc build root;
+  use MATLAB setenv for current-process variables, never shell export
 - Windows CTest wrappers add build-tree, vcpkg, compiler, and MinGW runtime
   directories from CMakeCache; raw executable runs still need an explicit PATH
 - PowerShell sanitizer: .github/scripts/sanitize.ps1
-- Line endings: CRLF in bat scripts, LF in sh scripts
+- Line endings: CRLF in PowerShell, bat, and cmd scripts; LF in docs, prompts,
+  skills, CMake, YAML/JSON, Dockerfiles, and Unix scripts
 - Path separators: backslash in build output
 ```
 

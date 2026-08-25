@@ -36,11 +36,12 @@ development headers when the published image does not already contain them,
 puts the freshly built AFL++ checkout first in `PATH`, and builds iccDEV with
 `afl-clang-fast`.
 
-The regression image keeps the packaged `afl-clang-fast` wrapper usable for
-short local smoke checks by installing its matching compiler runtime. For CI,
-use the rebuilt wrapper path and explicitly probe it against the same LLVM
-major version as `clang-22`. Known-good AFL wrapper checks compile both C and
-C++ probes with:
+The unified image keeps the packaged `afl-clang-fast` wrapper usable for short
+local smoke checks. Its packaged LLVM plugin targets Clang 21, so use
+`AFL_CC=clang-21` and `AFL_CXX=clang++-21` for that path. The AFL smoke workflow
+rebuilds AFL++ against Clang 22; use the rebuilt wrapper path and explicitly
+probe it with Clang 22. Known-good rebuilt-wrapper checks compile both C and C++
+probes with:
 
 ```bash
 AFL_PATH=/path/to/AFLplusplus AFL_CC=clang-22 AFL_CXX=clang++-22 \
@@ -182,11 +183,11 @@ cmake --build build-clang-normal --target iccApplyNamedCmm -j"$(nproc)"
 ```
 
 For Docker parity with CI, mount the checkout and run the same smoke checks in
-the regression image:
+the unified image:
 
 ```bash
 docker run --rm -v "$PWD":/work -w /work \
-  ghcr.io/internationalcolorconsortium/iccdev-ci-regression:master \
+  ghcr.io/internationalcolorconsortium/iccdev:latest \
   bash -lc '
     CC=gcc CXX=g++ cmake -S Build/Cmake -B /tmp/iccdev-gcc-normal \
       -DENABLE_TOOLS=ON -DENABLE_TESTS=OFF -DENABLE_IMAGE_TOOLS=OFF \
@@ -206,10 +207,10 @@ target, and replay a representative input. Keep the removal only when the report
 does not return or when the returned report now has a project-owned fix.
 
 Local container bootstrap check, useful before changing the workflow or the
-regression image:
+unified image:
 
 ```bash
-docker run --rm --user 0 ghcr.io/internationalcolorconsortium/iccdev-ci-regression:master bash -lc '
+docker run --rm --user 0 ghcr.io/internationalcolorconsortium/iccdev:latest bash -lc '
 set -euo pipefail
 apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 update -qq
 apt-get install -y -qq --no-install-recommends llvm-22-dev zlib1g-dev >/tmp/apt-install.log
@@ -270,14 +271,21 @@ The matching CFL smoke entry point is `cfl/build.sh` and the manual
 cfl/build.sh --seconds 30
 
 gh workflow run ci-cfl-smoke.yml \
-  -f cfl_targets=dump,toxml,fromxml,tojson,fromjson,roundtrip \
+  -f cfl_targets=dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize \
   -f duration_seconds=30
 ```
 
-The current CFL harnesses are conservative CLI-fidelity wrappers: libFuzzer
-writes each input to a temporary file and replays the matching sanitized iccDEV
-tool. This keeps the branch stable while deeper in-process harnesses are
-reviewed separately.
+The six command-line CFL harnesses are conservative CLI-fidelity wrappers:
+libFuzzer writes each input to a temporary file and replays the matching
+sanitized iccDEV tool. `profilevisualize` and `writerserialize` are in-process
+harnesses. Both parse the input from memory and consume only public headers,
+with the engine sources compiled as separate translation units:
+`profilevisualize` stops at the `IccVizModel.hpp` data API, and
+`writerserialize` carries the rendered result on into `Mini{PDF,SVG,TIFF}`,
+which is where the byte-level layout and offset arithmetic live (#2116).
+
+Both need a CLUT-bearing seed to reach the raster path at all, and the seed
+caps remove the only one at their defaults — see #2120.
 
 CFL smoke duration is wall-clock seconds per selected target, implemented with
 LibFuzzer `-max_total_time`. It is not an iteration or execution count.

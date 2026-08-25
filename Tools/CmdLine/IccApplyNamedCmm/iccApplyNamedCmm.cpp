@@ -78,7 +78,7 @@
 #include "IccProfLibVer.h"
 #include "IccLibConnectVer.h"
 #include "IccConnect.h"
-#include "../IccCmdLineUtil.h"
+#include "IccCmdLineUtil.h"
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -200,7 +200,7 @@ void Usage()
 {
   printf("iccApplyNamedCmm built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
 
-  printf("Usage 1: iccApplyNamedCmm -cfg config_file_path\n");
+  printf("Usage 1: iccApplyNamedCmm {--evidence-json} -cfg config_file_path\n");
   printf("  Where config_file_path is a json formatted ICC profile application configuration file\n\n");
   printf("Usage 2: iccApplyNamedCmm (-exportcfg/-exportcfganddata config_file_path} {-debugcalc} data_file_path final_data_encoding{:FmtPrecision{:FmtDigits}} interpolation {{-ENV:Name value} profile_file_path Rendering_intent {-PCC connection_conditions_path}}\n\n");
   
@@ -212,6 +212,28 @@ void Usage()
   printf("    4 - icEncode8Bit\n");
   printf("    5 - icEncode16Bit\n");
   printf("    6 - icEncode16BitV2\n\n");
+
+  // #2124: this list read as though all seven selectors were always available,
+  // so a Lab destination refusing icEncodePercent looked like a broken encoding
+  // rather than a documented restriction. The valid set is per colour space --
+  // the icFloatColorEncoding table in IccCmm.h, which the
+  // ToInternalEncoding()/FromInternalEncoding() switches implement. Naming the
+  // two exclusions the reference profiles actually hit keeps the note short.
+  //
+  // Deliberately does NOT quote the run-time diagnostic verbatim: the argument
+  // regression greps for that exact line to prove a rejection happened, and
+  // printing it here would let usage output satisfy those greps. For the same
+  // reason the table is described as listing the per-space sets rather than
+  // "the full set" -- it carries no source/destination axis, and the two
+  // converters do not accept identical sets for every space, so it is a
+  // pointer, not a promise. (It also omitted icEncodeUnitFloat for the two PCS
+  // spaces when this note was written; #2146 fixed the source side that
+  // omission described and brought the table into line.)
+  printf("    Not every encoding is valid for every colour space: a 'Lab '\n");
+  printf("    destination refuses icEncodePercent and an 'XYZ ' destination\n");
+  printf("    refuses icEncode8Bit, each rejected when the data is converted\n");
+  printf("    rather than here. IccCmm.h's icFloatColorEncoding table lists\n");
+  printf("    the per-space encodings.\n\n");
 
   printf("    FmtPrecision - formatting for # of digits after decimal (default=4)\n");
   printf("    FmtDigits - formatting for total # of digits (default=5+FmtPrecision)\n\n");
@@ -241,14 +263,87 @@ void Usage()
   printf("  +100000 - Use HToS tag if present\n");
   printf(" +1000000 - NamedColor over black (icSigNmclSpectralOverBlackMbr 'spcb')\n");
   printf(" +2000000 - NamedColor over gray  (icSigNmclSpectralOverGrayMbr 'spcg')\n");
+  // The two overprint codes read as additive flags, and #2190 was filed by a
+  // caller who combined them. They select mutually exclusive array members, so
+  // say here that only one may be given rather than let "+3000000" look legal.
+  printf("            (over black and over gray are alternatives, not flags:\n");
+  printf("             only one of +1000000 / +2000000 may be given)\n");
 }
 
+static std::string GetProfileId(const char* profilePath)
+{
+  if (!profilePath || !profilePath[0])
+    return std::string();
+
+  CIccProfile* pProfile = OpenIccProfile(profilePath);
+  if (!pProfile)
+    return std::string();
+
+  CIccInfo Fmt;
+  std::string id;
+  if (Fmt.IsProfileIDCalculated(&pProfile->m_Header.profileID))
+    id = Fmt.GetProfileID(&pProfile->m_Header.profileID);
+  delete pProfile;
+  return id;
+}
+
+static void EmitTransformEvidenceJson(const char* inputPath, const char* profilePath,
+                                      const char* outputPath)
+{
+  std::string inputDigest;
+  std::string outputDigest;
+  std::string profileId = GetProfileId(profilePath);
+  bool hasInputDigest = icSha256File(inputPath, inputDigest);
+  bool hasOutputDigest = icSha256File(outputPath, outputDigest);
+
+  printf("{");
+  printf("\"schema\":\"iccdev-qa-evidence/v1\",");
+  printf("\"tool\":\"iccApplyNamedCmm\",");
+  printf("\"input\":\"%s\",", icJsonEscape(inputPath).c_str());
+  printf("\"profile\":\"%s\",", icJsonEscape(profilePath).c_str());
+  printf("\"output\":\"%s\",", icJsonEscape(outputPath).c_str());
+  printf("\"qaFlags\":[\"ICCDEV_FLAG_TRANSFORM\"],");
+  if (hasInputDigest)
+    printf("\"inputDigest\":\"%s\",", inputDigest.c_str());
+  else
+    printf("\"inputDigest\":null,");
+  if (!profileId.empty())
+    printf("\"profileId\":\"%s\",", icJsonEscape(profileId).c_str());
+  else
+    printf("\"profileId\":null,");
+  if (hasOutputDigest)
+    printf("\"outputDigest\":\"%s\",", outputDigest.c_str());
+  else
+    printf("\"outputDigest\":null,");
+  printf("\"transform\":{");
+  if (hasInputDigest)
+    printf("\"inputDigest\":\"%s\",", inputDigest.c_str());
+  else
+    printf("\"inputDigest\":null,");
+  if (!profileId.empty())
+    printf("\"profileId\":\"%s\",", icJsonEscape(profileId).c_str());
+  else
+    printf("\"profileId\":null,");
+  if (hasOutputDigest)
+    printf("\"outputDigest\":\"%s\"", outputDigest.c_str());
+  else
+    printf("\"outputDigest\":null");
+  printf("}}\n");
+}
 
 //===================================================
 
 int main(int argc, const char* argv[])
 {
   int minargs = 2;
+  bool bEvidenceJson = false;
+
+  if (argc > 1 && !stricmp(argv[1], "--evidence-json")) {
+    bEvidenceJson = true;
+    argv++;
+    argc--;
+  }
+
   if (argc < minargs) {
     Usage();
     return 0;
@@ -408,6 +503,21 @@ int main(int argc, const char* argv[])
       }
     }
   }
+  // Usage 2 has no destination file -- CIccCfgDataApply::fromArgs clears
+  // m_dstFile unconditionally -- and icOpenRegularWriteFile() returns stdout
+  // for an empty name.  The transformed dataset would therefore go to the same
+  // stream as the evidence: --evidence-json there emitted colour data with a
+  // JSON object stapled to the end, which no parser accepts, and an
+  // outputDigest that was always null.  --evidence-json is a -cfg-with-dstFile
+  // mode, the only form docs/tools-cli-reference.md shows.  Checked here, where
+  // both config paths join, so the refusal costs no transform and writes
+  // nothing.
+  if (bEvidenceJson && cfgApply.m_dstFile.empty()) {
+    fprintf(stderr, "--evidence-json requires a configuration with dstFile set:"
+                    " the transform output would share stdout with the evidence\n");
+    return EXIT_FAILURE;
+  }
+
   LogDebuggerPtr pDebugger;
   
   if (cfgApply.m_debugCalc) {
@@ -466,7 +576,31 @@ int main(int argc, const char* argv[])
     else if (SrcspaceSig == icSigLabPcsData)
       SrcspaceSig = icSigDevLabData;
 
-    if (srcEncoding == icEncodeFloat)
+    // #2150: the remap above has just rewritten a PCS signature to a device
+    // one, so the value no longer meets ToInternalEncoding()'s 'XYZ '/'Lab '
+    // arms -- it meets the shared device default:, whose float and percent
+    // cases both clip to 0.0-1.0 whenever bClip. So this carve-out has to name
+    // every encoding whose PCS range exceeds 0.0-1.0, which is three, not one:
+    //
+    //   icEncodeFloat      external PCS range ~0.0-2.0
+    //   icEncodeUnitFloat  an exact synonym of it in both PCS arms since #2146
+    //   icEncodePercent    the same range x100, i.e. ~0.0-200.0 ('XYZ ' only)
+    //
+    // icXyzFromPcs scales by 65535/32768, which is where the ~2.0 comes from --
+    // so each of these clips discards legitimate values rather than hardening
+    // anything. That is the reasoning that kept the library's own PCS arms
+    // unclipped, and it applies unchanged once the signature has been remapped
+    // for the transform's benefit: the 'XYZ ' arm's percent case does not clip
+    // either.
+    //
+    // Naming only icEncodeFloat left the selector, and nothing else, deciding
+    // whether the data survived -- and in both cases the tool refused to read
+    // back what it had just written:
+    //
+    //   internal 0.9 -> unitFloat 1.79997 -> read back 1.0  (was 0.9)
+    //   internal 0.9 -> percent 179.9879  -> read back 1.0  (was 0.9)
+    if (srcEncoding == icEncodeFloat || srcEncoding == icEncodeUnitFloat ||
+        srcEncoding == icEncodePercent)
       bClip = false;
   }
 
@@ -663,6 +797,14 @@ int main(int argc, const char* argv[])
 
     return EXIT_FAILURE;
   }
+
+  if (bEvidenceJson) {
+    const char* profilePath = cfgProfiles.m_profiles.empty() ? "" :
+      cfgProfiles.m_profiles[0]->m_iccFile.c_str();
+    EmitTransformEvidenceJson(cfgApply.m_srcFile.c_str(), profilePath,
+                              cfgApply.m_dstFile.c_str());
+  }
+
 
   delete pMruCmm;
 

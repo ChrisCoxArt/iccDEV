@@ -5,7 +5,7 @@
 #                 All rights reserved.
 #                 https://color.org
 #
-# Intent: Manual CFL smoke fuzzing for core iccDEV command-line tools.
+# Intent: Manual CFL smoke fuzzing for core iccDEV interfaces.
 #
 ###############################################################
 
@@ -31,9 +31,9 @@ permissions:
         default: ''
         type: string
       cfl_targets:
-        description: 'Comma-separated CFL targets: dump,toxml,fromxml,tojson,fromjson,roundtrip'
+        description: 'CFL targets: dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize'
         required: true
-        default: dump,toxml,fromxml,tojson,fromjson,roundtrip
+        default: dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize
         type: string
       duration_seconds:
         description: 'LibFuzzer seconds per target, 1-3600; total selected runtime <= 5400'
@@ -41,17 +41,17 @@ permissions:
         default: '30'
         type: string
       patch_mode:
-        description: 'Patch stack mode'
+        description: 'Patch stack mode; all requires patches in the target checkout'
         required: true
-        default: all
+        default: none
         type: choice
         options:
           - all
           - none
       regression_image_tag:
-        description: 'Trusted regression container tag'
+        description: 'Trusted unified image tag'
         required: false
-        default: master
+        default: latest
         type: string
   workflow_call:
     inputs:
@@ -68,7 +68,7 @@ permissions:
       cfl_targets:
         description: 'Comma-separated CFL targets'
         required: false
-        default: dump,toxml,fromxml,tojson,fromjson,roundtrip
+        default: dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize
         type: string
       duration_seconds:
         description: 'LibFuzzer seconds per target, 1-3600; total selected runtime <= 5400'
@@ -76,14 +76,14 @@ permissions:
         default: '30'
         type: string
       patch_mode:
-        description: 'Patch stack mode: all or none'
+        description: 'Patch stack mode; all requires patches in the target checkout'
         required: false
-        default: all
+        default: none
         type: string
       regression_image_tag:
-        description: 'Trusted regression container tag'
+        description: 'Trusted unified image tag'
         required: false
-        default: master
+        default: latest
         type: string
 
 concurrency:
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     container:
-      image: ghcr.io/internationalcolorconsortium/iccdev-ci-regression:${{ inputs.regression_image_tag || 'master' }}
+      image: ghcr.io/internationalcolorconsortium/iccdev:${{ inputs.regression_image_tag || 'latest' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -106,7 +106,7 @@ jobs:
         shell: bash --noprofile --norc {0}
     env:
       BASH_ENV: /dev/null
-      ICCDEV_CFL_TARGETS_INPUT: ${{ inputs.cfl_targets || 'dump,toxml,fromxml,tojson,fromjson,roundtrip' }}
+      ICCDEV_CFL_TARGETS_INPUT: ${{ inputs.cfl_targets || 'dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize' }}
       ICCDEV_CFL_SECONDS_INPUT: ${{ inputs.duration_seconds || '30' }}
       ICCDEV_CFL_PATCH_MODE_INPUT: ${{ inputs.patch_mode || 'all' }}
       TARGET_REF_INPUT: ${{ inputs.target_ref || github.ref }}
@@ -148,9 +148,9 @@ jobs:
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
-          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          source "$TRUSTED_SCRIPTS/sanitize-sed.sh"
           case "$TARGET_SHA" in
             *[!0-9a-fA-F]*)
               echo "ERROR: invalid target SHA: $(sanitize_line "$TARGET_SHA")" >&2
@@ -181,7 +181,7 @@ jobs:
         working-directory: target
         env:
           BASH_ENV: /dev/null
-          ICCDEV_CFL_TARGETS: ${{ inputs.cfl_targets || 'dump,toxml,fromxml,tojson,fromjson,roundtrip' }}
+          ICCDEV_CFL_TARGETS: ${{ inputs.cfl_targets || 'dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize' }}
           ICCDEV_CFL_SECONDS: ${{ inputs.duration_seconds || '30' }}
           ICCDEV_CFL_APPLY_PATCHES: ${{ (inputs.patch_mode || 'all') == 'all' && '1' || '0' }}
           ICCDEV_FUZZ_PATCH_APPLICATOR: ${{ github.workspace }}/workflow-scripts/.github/scripts/iccdev-apply-fuzz-patches.sh

@@ -71,6 +71,7 @@
 
 
 #include <cstdio>
+#include <cstdlib>  // EXIT_FAILURE, used by the argument-contract guards in main()
 #include <memory>
 #include <string>
 #include "IccCmm.h"
@@ -80,7 +81,7 @@
 #include "TiffImg.h"
 #include "IccProfLibVer.h"
 #include "IccLibConnectVer.h"
-#include "../IccCmdLineUtil.h"
+#include "IccCmdLineUtil.h"
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -184,7 +185,7 @@ void Usage()
   printf("    0 - Same as src\n");
   printf("    1 - icEncode8Bit\n");
   printf("    2 - icEncode16Bit\n");
-  printf("    4 - icEncodeFloat\n\n");
+  printf("    3 - icEncodeFloat\n\n");
 
   printf("  For dst_compression:\n");
   printf("    0 - No compression\n");
@@ -257,6 +258,20 @@ int main(int argc, const char** argv)
   }
 
   if (argc > 2 && !stricmp(argv[1], "-cfg")) {
+    // Usage 1 is exactly "-cfg <path>"; every setting comes from the JSON file, so
+    // there is nothing a further argument could mean. Anything beyond argv[2] was
+    // silently discarded and the run still reported success, so a caller could not
+    // tell an honoured argument list from an ignored one. Same defect and same
+    // guard as the sibling tools: iccApplyNamedCmm (#1906) and iccApplySearch
+    // (#2075). The argc test above has already established argc >= 3, so argv[2] is
+    // readable here and only a longer list can reach this branch. Note argc is the
+    // count left after the optional "-threads N" pair above, which is why the
+    // comparison is against 3 rather than the process-entry argc.
+    if (argc != 3) {
+      printf("Unexpected extra arguments for -cfg\n");
+      return EXIT_FAILURE;
+    }
+
     json cfg;
     if (!loadJsonFrom(cfg, argv[2]) || !cfg.is_object()) {
       printf("Unable to read configuration from '%s'\n", argv[2]);
@@ -305,6 +320,27 @@ int main(int argc, const char** argv)
       printf("Unable to parse profile sequence arguments\n");
       Usage();
       return -1;
+    }
+    // CIccCfgProfileSequence::fromArgs() consumes the profile group in pairs and
+    // stops once fewer than two arguments remain, reporting how many it used. An
+    // odd token left at the end was therefore neither consumed nor rejected: the
+    // transform ran as though it had not been given and the tool exited 0, so a
+    // mistyped trailing path or intent looked like a honoured command line. Two or
+    // more leftover tokens already fail, because fromArgs() reads them as a further
+    // profile/intent pair and returns 0, which is why only the odd remainder needs
+    // this guard (#1674). Compare the consumed count against what was offered
+    // rather than advancing argv/argc once more: this is the last use of the
+    // argument vector, so the pointer bump that pairs with the count above would be
+    // a store no later read could observe (#1958).
+    // Not covered here: a trailing "-ENV:sig value" pair is *counted* as consumed
+    // even when the profile pair it precedes never arrives, so fromArgs() reports
+    // it as used and this comparison cannot see it. That shape pushes a profile
+    // entry with an empty file path, which the embedded-profile branch below then
+    // treats as "-embedded" -- a defect in fromArgs() itself rather than in the
+    // argument count, and so out of scope for this guard.
+    if (nArg != argc) {
+      printf("Unexpected extra arguments\n");
+      return EXIT_FAILURE;
     }
 
     if (bThreadArg)
@@ -505,7 +541,11 @@ int main(int argc, const char** argv)
   unsigned long dbpp = (nDestSamples * dbps  + 7)/ 8;
 
   //Open up output image using information from SrcImg and theCmm
-  if (!DstImg.Create(cfgApply.m_dstImgFile.c_str(), SrcImg.GetWidth(), SrcImg.GetHeight(), dbps, photo, nDestSamples, nExtraSamples, SrcImg.GetXRes(), SrcImg.GetYRes(), bCompress, bSeparation)) {
+  // GetXRes()/GetYRes() are taken from the source, so its RESOLUTIONUNIT has to come
+  // with them; without it a centimetre-based source produced an inch-defaulted output
+  // and the physical size shifted by 2.54x.  Same defect as iccSpecSepToTiff, because
+  // both tools reach it through the same shared CTiffImg::Create() (#2220).
+  if (!DstImg.Create(cfgApply.m_dstImgFile.c_str(), SrcImg.GetWidth(), SrcImg.GetHeight(), dbps, photo, nDestSamples, nExtraSamples, SrcImg.GetXRes(), SrcImg.GetYRes(), bCompress, bSeparation, SrcImg.GetResolutionUnit())) {
     printf("Unable to create Tiff file - '%s'\n", cfgApply.m_dstImgFile.c_str());
     return -1;
   }

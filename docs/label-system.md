@@ -14,6 +14,7 @@ readiness.
 | `.github/scripts/sync-labels.sh` | Local and CI label synchronization helper. |
 | `.github/workflows/sync-labels.yml` | Applies `.github/labels.yml` on `master` or manual dispatch. |
 | `.github/workflows/pr-labeler.yml` | Applies path labels to pull requests. |
+| `.github/workflows/ci-fork-automation-gate.yml` | Fails protected automation changes from forks and applies `Governance`. |
 | `.github/workflows/label.yml` | Adds first-pass issue triage labels and welcome guidance. |
 | `.github/workflows/update-labels.yml` | Adds PR CI status labels: `passed`, `failed`, `pending`, `Merge Ready`. |
 | `.github/workflows/ci-codeql-security.yml` | Runs full CodeQL when the `codeql-ready` label is applied. |
@@ -25,9 +26,8 @@ readiness.
 | Issue triage | `needs-triage`, `needs-repro`, `requires:more-information` | Maintainers |
 | Issue kind | `bug`, `feature`, `question`, `security` | Maintainers |
 | PR status | `passed`, `failed`, `pending`, `Merge Ready`, `codeql-ready` | CI and maintainers |
-| PR CI controls | `ci:skip`, `ci:full`, `ci:fast-lane`, `ci:ctest-last-N`, `ci:docker`, `ci:no-windows`, `ci:warnings-fail` | Maintainers |
 | Dependency maintenance | `bump-sha-pins` | Maintainers |
-| Scope | `Source`, `Documentation`, `Configuration`, `CI`, `Build`, `Testing`, `Tools`, `JSON`, `WASM`, `vcpkg`, and related area labels | Path labeler and maintainers |
+| Scope | `Source`, `Documentation`, `Configuration`, `CI`, `Build`, `Testing`, `Tools`, `JSON`, `Python`, `WASM`, `vcpkg`, and related area labels | Path labeler and maintainers |
 | Governance | `Governance`, `Labels`, `security`, `SAST`, `CodeQL`, `Sanitizers`, `Release` | Maintainers |
 
 Keep existing public label names stable unless maintainers intentionally migrate
@@ -83,17 +83,33 @@ changed-files-labels-limit: 14
 Maintainers can add labels manually when a large tree-wide change intentionally
 spans many components.
 
+### Fork Automation Review
+
+`ci-fork-automation-gate.yml` uses `pull_request_target` only to inspect fork
+PR file names through the GitHub API. It checks out trusted base helpers, never
+checks out or executes fork content, and applies the existing `Governance`
+label before failing when a fork changes workflows, scripts, hooks, Docker
+files, or build configuration. The workflow does not close pull requests.
+
+Normal PR build jobs are restricted to same-repository heads. Repository
+Actions settings must require approval for all external contributors, and
+maintainers must not approve a fork workflow after the `Governance` label is
+applied until the protected-path change has been reviewed.
+
 ### Issue Triage
 
 `label.yml` runs on issue open, edit, and reopen events. It syncs the repository
-label inventory, then adds `needs-triage` and lightweight issue-kind labels from
-the issue title and body. It may also add `needs-repro` or
+label inventory, then adds `needs-triage` and lightweight issue-kind and scope
+labels from the issue title and body, including `Python` for Python, Cython,
+PyPI, pip, setuptools, or wheel reports. It may also add `needs-repro` or
 `requires:more-information` when a report is too short, contains a placeholder,
 or describes a crash without a reproducible input or command.
 
 The triage workflow is a routing aid, not a maintainer decision. Maintainers may
-adjust labels after reviewing reproductions, security impact, and required test
-coverage.
+adjust or remove labels after reviewing reproductions, security impact, and
+required test coverage. Label sync creates missing labels and updates the color
+or description of labels declared in `.github/labels.yml`; retiring a label is
+manual and must follow the deletion review in the maintainer change process.
 
 ### PR CI Status Labels
 
@@ -105,42 +121,36 @@ clean, and the review decision is approved.
 Do not use these status labels as the only merge gate. Branch protection and
 required checks remain authoritative.
 
-### PR CI Control Labels
+### PR CI Scope
 
-`ci-pr-action.yml` treats `ci:*` labels as maintainer-only, one-shot controls.
-They are evaluated only when a trusted maintainer applies the label to a
-same-repository pull request. They are not persistent policy for later pushes;
-remove and reapply the label when a new commit needs the same override.
+`ci-pr-action.yml` does not trigger on label changes. This prevents path and
+status label automation from starting another full CI run. Use labels for
+classification and review routing, not as CI controls.
 
-Fork PRs cannot use these controls. Keep fork PR validation on the default PR
-workflow path so the workflow does not fetch or build fork-only commits through
-the maintainer fast lane.
+Pull requests and manual dispatches default to `ci_scope=auto`. In auto scope,
+the full matrix runs only for source, build, test, or container changes;
+workflow-only changes receive the preflight and workflow-security gates.
+Dispatch `ci_scope=full` explicitly for a long-cycle matrix. For the shortest
+same-repository PR lane, provide an open `pr_number`, choose
+`ci_scope=fast-lane`, and set `ctest_recent_limit`, `include_windows`,
+and `warning_policy` on that dispatch. Fast lane defaults to the latest
+registered CTest and strict warning failure. Windows is opt-in; Docker
+verification is scheduled when the pull request changes the container surface.
 
-Use the labels as follows:
+Manual dispatches use an event-qualified concurrency group. A dispatch on an
+open PR therefore does not cancel that PR's `pull_request` run; inspect the
+dispatched run by its run ID rather than treating `gh pr checks` as its status.
+For an owner-visible long-cycle build inventory, dispatch either
+`CI Comprehensive Build and Test` (including Windows) or `CI Build Test (No
+Fuzzers)` (without Windows). Both callers use `_build-matrix.yml`, which
+centralizes the current reusable Unix and Windows gates plus focused sanitizer,
+option, version-header, and clean-rebuild lanes.
 
-| Label | Effect |
-|-------|--------|
-| `ci:skip` | Skip build jobs for the current labeled event. Use only for administrative PRs where branch protection permits it. |
-| `ci:full` | Force the default long-cycle matrix: Unix GCC/Clang Release and Debug builds, exact GCC 15.2 strict Release LTO, ASAN+UBSAN tool tests, Windows, and Docker verification. |
-| `ci:fast-lane` | Run the exact GCC 15.2 strict Release LTO build and the GCC 15.2 ASAN+UBSAN Release tool lane. |
-| `ci:ctest-last-N` | In fast lane, run only the last `N` registered CTests, where `N` is 1 through 10. |
-| `ci:docker` | Add Docker verification to fast lane. Docker is already enabled in the default long cycle. |
-| `ci:no-windows` | Keep Windows excluded when fast lane is selected. Windows is enabled in the default long cycle. |
-| `ci:warnings-fail` | Treat compiler warnings as failures in fast-lane jobs. This is part of the default fast-lane set. |
-
-Pull requests and manual dispatches default to `ci_scope=full`. Choose
-`ci_scope=auto` explicitly for path-scoped selection. Manual
-`workflow_dispatch` fast lane uses the same same-repository restriction. Provide
-an open `pr_number`, choose `ci_scope=fast-lane`, and adjust
-`ctest_recent_limit`, `include_windows`, `include_docker`, and `warning_policy`
-only for the run being started. Fast lane defaults to the latest registered
-CTest, strict warning failure, and no Windows or Docker jobs.
-
-On `ci-qa-pr-docker-testing`, Docker PR verification is advisory so branch QA
-can continue while container and third-party action pins are refreshed. If the
-summary reports a non-success `docker-ci` result, add `bump-sha-pins`, update
-the pinned GitHub Action, Docker, or container SHA references, and rerun the
-Docker lane before treating the container check as verified.
+Docker PR verification is required whenever the container surface changes,
+including the unified Dockerfile, packaged MCP source, or
+`ci-docker-pr.yml`. `PR Summary` fails a non-success `docker-ci` result for
+those changes; update the pinned GitHub Action, Docker, or container SHA
+references and rerun the lane before treating the container check as verified.
 
 ### Required Check Policy
 
@@ -151,7 +161,6 @@ fail-closed policy:
 | Required context | Purpose |
 |------------------|---------|
 | `PR Summary` | Aggregates orchestration prerequisites and every selected build/test lane. |
-| `Init PR Build Matrix` | Validates mode inputs, image tags, matrices, and maintainer controls. |
 | `Risk Analysis Gate / Workflow Security Audit` | Enforces Linux workflow and container security canaries. |
 | `Risk Analysis Gate / Windows Security Audit (PowerShell)` | Enforces PowerShell and Windows workflow security canaries. |
 | `WASM Release Build + Parity` | Required separately on `master` because it is outside `ci-pr-action`. |
@@ -162,7 +171,7 @@ covered by `PR Summary`. The summary must treat failed or cancelled detection,
 setup, and input-validation prerequisites as failures; only intentionally
 skipped mode-specific jobs are acceptable.
 
-The active `ci-qa-flags` ruleset requires the four `ci-pr-action` contexts.
+The active `ci-qa-flags` ruleset requires the three `ci-pr-action` contexts.
 `ci-pr-action` therefore runs for pull requests targeting either `master` or
 `ci-qa-flags`. WASM parity remains a `master`-only required context.
 
@@ -171,8 +180,8 @@ contexts before a direct maintainer push. It requires signed commits, linear
 fast-forward history, and deletion protection; maintainers dispatch
 `ci-pr-action` and `ci-docker` immediately after pushing the testing branch.
 Pull requests targeting `ci-qa-pr-docker-testing` also run `ci-pr-action`; its
-Docker PR lane is non-blocking but records SHA-pin maintenance guidance in the
-workflow summary.
+Docker PR lane is required for same-repository container-surface changes and
+builds the exact PR revision into a job-local image.
 
 ### CodeQL Ready
 
@@ -206,6 +215,9 @@ git diff --check
 ```
 
 6. After merge, confirm `Sync Labels` succeeded or run it manually.
+7. Before deleting a label, check open issues, open PRs, workflow references,
+   prompts, and documentation; remove the label from `.github/labels.yml`, then
+   delete it manually through GitHub.
 
 ## Security Guardrails
 

@@ -15,6 +15,7 @@ candidates = {
   fullfile(repoRoot, 'Testing', 'Display', 'sRGB_D65_MAT.icc')
   fullfile(repoRoot, 'Testing', 'Display', 'sRGB_D65_colorimetric.icc')
   fullfile(repoRoot, 'Testing', 'Display', 'LCDDisplay.icc')
+  fullfile(repoRoot, 'Testing', 'sRGB_v4_ICC_preference.icc')
 };
 found = {};
 for i = 1:numel(candidates)
@@ -24,7 +25,9 @@ for i = 1:numel(candidates)
 end
 if isempty(found)
   error('iccdev:exampleProfileNotFound', ...
-    'No bundled display profile found. Run Testing/CreateAllProfiles.sh first.');
+    ['No bundled display profile found. On Windows, run ' ...
+     './CreateAllProfiles.bat from Testing in PowerShell; on Unix, run ' ...
+     './CreateAllProfiles.sh from Testing.']);
 end
 inputProfile = found{1};
 if numel(found) >= 2

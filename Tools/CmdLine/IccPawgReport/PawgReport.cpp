@@ -71,6 +71,7 @@
 #include <string>
 #include <vector>
 
+#include "IccCmdLineUtil.h"
 #include "IccProfile.h"
 #include "IccMpeCalc.h"
 #include "IccTag.h"
@@ -136,6 +137,8 @@ struct PawgItem {
   const char *title;
   PawgVerdict verdict;
   std::string detail;
+  bool hasRoundTripMetrics = false;
+  iccquality::RoundTripMetrics roundTripMetrics;
 };
 
 struct RuleTable {
@@ -353,22 +356,33 @@ bool IsRegisteredManufacturerOrZero(uint32_t sig)
   return sig == 0 || FindRegisteredManufacturer(sig) != NULL;
 }
 
-// Some signatures are pervasive conventions that are not (yet) in the
-// Manufacturer Signatures registry and are not the zero signature, so they still
-// fail the strict ICC.1:2022-05 section 7.2.17 check and warrant a WARN -- but
-// they are well-understood placeholders rather than malformed/unknown 4CCs, so
-// S3 reports them with softened wording and they are tracked for ICC registry
-// submission (issue #1459 Segment A) rather than presented as suspect data:
-//   'none' (0x6E6F6E65) -- explicit "no manufacturer" placeholder
+// Some signatures are pervasive conventions that are not the zero signature, so
+// they still fail the strict ICC.1:2022-05 section 7.2.17 check and warrant a
+// WARN -- but they are well-understood 4CCs rather than malformed/unknown data,
+// so S3 reports them with softened wording rather than presenting them as
+// suspect. The two differ in whether ICC registration is even possible, so each
+// carries its own complete explanation instead of a shared "not yet in the
+// registry" suffix (ICC ruling on issue #1472, 2026-07-24):
+//   'none' (0x6E6F6E65) -- "no manufacturer" placeholder. NOT registrable: the
+//                          ICC ruled that the specification requires the zero
+//                          signature here, so 'none' is a producer error, not a
+//                          registration that is pending. Saying "not yet in the
+//                          registry" would wrongly imply it is on its way in.
 //   'ICC ' (0x49434320) -- the International Color Consortium's own reference
-//                          profiles (also used by the iccDEV regression fixtures)
+//                          profiles (also used by the iccDEV regression
+//                          fixtures). Registration is undecided rather than
+//                          refused, so "not yet" is accurate here.
+// Returns the entire parenthetical body, so a caller must not append a registry
+// snapshot reference of its own.
 const char *KnownUnregisteredConventionNote(uint32_t sig)
 {
   switch (sig) {
   case 0x6E6F6E65:  // 'none'
-    return "known 'no manufacturer' placeholder";
+    return "\"no manufacturer\" placeholder; ICC.1:2022-05 section 7.2.17 requires the "
+           "zero signature (00h) here, so 'none' is not registrable";
   case 0x49434320:  // 'ICC '
-    return "International Color Consortium reference-profile signature";
+    return "International Color Consortium reference-profile signature, not yet in "
+           "Manufacturer Signatures registry snapshot " ICCPAWG_REGISTRY_SNAPSHOT_DATE;
   default:
     return NULL;
   }
@@ -376,6 +390,9 @@ const char *KnownUnregisteredConventionNote(uint32_t sig)
 
 // Append the per-field "(<sig> ...)" explanation for an unregistered manufacturer
 // or creator signature, softening the wording for the known conventions above.
+// A known-convention note supplies the whole explanation (the registrable and
+// non-registrable cases need different ones), so only the generic case appends
+// the registry snapshot reference.
 void AppendUnregisteredSigDetail(std::ostringstream &detail, uint32_t sig)
 {
   if (!IsZeroOrPrintable(sig)) {
@@ -384,13 +401,13 @@ void AppendUnregisteredSigDetail(std::ostringstream &detail, uint32_t sig)
   const char *note = KnownUnregisteredConventionNote(sig);
   detail << " (" << SigString(sig) << " ";
   if (note) {
-    detail << note << ", not yet in";
+    detail << note;
   }
   else {
-    detail << "not in";
+    detail << "not in Manufacturer Signatures registry snapshot "
+           << ICCPAWG_REGISTRY_SNAPSHOT_DATE;
   }
-  detail << " Manufacturer Signatures registry snapshot "
-         << ICCPAWG_REGISTRY_SNAPSHOT_DATE << ")";
+  detail << ")";
 }
 
 std::string HeaderSignatureDetail(const RawProfile &raw,
@@ -1104,6 +1121,14 @@ static const icTagSignature kNamedColorRequired[] = {
 static const icTagSignature kCommonOptional[] = {
   icSigCalibrationDateTimeTag,
   icSigCharTargetTag,
+  // #2000-adjacent, filed as #2001: cicpTag was missing here, so C5 warned on
+  // every profile that carries one. The reason it reached the warning rather
+  // than the private-tag bucket is not obvious from this array: IsSpecTag()
+  // asks CIccInfo::GetTagSigName, which resolves 'cicp' to "cicpTag" via
+  // CIccTagCreator, so the name does not begin with "Unknown" and the tag is
+  // never treated as private -- it falls straight through IsAllowedForClass()
+  // to the C5 warning. This affects ordinary SDR profiles, not just HDR ones.
+  icSigCicpTag,
   icSigChromaticAdaptationTag,
   icSigChromaticityTag,
   icSigColorantTableTag,
@@ -1736,12 +1761,13 @@ const char *VerdictText(PawgVerdict verdict)
 void AddItem(std::vector<PawgItem> &items, const char *id, const char *title,
              PawgVerdict verdict, const std::string &detail)
 {
-  items.push_back(PawgItem{id, title, verdict, detail});
+  items.push_back(PawgItem{id, title, verdict, detail, false, {}});
 }
 
 bool QualityMetricNotApplicable(const std::string &reason)
 {
   return reason.find("requires bounded device channels and Lab/XYZ PCS") != std::string::npos ||
+         reason.find("sample grid exceeds quality metric budget") != std::string::npos ||
          reason.find("requires Lab or XYZ PCS") != std::string::npos ||
          reason.find("Invalid profile") != std::string::npos ||
          reason.find("Invalid profile transform") != std::string::npos ||
@@ -1751,7 +1777,8 @@ bool QualityMetricNotApplicable(const std::string &reason)
          reason.find("No supported forward transform for smoothness analysis") != std::string::npos;
 }
 
-PawgVerdict QualityRoundTrip(CIccProfile *pIcc, std::string &detail)
+PawgVerdict QualityRoundTrip(CIccProfile *pIcc, std::string &detail,
+                             iccquality::RoundTripMetrics *outMetrics = nullptr)
 {
   if (!pIcc) {
     detail = "profile did not load";
@@ -1763,6 +1790,9 @@ PawgVerdict QualityRoundTrip(CIccProfile *pIcc, std::string &detail)
   if (!iccquality::measure_round_trip(pIcc, metrics, reason)) {
     detail = reason.empty() ? "no supported round-trip transform pair present" : reason;
     return QualityMetricNotApplicable(detail) ? PawgVerdict::NotApplicable : PawgVerdict::Gap;
+  }
+  if (outMetrics) {
+    *outMetrics = metrics;
   }
 
   char buf[256];
@@ -2171,11 +2201,16 @@ std::vector<PawgItem> EvaluatePawg(const RawProfile &raw, CIccProfile *pIcc)
                          : "one or more tag offsets or padded ends are misaligned");
 
   std::string q1Detail;
-  PawgVerdict q1 = QualityRoundTrip(pIcc, q1Detail);
+  iccquality::RoundTripMetrics q1Metrics;
+  PawgVerdict q1 = QualityRoundTrip(pIcc, q1Detail, &q1Metrics);
   AddItem(items, "Q1",
           "First and second round trip average and maximum differences in CIEDE2000",
           q1,
           q1Detail);
+  if (q1Metrics.measured) {
+    items.back().hasRoundTripMetrics = true;
+    items.back().roundTripMetrics = q1Metrics;
+  }
 
   std::string q2Detail;
   PawgVerdict q2 = QualityCurveInvertibility(pIcc, q2Detail);
@@ -2229,47 +2264,6 @@ const char *SectionName(char prefix)
   }
 }
 
-std::string JsonEscape(const std::string &s)
-{
-  std::ostringstream oss;
-  for (size_t i = 0; i < s.size(); i++) {
-    unsigned char ch = static_cast<unsigned char>(s[i]);
-    switch (ch) {
-      case '\\':
-        oss << "\\\\";
-        break;
-      case '"':
-        oss << "\\\"";
-        break;
-      case '\b':
-        oss << "\\b";
-        break;
-      case '\f':
-        oss << "\\f";
-        break;
-      case '\n':
-        oss << "\\n";
-        break;
-      case '\r':
-        oss << "\\r";
-        break;
-      case '\t':
-        oss << "\\t";
-        break;
-      default:
-        if (ch < 0x20 || ch > 0x7e) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", ch);
-          oss << buf;
-        }
-        else {
-          oss << (char)ch;
-        }
-        break;
-    }
-  }
-  return oss.str();
-}
 
 void PrintJsonReport(const char *szFilename, const RawProfile &raw,
                      CIccProfile *pIcc, const std::vector<PawgItem> &items)
@@ -2278,7 +2272,7 @@ void PrintJsonReport(const char *szFilename, const RawProfile &raw,
   printf("  \"tool\": \"iccPawgReport\",\n");
   printf("  \"iccpProfileLibVersion\": \"" ICCPROFLIBVER "\",\n");
   printf("  \"profile\": \"%s\",\n",
-         JsonEscape(szFilename ? szFilename : "(null)").c_str());
+         icJsonEscape(szFilename ? szFilename : "(null)").c_str());
   printf("  \"sizeBytes\": %zu,\n", raw.data.size());
   printf("  \"load\": \"%s\",\n",
          pIcc ? "parsed by IccProfLib" : "raw checks only; IccProfLib parse failed");
@@ -2299,13 +2293,28 @@ void PrintJsonReport(const char *szFilename, const RawProfile &raw,
   printf("  \"items\": [\n");
   for (size_t i = 0; i < items.size(); ++i) {
     const PawgItem &item = items[i];
-    printf("    {\"id\":\"%s\",\"section\":\"%s\",\"verdict\":\"%s\",\"title\":\"%s\",\"detail\":\"%s\"}%s\n",
+    printf("    {\"id\":\"%s\",\"section\":\"%s\",\"verdict\":\"%s\",\"title\":\"%s\",\"detail\":\"%s\"",
            item.id,
            SectionName(item.id[0]),
            VerdictText(item.verdict),
-           JsonEscape(item.title).c_str(),
-           JsonEscape(item.detail).c_str(),
-           i + 1 == items.size() ? "" : ",");
+           icJsonEscape(item.title).c_str(),
+           icJsonEscape(item.detail).c_str());
+    if (item.hasRoundTripMetrics) {
+      const iccquality::RoundTripMetrics &metrics = item.roundTripMetrics;
+      printf(",\"metrics\":{\"model\":\"%s\",\"samples\":%d,"
+             "\"first\":{\"average\":%.17g,\"maximum\":%.17g},"
+             "\"second\":{\"average\":%.17g,\"maximum\":%.17g}}",
+             icJsonEscape(metrics.model).c_str(),
+             metrics.samples,
+             metrics.avgFirstDe00,
+             metrics.maxFirstDe00,
+             metrics.avgSecondDe00,
+             metrics.maxSecondDe00);
+    }
+    else {
+      printf(",\"metrics\":null");
+    }
+    printf("}%s\n", i + 1 == items.size() ? "" : ",");
   }
   printf("  ]\n");
   printf("}\n");
@@ -2336,7 +2345,52 @@ bool HasFail(const std::vector<PawgItem> &items)
   return false;
 }
 
+#if defined(ICCDEV_ENABLE_QA_FLAGS)
+const char *ValidationStatusName(icValidateStatus status)
+{
+  switch (status) {
+  case icValidateOK:
+    return "ok";
+  case icValidateWarning:
+    return "warning";
+  case icValidateNonCompliant:
+    return "non_compliant";
+  case icValidateCriticalError:
+    return "critical_error";
+  default:
+    return "unknown";
+  }
+}
+#endif
+
 } // namespace
+
+#if defined(ICCDEV_ENABLE_QA_FLAGS)
+int DumpPawgQaEvidence(const char *szFilename)
+{
+  std::string report;
+  icValidateStatus status = icValidateOK;
+  CIccProfile *profile = ValidateIccProfile(szFilename, report, status);
+  const bool loaded = profile != nullptr;
+
+  printf("{");
+  printf("\"schema\":\"iccdev-qa-evidence/v1\",");
+  printf("\"tool\":\"iccPawgReport\",");
+  printf("\"profile\":\"%s\",", icJsonEscape(szFilename ? szFilename : "").c_str());
+  printf("\"validationStatus\":\"%s\",", ValidationStatusName(status));
+  printf("\"loaded\":%s,", loaded ? "true" : "false");
+  if (loaded) {
+    printf("\"qaFlags\":[\"ICCDEV_FLAG_LOAD\",\"ICCDEV_FLAG_VALIDATE\"]");
+  }
+  else {
+    printf("\"qaFlags\":[]");
+  }
+  printf("}\n");
+
+  delete profile;
+  return loaded ? 0 : 1;
+}
+#endif
 
 int DumpPawgReport(const char *szFilename, bool bJson)
 {
