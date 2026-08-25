@@ -1033,53 +1033,89 @@ bool CIccProfileXml::LoadXml(const char *szFilename, const char *szRelaxNGDir, s
   xmlDoc *doc = NULL;
   xmlNode *root_element = NULL;
 
-  /* Parse the file and get the DOM.
-   *
-   * Drop XML_PARSE_HUGE: it disables libxml2's depth cap, name-length
-   * cap, text-length cap, and the billion-laughs entity-expansion guard
-   * - all of which protect against crafted inputs. Keep XML_PARSE_NONET
-   * (no network), do not set XML_PARSE_NOENT (it substitutes entity
-   * references and may load local external entities), and do not set
-   * XML_PARSE_DTDLOAD. ICC profiles never use DTD entities legitimately.
-   */
-  doc = xmlReadFile(szFilename, NULL, XML_PARSE_NONET);
-
-  if (doc == NULL) 
-    return false;
-
-  if (szRelaxNGDir && szRelaxNGDir[0]) {
-    xmlRelaxNGParserCtxt* rlxParser;
-    
-    rlxParser = xmlRelaxNGNewParserCtxt (szRelaxNGDir);
-
-    //validate the xml file
-    if (rlxParser){
-	    xmlRelaxNG* relaxNG = xmlRelaxNGParse(rlxParser);
-	    if (relaxNG){
-		    xmlRelaxNGValidCtxt* validCtxt = xmlRelaxNGNewValidCtxt(relaxNG);
-		    if (validCtxt){
-			    int result = xmlRelaxNGValidateDoc(validCtxt, doc);
-			    if (result != 0){
-				    printf("\nError: %d: '%s' is an invalid XML file.\n", result, szFilename);
-				    return false;
-			    }
-		    }
-		    else
-		      return false;
-	    }
-	    else
-		  return false;		  
-    }
-    else
-	    return false;  
-  }
-   
   std::string my_parseStr;
 
   if (!parseStr)
     parseStr = &my_parseStr;
 
   *parseStr = "";
+
+  /* Parse the file and get the DOM.
+   *
+   * Still no XML_PARSE_HUGE: it disables the nesting-depth cap and the
+   * name-length cap for every input, and it is not needed to read back a
+   * large CLUT - icXmlReadFileBounded parses from one contiguous buffer,
+   * which avoids the streaming text-node cap that refused iccToXml's own
+   * output in issue #1856, and bounds the document instead. Keep
+   * XML_PARSE_NONET (no network), do not set XML_PARSE_NOENT (it substitutes
+   * entity references and may load local external entities), and do not set
+   * XML_PARSE_DTDLOAD. ICC profiles never use DTD entities legitimately.
+   *
+   * parseStr is set up above rather than after the parse so that a rejection
+   * on size reaches the caller as a reason instead of a bare parse failure.
+   */
+  doc = icXmlReadFileBounded(szFilename, XML_PARSE_NONET, parseStr);
+
+  if (doc == NULL)
+    return false;
+
+  if (szRelaxNGDir && szRelaxNGDir[0]) {
+    /* #1999: each libxml2 object created below has its own free function, and
+     * none of them used to be called on any path: this block was four bare
+     * "return false" statements and a fall-through that freed nothing, so a
+     * schema-validating run leaked the parser context, the compiled schema
+     * and the validation context whether validation passed or failed.
+     * bValid records the outcome so the cleanup runs once on the way out
+     * instead of being repeated at each exit.
+     *
+     * Ordering matters: the schema returned by xmlRelaxNGParse outlives its
+     * parser context, and the validation context refers to the schema, so
+     * they are released innermost-first.
+     */
+    bool bValid = false;
+    xmlRelaxNGParserCtxt* rlxParser = xmlRelaxNGNewParserCtxt(szRelaxNGDir);
+
+    //validate the xml file
+    if (rlxParser) {
+      xmlRelaxNG* relaxNG = xmlRelaxNGParse(rlxParser);
+
+      if (relaxNG) {
+        xmlRelaxNGValidCtxt* validCtxt = xmlRelaxNGNewValidCtxt(relaxNG);
+
+        if (validCtxt) {
+          int result = xmlRelaxNGValidateDoc(validCtxt, doc);
+
+          if (result != 0)
+            printf("\nError: %d: '%s' is an invalid XML file.\n", result, szFilename);
+          else
+            bValid = true;
+
+          xmlRelaxNGFreeValidCtxt(validCtxt);
+        }
+
+        xmlRelaxNGFree(relaxNG);
+      }
+
+      xmlRelaxNGFreeParserCtxt(rlxParser);
+    }
+
+    /* Same rejection as before for a schema that will not load, will not
+     * compile, or that the document fails - only now the document goes back
+     * with it. icXmlReadFileBounded hands ownership of doc to this function
+     * (see IccUtilXml.h) and the sole xmlFreeDoc was past the tail of the
+     * function, so these exits used to walk away from it. LSan does not
+     * flag that one as leaked - the block stays reachable from libxml2 - so
+     * this is an ownership fix rather than a measured leak, unlike the
+     * RelaxNG objects above. */
+    if (!bValid) {
+      xmlFreeDoc(doc);
+      return false;
+    }
+  }
+   
+  /* parseStr was bound and cleared before the parse above, so that a size
+   * rejection could be reported; nothing has written to it on the path that
+   * reaches here. */
 
   /*Get the root element node */
   root_element = xmlDocGetRootElement(doc);

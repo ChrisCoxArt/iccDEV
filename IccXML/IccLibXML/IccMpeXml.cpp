@@ -2738,11 +2738,13 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
               continue;
             }
 
-            /* Parse the file and get the DOM. See IccProfileXml.cpp for
-             * the rationale for dropping XML_PARSE_HUGE and avoiding
-             * XML_PARSE_NOENT - matches the main LoadXml entry point.
+            /* Parse the file and get the DOM. See IccProfileXml.cpp for the
+             * rationale for still avoiding XML_PARSE_HUGE and XML_PARSE_NOENT,
+             * and icXmlReadFileBounded for why an imported document is read
+             * into a buffer and bounded rather than streamed - this matches
+             * the main LoadXml entry point.
              */
-            doc = xmlReadFile(file.c_str(), NULL, XML_PARSE_NONET);
+            doc = icXmlReadFileBounded(file.c_str(), XML_PARSE_NONET, &parseStr);
 
             if (doc == NULL) {
               parseStr += "Unable to import '";
@@ -2754,6 +2756,11 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
             /*Get the root element node */
             root_element = xmlDocGetRootElement(doc);
             if (strcmp((icChar*)root_element->name, "IccCalcImport")) {
+              /* #1999: the import loop owns doc from the read above until the
+               * xmlFreeDoc below, so rejecting the file here has to release
+               * it first - this return used to drop the document, leaking a
+               * whole parsed DOM per malformed import. */
+              xmlFreeDoc(doc);
               parseStr += "Invalid calc element import file '" + file + "'\n";
               return false;
             }

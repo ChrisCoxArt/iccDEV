@@ -371,6 +371,7 @@ public:
 //forward reference to CIccXform used by CIccApplyXform
 class CIccApplyXform;
 class CIccMatrixMath;
+class CIccSparseMatrix;   // held by CIccPcsStepSparseMatrix; defined in IccSparseMatrix.h
 
 /**
  **************************************************************************
@@ -661,6 +662,14 @@ public:
   virtual icPcsStepType GetType() { return icPcsStepUnknown; }
 
   virtual CIccApplyPcsStep *GetNewApply();
+
+  /// Called once by CIccPcsXform::Begin() before any Apply(), after the step list
+  /// is fully built by Connect()/Optimize(). Steps that can precompute invariant
+  /// state do it here rather than lazily on first Apply(): Apply() is const and
+  /// runs concurrently on every worker thread, so a lazy initialisation would be
+  /// a data race. Must be idempotent -- Begin() can be reached more than once.
+  /// Return false to fail the enclosing transform.
+  virtual bool BeginStep() { return true; }
 
   virtual ~CIccPcsStep() {}
   virtual void Apply(CIccApplyPcsStep *pApply, icFloatNumber *pDst, const icFloatNumber *pSrc) const=0;
@@ -1037,6 +1046,8 @@ public:
   virtual icUInt16Number GetSrcChannels() const { return m_nCols; }
   virtual icUInt16Number GetDstChannels() const { return m_nRows; }
 
+  virtual bool BeginStep();
+
   icFloatNumber *data() { return m_vals;}
   const icFloatNumber *data() const { return m_vals;}
 
@@ -1047,6 +1058,11 @@ protected:
   icUInt16Number m_nRows, m_nCols, m_nChannels;
   icUInt32Number m_nBytesPerMatrix;
   icFloatNumber *m_vals;
+
+  /// Built once by BeginStep() from m_vals; read-only in Apply(). Lives on the
+  /// step rather than in a per-apply object because it is immutable after
+  /// BeginStep() and MultiplyVector() is const, so all threads share one.
+  CIccSparseMatrix *m_pMtx;
 
 };
 
@@ -1117,7 +1133,7 @@ public:
   icStatusCMM ConnectFirst(CIccXform* pToXform, icColorSpaceSignature srcSpace);
   icStatusCMM ConnectLast(CIccXform* pFromXform, icColorSpaceSignature dstSpace);
 
-  virtual icStatusCMM Begin() { return icCmmStatOk; }
+  virtual icStatusCMM Begin();
 
   virtual CIccApplyXform *GetNewApply(icStatusCMM &status);  //Must be called after Begin
 
@@ -1261,6 +1277,11 @@ public:
 protected:
 
   virtual bool HasPerceptualHandling() { return false; }
+
+	/// Perceptual reference white in this profile's PCS encoding, computed once
+	/// by Begin(). Apply() rebuilt it on every pixel from compile-time constants.
+	/// Immutable after Begin(), so shared safely across threads.
+	icFloatNumber m_PcsWhite[3];
 
 	CIccCurve *m_Curve;
 	CIccCurve *GetCurve(icSignature sig) const;
@@ -1639,6 +1660,7 @@ public:
   'Lab '
     icEncodeValue: 0.0 <= L <= 100.0; -128.0 <= a,b <= 127.0
     icEncodeFloat: 0.0 <= L,a,b <= 1.0 - ICC PCS encoding (See ICC Specification)
+    icEncodeUnitFloat: accepted as a synonym of icEncodeFloat (#2146)
     icEncode8BIt: ICC 8 bit Lab Encoding - See ICC Specification
     icEncode16Bit: ICC 16 bit V4 Lab Encoding - See ICC Specification
     icEncode16BitV2: ICC 16 bit V2 Lab Encoding - See ICC Specification
@@ -1647,8 +1669,20 @@ public:
     icEncodeValue: 0.0 <= X,Y,Z < 1.999969482421875
     icEncodePercent: 0.0 <= X,Y,Z < 199.9969482421875
     icEncodeFloat: 0.0 <= L,a,b <= 1.0 - ICC PCS encoding (See ICC Specification
+    icEncodeUnitFloat: accepted as a synonym of icEncodeFloat (#2146). Note the
+      name: this is the PCS encoding, whose external range runs to ~2.0, and
+      neither converter clips it. Only the device spaces above take the 0.0-1.0
+      reading and clip to it.
     icEncode16Bit: ICC 16 bit XYZ Encoding - (icU1Fixed15) See ICC Specification
     icEncode16BitV2: ICC 16 bit XYZ Encoding - (icU1Fixed15) See ICC Specification
+
+  This table lists the encodings each space accepts, not a per-direction
+  contract: ToInternalEncoding() and FromInternalEncoding() do not accept
+  identical sets for every space. They agree for the two PCS spaces above --
+  which is what #2146 restored, icEncodeUnitFloat having been absent from the
+  source side only -- but not everywhere; a device space, for instance, accepts
+  icEncodeValue as a destination while rejecting it as a source unless the
+  space is CLR. Check the relevant switch when the direction matters.
  **************************************************************************
 */
 

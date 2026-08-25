@@ -1,0 +1,268 @@
+###############################################################
+#
+# Copyright (c) 2026 International Color Consortium.
+#                 All rights reserved.
+#                 https://color.org
+#
+# Intent: Build and test the MATLAB MEX bindings on Windows.
+#
+###############################################################
+
+name: ci-matlab
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/ci-matlab.yml"
+      - ".github/instructions/matlab-mex.instructions.md"
+      - ".github/prompts/debug-matlab-bindings.prompt.md"
+      - ".github/skills/matlab-bindings-test/**"
+      - "docs/matlab-bindings.md"
+      - "Build/Cmake/**"
+      - "IccProfLib/**"
+      - "Tools/CmdLine/IccPawgReport/**"
+      - ".github/ci/regression/luminance-normalization-diagnostic.cpp"
+      - ".github/ci/regression/pawg-q1-quality-contract.cpp"
+      - "**/*.m"
+      - "matlab/**"
+      - "Testing/Display/sRGB_D65_MAT.xml"
+      - "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
+      - "Testing/Display/sRGB_D65_MAT-500cdm2.xml"
+      - "Testing/HDR/BT2100PQFullDisplay.xml"
+      - "Testing/sRGB_v4_ICC_preference.icc"
+  pull_request:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/ci-matlab.yml"
+      - ".github/instructions/matlab-mex.instructions.md"
+      - ".github/prompts/debug-matlab-bindings.prompt.md"
+      - ".github/skills/matlab-bindings-test/**"
+      - "docs/matlab-bindings.md"
+      - "Build/Cmake/**"
+      - "IccProfLib/**"
+      - "Tools/CmdLine/IccPawgReport/**"
+      - ".github/ci/regression/luminance-normalization-diagnostic.cpp"
+      - ".github/ci/regression/pawg-q1-quality-contract.cpp"
+      - "**/*.m"
+      - "matlab/**"
+      - "Testing/Display/sRGB_D65_MAT.xml"
+      - "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
+      - "Testing/Display/sRGB_D65_MAT-500cdm2.xml"
+      - "Testing/HDR/BT2100PQFullDisplay.xml"
+      - "Testing/sRGB_v4_ICC_preference.icc"
+  workflow_dispatch:
+
+concurrency:
+  group: "ci-matlab-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows MATLAB MEX
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
+
+    steps:
+      - name: Checkout repository
+        # actions/checkout v5.0.0 (node24)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+
+      - name: Checkout trusted workflow helpers
+        # actions/checkout v5.0.0 (node24)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts
+          path: .trusted-helpers
+          persist-credentials: false
+
+      - name: Set up MATLAB
+        # matlab-actions/setup-matlab v3
+        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        with:
+          release: R2026a
+
+      - name: Reproduce specification calculations
+        # matlab-actions/run-command v3
+        # Both checks are pure arithmetic over checked-in tables and fixtures, so
+        # they run before the native build rather than depending on it.
+        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        with:
+          command: >-
+            addpath('matlab');
+            addpath(fullfile('matlab', 'tests'));
+            test_luminance_normalization();
+            run(fullfile('matlab', 'examples', 'luminance_normalization.m'));
+            test_colorimetry_issue_1475();
+            run(fullfile('matlab', 'examples', 'colorimetry_issue_1475.m'))
+          generate-summary: false
+
+      - name: Configure and build IccProfLib
+        env:
+          POWERSHELL_TELEMETRY_OPTOUT: "1"
+          POWERSHELL_UPDATECHECK: Off
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          git config --global credential.helper ""
+          if (Test-Path Env:GITHUB_TOKEN) {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          }
+          . .trusted-helpers/.github/scripts/sanitize.ps1
+
+          $configureArgs = @(
+            '-S', 'Build\Cmake'
+            '-B', 'out\matlab'
+            '-G', 'Visual Studio 17 2022'
+            '-A', 'x64'
+            '-DENABLE_TESTS=ON'
+            '-DENABLE_TOOLS=ON'
+            '-DENABLE_WXWIDGETS=OFF'
+            '-DENABLE_SHARED_LIBS=OFF'
+            '-DENABLE_STATIC_LIBS=ON'
+            '-DENABLE_ICCXML=OFF'
+            '-DENABLE_ICCJSON=OFF'
+            '-DENABLE_IMAGE_TOOLS=OFF'
+            '-DENABLE_CMM_TOOLS=OFF'
+            '-DENABLE_IIS_TOOLS=OFF'
+            '-DICC_USE_ZLIB=OFF'
+            '-Wno-dev'
+          )
+          cmake @configureArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configure failed with exit code $LASTEXITCODE"
+          }
+
+          $buildArgs = @(
+            '--build', 'out\matlab'
+            '--config', 'Release'
+            '--target'
+            'IccProfLib2-static'
+            'iccProfilePlot'
+            'iccPawgReport'
+            'iccPawgQ1QualityContractTest'
+            'iccLuminanceNormalizationTest'
+            'iccColorimetryMethodsTest'
+            '--parallel'
+          )
+          cmake @buildArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native regression test build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Run native MATLAB regressions
+        env:
+          POWERSHELL_TELEMETRY_OPTOUT: "1"
+          POWERSHELL_UPDATECHECK: Off
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+          git config --global credential.helper ""
+          if (Test-Path Env:GITHUB_TOKEN) {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          }
+          . .trusted-helpers/.github/scripts/sanitize.ps1
+
+          $nativeRegressionPattern = (
+            '^iccdev\.(' +
+            'luminance-normalization|' +
+            'colorimetry-methods|' +
+            'pawg-q1-quality-contract)$'
+          )
+          ctest --test-dir out\matlab -C Release `
+            -R $nativeRegressionPattern `
+            --output-on-failure `
+            --no-tests=error
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native regressions failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build MATLAB MEX gateway
+        # matlab-actions/run-command v3
+        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        with:
+          command: >-
+            addpath('matlab');
+            build_mex('BuildDir', fullfile(pwd, 'out', 'matlab'))
+          generate-summary: false
+
+      - name: Run MATLAB QA
+        # matlab-actions/run-command v3
+        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        with:
+          command: >-
+            addpath('matlab');
+            addpath(fullfile('matlab', 'tests'));
+            test_usage_guidance();
+            run_local_qa();
+            test_add_docker_path();
+            test_plot();
+            run(fullfile('matlab', 'examples', 'read_profile.m'));
+            run(fullfile('matlab', 'examples', 'color_transform.m'));
+            run(fullfile('matlab', 'examples', 'gamma_curve.m'))
+          generate-summary: false
+
+  docker-interop:
+    name: MATLAB Docker interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ICCDEV_IMAGE_REPOSITORY: ghcr.io/internationalcolorconsortium/iccdev
+      ICCDEV_IMAGE_DIGEST: sha256:0a54b8ad1ca73e294ecf9c71323e6385c8812945c6ca3b40ba98d9f82b89c0fc
+
+    steps:
+      - name: Checkout repository
+        # actions/checkout v5.0.0 (node24)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+
+      - name: Checkout trusted workflow helpers
+        # actions/checkout v5.0.0 (node24)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts
+          path: .trusted-helpers
+          persist-credentials: false
+
+      - name: Set up MATLAB
+        # matlab-actions/setup-matlab v3
+        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        with:
+          release: R2026a
+
+      - name: Pull published container
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .trusted-helpers/.github/scripts/sanitize-sed.sh
+
+          docker pull "${ICCDEV_IMAGE_REPOSITORY}@${ICCDEV_IMAGE_DIGEST}"
+
+      - name: Validate published container from MATLAB
+        # matlab-actions/run-command v3
+        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        with:
+          command: >-
+            addpath('matlab');
+            run_docker_qa(strcat(getenv('ICCDEV_IMAGE_REPOSITORY'), '@', getenv('ICCDEV_IMAGE_DIGEST')))
+          generate-summary: false

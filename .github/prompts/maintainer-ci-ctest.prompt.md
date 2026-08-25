@@ -36,14 +36,17 @@ maintainers unless an iccDEV maintainer explicitly approves the change.
 
 Choose the smallest gate that proves the behavior:
 
-- `ci-pr-action` full: default long-cycle Unix GCC/Clang Release and Debug,
+- `ci-pr-action` full: explicit long-cycle Unix GCC/Clang Release and Debug,
   exact GCC 15.2 strict Release LTO, GCC 15.2 ASAN+UBSAN tool tests, Windows,
-  and Docker verification.
+  and Docker verification. Its tool-test caller excludes the `pr-extended`
+  CTest label; labelled tests remain enabled in `ci-regression-checks`.
 - `ci-pr-action` fast lane: exact GCC 15.2 strict Release LTO plus GCC 15.2
-  ASAN+UBSAN Release tool validation, latest CTest by default, with Windows and
-  Docker opt-in.
-- `ci-pr-action` auto: explicit path-scoped selection when the default full
-  cycle is unnecessary.
+  ASAN+UBSAN Release tool validation and the latest CTest by default, with
+  Windows opt-in. Docker verification is scheduled when the selected PR changes
+  the container surface.
+- `ci-pr-action` auto: default path-scoped selection. Source, build, test, and
+  container changes select the full matrix; workflow-only changes use preflight
+  and workflow-security gates.
 - CTest suite: cross-platform tool/profile behavior that belongs in the normal
   local and CI test surface.
 - Focused `.github/scripts/*.sh` regression: reusable Linux regression logic or
@@ -64,7 +67,7 @@ Choose the smallest gate that proves the behavior:
 - Update `docs/regression-workflow-governance.md` for workflow process changes.
 - Update `docs/build.md` and `docs/regression-workflow-governance.md` when
   changing maintainer Dockerfiles, container dependencies, GHCR publish flow, or
-  pinned regression image digests.
+  pinned unified image digests.
 - Update `.github/skills/README.md` or a skill when the process becomes a
   repeatable maintainer workflow.
 - For registry QA workflow runs, preserve `summary.md`, `results.tsv`, and
@@ -72,10 +75,8 @@ Choose the smallest gate that proves the behavior:
   log excerpts by default; rerun with `registry_qa_log_tail_lines=0` only when
   complete raw per-tool logs are required. Preserve downloaded registry profile
   payloads in developer reports so failing inputs remain available for review.
-- On `ci-qa-pr-docker-testing`, Docker PR verification is advisory. If it fails,
-  keep the orchestrator result successful when required non-Docker gates pass,
-  add `bump-sha-pins`, update pinned action or container SHAs, and rerun Docker
-  before claiming the container lane is verified.
+- Container changes require the Docker PR verification lane. Do not claim the
+  container surface is verified until its local image build and hosted lane pass.
 - When adding cases inside an existing script-backed suite, document that the
   CTest suite count is unchanged and validate both direct script execution and
   the CTest wrapper.
@@ -117,7 +118,7 @@ docker build -t iccdev-container-check -f <Dockerfile> .
 docker run --rm iccdev-container-check <smoke-command>
 ```
 
-For `Dockerfile.ci-regression`, use a no-cache build and smoke `clang`,
+For the unified `Dockerfile`, use a no-cache build and smoke `clang`,
 `clang++`, `gcc`, `g++`, `cmake`, `afl-fuzz`, and `/usr/bin/time`. If the image must be published,
 publish through the maintainer-controlled container release path, then pass the
 published branch or SHA tag to `ci-iccdev-tool-tests.yml`.
@@ -144,7 +145,7 @@ gh run watch <run-id> --repo InternationalColorConsortium/iccDEV --exit-status
 ```
 
 Trigger workflows with shared concurrency sequentially. Use `ci-pr-action` for
-normal maintainer validation; it defaults to `ci_scope=full`. Use
+normal maintainer validation; it defaults to `ci_scope=auto`. Use
 `ci_scope=fast-lane` with an open same-repository PR number for the shortest
 exact GCC 15.2 lane. Use `ci-regression-checks` through the orchestrator for
 ASAN/UBSAN CTest coverage.

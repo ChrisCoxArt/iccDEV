@@ -597,7 +597,18 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
         // lives in DToBx tags regardless of how the caller set bUseD2BTags. Opening
         // that path here lets icXformLutColor + a spectral source profile resolve
         // without the caller having to set useD2BxB2Dx explicitly.
-        if (bUseD2BTags || pProfile->m_Header.spectralPCS) {
+        //
+        // "Spectral-only" is the !pcs test, not the bare spectralPCS test that
+        // stood here: ICC.2:2023 lets a profile carry an independent colorimetric
+        // PCS as well, and for those the caller's opt-out has to be honoured.
+        // CIccCmm::AddXform already draws the line that way -- its nDstSpace
+        // selection reads (bUseD2BxB2DxTags || !m_Header.pcs) -- so without this
+        // term the two disagree: AddXform records the 3-sample XYZ connection
+        // while Create hands back a DToBx transform emitting spectralPCS samples,
+        // and CIccCmm::Begin() then rejects the chain with icCmmStatBadSpaceLink.
+        // Measured on SixChanInputRef (AToB3 6->3, DToB3 6->36) with the D2B
+        // opt-out intents 11 and 13 (#1982).
+        if (bUseD2BTags || (pProfile->m_Header.spectralPCS && !pProfile->m_Header.pcs)) {
           if (nLutType != icXformLutColorimetric &&
               (pProfile->m_Header.spectralPCS || pProfile->m_Header.version >= icVersionNumberV5)) {
             pTag = pProfile->FindTag(icSigDToB0Tag + nTagIntent);
@@ -736,7 +747,16 @@ CIccXform *CIccXform::Create(CIccProfile *pProfile,
 
         // Spectral-only destination profiles only carry BToDx tags; let icXformLutColor
         // resolve them without requiring the caller to set useD2BxB2Dx.
-        if (bUseD2BTags || (nLutType != icXformLutColorimetric && pProfile->m_Header.spectralPCS)) {
+        //
+        // Same !pcs correction as the bInput branch above, and it has to land in
+        // the same commit: the two mis-selections currently cancel out.  A chain
+        // whose source and destination are both dual-PCS resolves today because
+        // both ends silently take the spectral route, so fixing only the input
+        // side leaves the destination on BToDx and turns a working link into
+        // icCmmStatUnsupportedPcsLink.  Measured with SixChanInputRef into
+        // SixChanCameraRef under the opt-out intents (#1982).
+        if (bUseD2BTags || (nLutType != icXformLutColorimetric &&
+                            pProfile->m_Header.spectralPCS && !pProfile->m_Header.pcs)) {
           pTag = pProfile->FindTag(icSigBToD0Tag + nTagIntent);
 
           //Additional precedence not prescribed by the v4 ICC Specification
@@ -2843,7 +2863,35 @@ icStatusCMM CIccPcsXform::ConnectLast(CIccXform* pFromXform, icColorSpaceSignatu
  **************************************************************************
  * Name: CIccPcsXform::Optimize
  * 
- * Purpose: 
+ * Purpose:
+ *  Gives each step in the chain its one chance to precompute invariant state.
+ *
+ *  Runs after Connect()/Optimize() have finished building the list and before
+ *  GetNewApply(), so a step can build immutable data here and treat it as
+ *  read-only in Apply(). Doing that work lazily on first Apply() instead would
+ *  be a data race: Apply() is const and runs concurrently on every worker
+ *  thread of a CIccThreadedCmm.
+ **************************************************************************
+ */
+icStatusCMM CIccPcsXform::Begin()
+{
+  if (m_list) {
+    CIccPcsStepList::iterator i;
+
+    for (i = m_list->begin(); i != m_list->end(); i++) {
+      if (i->ptr && !i->ptr->BeginStep())
+        return icCmmStatInvalidLut;
+    }
+  }
+
+  return icCmmStatOk;
+}
+
+/**
+**************************************************************************
+ * Name: CIccPcsXform::Optimize
+ *
+ * Purpose:
  *  Analyzes and concatenates/removes transforms in pcs transformation chain
  **************************************************************************
  */
@@ -3362,10 +3410,30 @@ icStatusCMM CIccPcsXform::pushXYZConvert(CIccXform *pFromXform, CIccXform *pToXf
         if (pElem->GetType()==icSigMatrixElemType) {
           CIccMpeMatrix *pMatElem = (CIccMpeMatrix*)pElem;
 
-          icFloatNumber *pMat = pMatElem->GetMatrix();
-          icFloatNumber *pOffset = pMatElem->GetConstants();
+          const icFloatNumber *pMat = pMatElem->GetMatrix();
+          const icFloatNumber *pOffset = pMatElem->GetConstants();
+          icUInt16Number inChannels = pMatElem->NumInputChannels();
+          icUInt16Number outChannels = pMatElem->NumOutputChannels();
 
-          if (pMat && (!pOffset || (pOffset[0]==0.0 && pOffset[1]==0.0 && pOffset[2]==0.0))) {
+          // The guard above checks the containing MPE's channel counts, not this
+          // element's, and the two can disagree in a profile that Validate()
+          // rejects but nothing here re-checks. CIccMpeMatrix::SetSize allocates
+          // inChannels*outChannels matrix entries and outChannels constants, so a
+          // 1x1 element leaves pOffset[1..2] and 8 of the 9 copied matrix entries
+          // out of bounds (#2175). PR #632 added this same guard to the
+          // standardToCustomPcc arm below; this arm was missed.
+          bool offsetsZero = true;
+          if (pOffset) {
+            for (int i = 0; i < outChannels; ++i) {
+              if (pOffset[i] != 0.0) {
+                offsetsZero = false;
+                break;
+              }
+            }
+          }
+
+          // make sure the matrix is the expected size and offsets are zero
+          if (pMat && (inChannels == 3) && (outChannels == 3) && (!pOffset || offsetsZero) ) {
             CIccPcsStepMatrix *pStepMtx = new (std::nothrow) CIccPcsStepMatrix(3, 3);
 
             if (pStepMtx ) {
@@ -5395,20 +5463,55 @@ CIccPcsStepSparseMatrix::CIccPcsStepSparseMatrix(icUInt16Number nRows, icUInt16N
   m_nBytesPerMatrix = nBytesPerMatrix;
   m_nChannels = 0;
   m_vals = new icFloatNumber[m_nBytesPerMatrix/sizeof(icFloatNumber)];
+  m_pMtx = NULL;   // built by BeginStep(), once m_vals has been populated
 }
 
 
 /**
 **************************************************************************
 * Name: CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix
-* 
-* Purpose: 
+*
+* Purpose:
 *  Destructor
 **************************************************************************
 */
 CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix()
 {
+  delete m_pMtx;
   delete [] m_vals;
+}
+
+
+/**
+**************************************************************************
+* Name: CIccPcsStepSparseMatrix::BeginStep
+*
+* Purpose:
+*  Builds the sparse matrix wrapper once, before any Apply().
+*
+*  The matrix is parsed from m_vals, which is fixed by the time the step list is
+*  built, so the CIccSparseMatrix it produces is identical for every pixel.
+*  Apply() used to construct one per pixel with bInitFromData=true, and
+*  CIccSparseMatrix::Init() (IccSparseMatrix.cpp:145) unconditionally deletes and
+*  re-news its m_Data accessor -- so that was a heap allocation and free on every
+*  pixel, plus a dimension re-parse and the 4096-dimension bounds test.
+*
+*  It is held on the step rather than in a CIccApplyPcsStep because it is
+*  immutable from here on and MultiplyVector() is const, so every thread can
+*  share the one instance. Contrast CIccPcsStepSrcSparseMatrix, whose matrix
+*  wraps per-pixel source data and therefore cannot be shared.
+**************************************************************************
+*/
+bool CIccPcsStepSparseMatrix::BeginStep()
+{
+  // Idempotent: BeginStep() can be reached more than once, and rebuilding from
+  // the same m_vals yields the same matrix.
+  delete m_pMtx;
+
+  m_pMtx = new (std::nothrow) CIccSparseMatrix((icUInt8Number*)m_vals,
+                                               m_nBytesPerMatrix,
+                                               icSparseMatrixFloatNum, true);
+  return m_pMtx != NULL;
 }
 
 
@@ -5423,9 +5526,10 @@ CIccPcsStepSparseMatrix::~CIccPcsStepSparseMatrix()
 */
 void CIccPcsStepSparseMatrix::Apply(CIccApplyPcsStep * /* pApply */, icFloatNumber *pDst, const icFloatNumber *pSrc) const
 {
-  CIccSparseMatrix mtx((icUInt8Number*)m_vals, m_nBytesPerMatrix, icSparseMatrixFloatNum, true);
-
-  mtx.MultiplyVector(pDst, pSrc);
+  // Matrix built once in BeginStep(). This used to construct a CIccSparseMatrix
+  // here, which allocated and freed on every pixel -- see BeginStep().
+  if (m_pMtx)
+    m_pMtx->MultiplyVector(pDst, pSrc);
 }
 
 
@@ -5591,6 +5695,29 @@ icStatusCMM CIccXformMonochrome::Begin()
 		m_ApplyCurvePtr = m_Curve;
 	}
 
+	// Apply() used to rebuild this on every pixel, in both directions, from
+	// compile-time constants: icXyzToPcs plus, for a Lab PCS, XyzToLab and its
+	// three cube roots, behind a virtual UseLegacyPCS() call. Nothing in it
+	// depends on the source colour, and both m_pProfile->m_Header.pcs and
+	// UseLegacyPCS() are fixed by the time Begin() runs.
+	//
+	// Idempotent: recomputing from the same constants yields the same values, so
+	// reaching Begin() a second time is harmless.
+	m_PcsWhite[0] = icFloatNumber(icPerceptualRefWhiteX);
+	m_PcsWhite[1] = icFloatNumber(icPerceptualRefWhiteY);
+	m_PcsWhite[2] = icFloatNumber(icPerceptualRefWhiteZ);
+
+	icXyzToPcs(m_PcsWhite);
+
+	if (m_pProfile->m_Header.pcs==icSigLabData) {
+		if (UseLegacyPCS()) {
+			CIccPCSUtil::XyzToLab2(m_PcsWhite, m_PcsWhite, true);
+		}
+		else {
+			CIccPCSUtil::XyzToLab(m_PcsWhite, m_PcsWhite, true);
+		}
+	}
+
 	return icCmmStatOk;
 }
 
@@ -5614,6 +5741,9 @@ void CIccXformMonochrome::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel,
   if (m_bSrcPcsConversion)
 	  SrcPixel = CheckSrcAbs(pApply, SrcPixel);
 
+	// m_PcsWhite is computed once in Begin(). Both branches below used to rebuild
+	// it here on every pixel -- icXyzToPcs, and for a Lab PCS XyzToLab's three
+	// cube roots behind a virtual UseLegacyPCS() call -- entirely from constants.
 	if (m_bInput) {
 		Pixel[0] = SrcPixel[0];
 
@@ -5621,43 +5751,24 @@ void CIccXformMonochrome::Apply(CIccApplyXform* pApply, icFloatNumber *DstPixel,
 			Pixel[0] = m_ApplyCurvePtr->Apply(Pixel[0]);
 		}
 
-		DstPixel[0] = icFloatNumber(icPerceptualRefWhiteX); 
-		DstPixel[1] = icFloatNumber(icPerceptualRefWhiteY);
-		DstPixel[2] = icFloatNumber(icPerceptualRefWhiteZ);
-
-		icXyzToPcs(DstPixel);
-
-		if (m_pProfile->m_Header.pcs==icSigLabData) {
-			if (UseLegacyPCS()) {
-				CIccPCSUtil::XyzToLab2(DstPixel, DstPixel, true);
-			}
-			else {
-				CIccPCSUtil::XyzToLab(DstPixel, DstPixel, true);
-			}
-		}
-
-		DstPixel[0] *= Pixel[0];
-		DstPixel[1] *= Pixel[0];
-		DstPixel[2] *= Pixel[0];
+		DstPixel[0] = m_PcsWhite[0] * Pixel[0];
+		DstPixel[1] = m_PcsWhite[1] * Pixel[0];
+		DstPixel[2] = m_PcsWhite[2] * Pixel[0];
 	}
 	else {
-		Pixel[0] = icFloatNumber(icPerceptualRefWhiteX); 
-		Pixel[1] = icFloatNumber(icPerceptualRefWhiteY);
-		Pixel[2] = icFloatNumber(icPerceptualRefWhiteZ);
-
-		icXyzToPcs(Pixel);
-
+		// The divide is kept rather than turned into a precomputed reciprocal:
+		// x/w and x*(1/w) are not bit-identical, and the cube roots hoisted above
+		// dominate a single division. Preserving exact output keeps the harness
+		// checksum usable as a strict equality oracle for the rest of this branch.
+		//
+		// The header test selects which source component to read rather than
+		// computing anything, so it stays; folding it into another member would
+		// buy nothing measurable.
 		if (m_pProfile->m_Header.pcs==icSigLabData) {
-			if (UseLegacyPCS()) {
-				CIccPCSUtil::XyzToLab2(Pixel, Pixel, true);
-			}
-			else {
-				CIccPCSUtil::XyzToLab(Pixel, Pixel, true);
-			}
-			DstPixel[0] = SrcPixel[0]/Pixel[0];
+			DstPixel[0] = SrcPixel[0]/m_PcsWhite[0];
 		}
 		else {
-			DstPixel[0] = SrcPixel[1]/Pixel[1];
+			DstPixel[0] = SrcPixel[1]/m_PcsWhite[1];
 		}
 
 		if (m_ApplyCurvePtr) {
@@ -6955,6 +7066,57 @@ icStatusCMM CIccXformNDLut::Begin()
   // this avoids segfaults and stack overflows when applying the LUT
   icUInt16Number csOutChannels = icGetSpaceSamples( m_pTag->GetCsOutput() );
   if (csOutChannels != m_pTag->OutputChannels())
+    return icCmmStatInvalidLut;
+
+  // CWE-125: the input half of the same check. Apply() copies InputChannels()
+  // floats out of SrcPixel, but that buffer is sized from the profile, not from
+  // the tag: CIccApplyCmm::InitPixel() takes the max of GetNumSrcSamples() and
+  // GetNumDstSamples() across the chain (floored at 16), and the first xform in a
+  // chain is handed the application's own buffer. A tag declaring more input
+  // channels than the profile's source space therefore reads past the end of it.
+  //
+  // Compare against GetNumSrcSamples() rather than against the tag's own
+  // GetCsInput(): that is precisely the quantity InitPixel() sizes the buffer
+  // from, so it stays correct where the two disagree - and they do disagree,
+  // because the tag is not always the profile's own. NDLut is reached from three
+  // sites: the no-tag CIccXform::Create() overload (the default: arm of its switch
+  // on m_Header.colorSpace), the tag-explicit CIccXform::Create() overload behind
+  // the public CIccCmm::AddXform(CIccProfile*, CIccTag*, ...), and
+  // CIccXformMpe::Create(). At the tag-explicit one the caller chooses the tag,
+  // and its m_csInput records whatever stamped it, so a BToAn tag handed in as an
+  // input xform matches its own InputChannels() while SrcPixel is still sized from
+  // m_Header.colorSpace. Checking the tag against itself would pass that case and
+  // leave the over-read intact.
+  //
+  // Only the ND path needs this stated at all: CIccXform3DLut::Begin() and
+  // CIccXform4DLut::Begin() pin InputChannels() to the 3 and 4 their Apply()
+  // reads, while this one takes a variable count from the tag. (The guard above
+  // already refuses 3 and 4 here, so a 3-channel space that routes to ND for want
+  // of being enumerated in those switches, icSigDevLabData say, never reaches
+  // this check.)
+  //
+  // That asymmetry has a history worth recording, because it looks accidental and
+  // is not: 48a53197 ("Fix: SBO in CIccXform3DLut::Apply()", #655) added the
+  // output check above to all three LUT xforms in a single patch. In 3DLut and
+  // 4DLut the guard immediately above already pinned the input side, so the
+  // output half was all those two needed; NDLut's guard only rejects 3 and 4, so
+  // the same patch left it with a checked output and an unchecked input.
+  //
+  // This is not a new rule: CIccMBB::Validate() already reports the same
+  // disagreement as "Incorrect number of input channels", a critical error, by
+  // comparing m_nInput against icGetSpaceSamples(pProfile->m_Header.colorSpace)
+  // for exactly these tags. The apply path simply never consulted it, so a
+  // profile the validator rejects could still be driven through Apply().
+  //
+  // Nor does CIccCmm::Begin()'s own guard cover it, though its comment ("Make
+  // sure the input channel and first transform input counts match. Otherwise
+  // we'll have a heap overflow during Apply.") describes this hazard exactly.
+  // That guard compares GetSourceSamples() against the first xform's
+  // GetNumSrcSamples(), and both of those derive from m_Header.colorSpace, so it
+  // is header-to-header and structurally cannot see a tag that disagrees with
+  // the header. The tag's own count is only visible here. (#2119)
+  icUInt16Number nSrcSamples = GetNumSrcSamples();
+  if (nSrcSamples != m_pTag->InputChannels())
     return icCmmStatInvalidLut;
 
   m_nNumInput = m_pTag->m_nInput;
@@ -9871,6 +10033,14 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
             icLabToPcs(pInput);
             break;
           }
+        // #2146: icEncodeUnitFloat was absent here while FromInternalEncoding's
+        // icSigLabData branch pairs it with icEncodeFloat, so the library wrote
+        // Lab data it then refused to read back. Paired identically rather than
+        // given a clipping body of its own: the destination side applies no
+        // clip on this path, and matching it exactly is what restores the round
+        // trip. Lab float already IS the internal PCS encoding, so like
+        // icEncodeFloat this converts nothing.
+        case icEncodeUnitFloat:
         case icEncodeFloat:
           {
             break;
@@ -9926,6 +10096,12 @@ icStatusCMM CIccCmm::ToInternalEncoding(icColorSpaceSignature nSpace, icFloatCol
             icXyzToPcs(pInput);
             break;
           }
+        // #2146: the icSigLabData counterpart above, for the other PCS. Also
+        // deliberately unclipped: icXyzFromPcs scales by 65535/32768, so the
+        // external XYZ float range runs to ~2.0 and clipping a source to
+        // 0.0-1.0 here would discard legitimate values rather than harden
+        // anything.
+        case icEncodeUnitFloat:
         case icEncodeFloat:
           {
             icXyzToPcs(pInput);

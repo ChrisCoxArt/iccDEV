@@ -28,14 +28,6 @@ permissions:
   pull-requests: read  # Required by reusable PR build callers.
 
 on:
-  pull_request:
-    branches:
-      - master
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
   workflow_call:
   workflow_dispatch:
 
@@ -118,9 +110,9 @@ jobs:
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Emscripten SDK
         env:

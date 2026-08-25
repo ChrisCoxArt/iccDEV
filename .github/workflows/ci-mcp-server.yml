@@ -19,7 +19,7 @@ on:
       - master
       - ci-qa-mcp-server
     paths:
-      - "Dockerfile.ci-regression"
+      - "Dockerfile"
       - "iccdev-mcp/**"
       - ".github/codeql-queries/iccdev-mcp/**"
       - ".github/workflows/ci-mcp-server.yml"
@@ -27,21 +27,26 @@ on:
     branches:
       - master
     paths:
-      - "Dockerfile.ci-regression"
+      - "Dockerfile"
       - "iccdev-mcp/**"
       - ".github/codeql-queries/iccdev-mcp/**"
       - ".github/workflows/ci-mcp-server.yml"
   workflow_dispatch:
 
 concurrency:
-  group: "mcp-server-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
+  group: "mcp-server-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
   cancel-in-progress: true
 
 jobs:
   python-package:
-    name: "Python package and REST tests"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: "Python ${{ matrix.python-version }} package and REST tests"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
 
     defaults:
       run:
@@ -56,7 +61,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       # preflight: allow-package-install reason=mcp-server-python-test-dependencies
       - name: Install test dependencies
@@ -91,7 +96,8 @@ jobs:
           ls -l /tmp/iccdev-mcp-wheel
 
   dockerfile:
-    name: "Regression Dockerfile syntax"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: "Unified Dockerfile syntax"
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -105,7 +111,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate regression Dockerfile parses
+      - name: Validate unified Dockerfile parses
         env:
           BASH_ENV: /dev/null
           DOCKER_BUILDKIT: "1"
@@ -113,4 +119,4 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          docker build --check -f Dockerfile.ci-regression .
+          docker build --check -f Dockerfile .

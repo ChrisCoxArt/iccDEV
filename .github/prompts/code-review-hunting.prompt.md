@@ -4,6 +4,31 @@ Systematic code review workflow for finding security bugs in iccDEV.
 Based on analysis of 80+ upstream issues and 19 findings from manual
 code review (April 2026).
 
+## Review Churn Controls
+
+Before reporting a finding, confirm that it is introduced by the reviewed diff
+or that the diff makes a pre-existing condition newly reachable. Report only a
+concrete, reproducible correctness or security impact. Do not file style-only,
+speculative, duplicate, or broad-test comments when focused evidence is
+available.
+
+Use one finding per root cause. Include the changed file and line, triggering
+condition, impact, and smallest safe remediation. Read `AGENTS.md`,
+`.github/copilot-instructions.md`, matching path instructions, and
+`.github/skills/code-review/SKILL.md` before reviewing.
+
+Review only a frozen head that has passed
+`docs/governance/UPSTREAM_PR_READINESS.md`. Review the complete PR surface and
+cumulative diff, not incremental slices. A request for changes returns the
+branch to branch-only grooming; re-review only after the readiness evidence is
+renewed. If a re-review finds an issue in unchanged code, stop serial automated
+review and require maintainer direction. Prefer no comment to low-value review
+volume.
+
+For every new or relocated C/C++ source or header, verify the complete ICC
+Software License block is retained. A missing, abbreviated, or placeholder
+block is a blocking changed-line defect.
+
 ## 4-Category Hunt
 
 ### Category 1: Serialization Mismatch (CWE-345)

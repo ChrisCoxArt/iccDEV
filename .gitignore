@@ -61,6 +61,8 @@ Developer Defs.props
 
 #build files
 out/*
+/msvc/
+/build-matlab-full/
 
 # CMake generated files
 CMakeCache.txt
@@ -129,3 +131,10 @@ python/wheelhouse/
 *.mexmaci64
 *.mexw64
 *.oct
+
+# MATLAB Project metadata is local-only
+matlab/matlab.prj
+matlab/resources/
+matlab/.gitattributes
+matlab/.gitignore
+matlab/toolbox.ignore

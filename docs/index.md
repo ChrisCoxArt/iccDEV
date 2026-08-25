@@ -7,8 +7,11 @@ working with ICC.1 and ICC.2/iccMAX color profiles.
 
 - [Install](install.md): package and container quickstart
 - [Build](build.md): build from source on Linux, macOS, and Windows
+- [MATLAB bindings and QA](matlab-bindings.md): Windows MEX build, profiles, tests, examples, and WSL2 boundaries
 - [Python packaging release](python-packaging-release.md): Python PR, merge, and production PyPI release steps
 - [CTest tool suites](ctest.md): local CTest commands, registered suites, and add-test process
+- [C validation API](c-api-validation.md): C-only in-memory profile validation and runtime loading
+- <a href="../examples/c-validation-dlopen/README.md">C validation example</a>: C99 `dlopen` consumer and expected output
 - [CLI tool reference](tools-cli-reference.md): command-line tool summary and shared options
 - [IccJSON guide](iccjson.md): JSON conversion workflow
 - [ICC JSON tag reference](iccjson-tag-types.md): detailed JSON tag examples
@@ -20,7 +23,6 @@ working with ICC.1 and ICC.2/iccMAX color profiles.
 - [Maintainer regression container](regression-container.md): basic use, PR validation, issue reproduction, and CI handoff
 - [AFL++ smoke fuzzing](afl-fuzzing.md): manual bounded AFL instrumentation checks for CLI tools
 - [Maintainer QA scans](maintainer-qa-scans.md): headless CLI QA scans, ICC registry profile sweeps, and CI reporting
-- [Maintainer regression container](regression-container.md): basic use, PR validation, issue reproduction, and CI handoff
 - [Regression workflow governance](regression-workflow-governance.md): adding regression gates and tool-test workflow updates
 - [Workflow security trust boundaries](workflow-security-trust-boundaries.md): trusted-base helper model, PR workflow canaries, and visual review aids
 - [Maintainer label system](label-system.md): label taxonomy, path labeler, issue triage, and PR status labels
@@ -51,13 +53,18 @@ tables.
 | `iccApplyProfiles` | Apply a profile chain to a TIFF image. |
 | `iccApplySearch` | Apply a profile sequence using inverse search. |
 | `iccApplyToLink` | Create DeviceLink profiles or `.cube` LUTs from profile sequences. |
+| \ref iccapply_overview "iccApply visual lanes" | Interactive argv, CMM, and output flow references for the four iccApply tools. |
 | `iccDumpProfile` | Dump and validate ICC profile structure. |
+| `iccPawgReport` | Generate PAWG security, conformance, and quality assessment reports. |
 | `iccRoundTrip` | Evaluate round-trip profile behavior. |
 | `iccSpecSepToTiff` | Combine spectral separation TIFFs. |
 | `iccTiffDump`, `iccPngDump`, `iccJpegDump` | Inspect image metadata and embedded ICC profiles. |
 | `iccV5DspObsToV4Dsp` | Convert v5 display/observer profiles to v4 display profiles. |
 | `iccFromCube` | Convert `.cube` 3D LUTs to ICC.2 DeviceLink profiles. |
+| `iccBenchApply` | Measure profile-chain apply throughput and emit deterministic checksums. |
+| `iccProfilePlot` | Enumerate and render profile visualizations as JSON graph or raster data. |
 | `iccProfileVisualize` | Convert profile LUT data to images and PDF graphs. |
+| `iccProfileVisualizePlot` | Render data-first profile visualizations to PDF and TIFF artifacts. |
 | `wxProfileDump` | wxWidgets GUI profile inspector. |
 
 ## Example iccMAX Profiles
@@ -74,7 +81,7 @@ XML files under `Testing/` can be converted into example ICC profiles with
 | [`PCC`](../Testing/PCC) | Profile Connection Condition examples. |
 | [`SpecRef`](../Testing/SpecRef) | Spectral reflectance PCS examples. |
 
-See [`Testing/Readme.md`](../Testing/Readme.md) for the full profile directory
+See [`Testing/README.md`](https://github.com/InternationalColorConsortium/iccDEV/blob/master/Testing/README.md) for the full profile directory
 overview.
 
 ## Examples
