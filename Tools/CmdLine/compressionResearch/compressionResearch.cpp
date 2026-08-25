@@ -5285,7 +5285,7 @@ void deinterleaveChannels( const T *input, T *output, int channels,
     memcpy(output,input,pixels*sizeof(T));
     return;
   }
-  
+
   for (int c = 0; c < channels; ++c) {
     for (size_t x = 0; x < pixels; ++x) {
       output[c*pixels+x] = input[x*inColStep+c];
@@ -5345,7 +5345,7 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
   uint8_t *tempPtr = &temp[0];
 
   if (bitDepth == 8) {
-    // reorder channels to be planar in output
+    // reorder channels to be planar in temp
     deinterleaveChannels(input,tempPtr,channels,size1,colStep);
     
     // transform each channel
@@ -5359,18 +5359,19 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
 
   if (bitDepth == 16) {
     const uint16_t *input16 = (const uint16_t*)input;
-    uint16_t *output16 = (uint16_t*)tempPtr;
+    uint16_t *temp16 = (uint16_t*)tempPtr;
+    uint16_t *output16 = (uint16_t*)output;
     
-    // reorder channels to be planar in output
-    deinterleaveChannels(input16,output16,channels,size1,colStep);
+    // reorder channels to be planar in temp
+    deinterleaveChannels(input16,temp16,channels,size1,colStep);
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_forward_mid<uint16_t>(output16+c*size1,size1);
+      wavelet53_forward_mid<uint16_t>(temp16+c*size1,size1);
     }
     
     // copy from row temp to output
-    stepCopy( output16, (uint16_t*)output, channels, size1, channels, colStep );
+    stepCopy( temp16, output16, channels, size1, channels, colStep );
   }
 }
 
@@ -5417,6 +5418,34 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
 
 /******************************************************************************/
 
+#ifndef NDEBUG
+// write image buffer as grayscale (to handle deinterleaved channel data)
+void dumpImage( const uint8_t *x, int bitDepth, int channels, size_t width, size_t height,
+            const char *name )
+{
+  static size_t counter = 1;
+  size_t bytes = bitDepth / 8;
+  size_t byteCount = width*height*channels*bytes;
+  char filename[256];
+
+  width *= channels;
+
+  snprintf(filename,256,"imageDump_%s%6zu.pgm", name, counter++);
+  FILE *out = fopen( filename, "wb" );
+
+  if (bytes == 1)
+		fprintf(out, "P5\n%zu %zu\n255\n", width, height );
+  else if (bytes == 2)
+		fprintf(out, "P5\n%zu %zu\n65535\n", width, height );
+
+	fwrite( x, byteCount, 1, out );
+  fflush(out);
+  fclose(out);
+}
+#endif
+
+/******************************************************************************/
+
 static
 void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -5431,6 +5460,12 @@ void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, i
     wavelet53_forward(inY,outY,bitDepth,channels,size1,0,0,colStep,0,0);
   }   // end y loop for rows
 
+#if 0 && !defined(NDEBUG)
+// this looks as expected
+  if (size2 > 1)
+    dumpImage( output, bitDepth, channels, size1, size2, "wavelet532DHH" );
+#endif
+
   // apply to each column
   // alter size and channels, since they are already deinterleaved
   for (size_t x = 0; x < size1*channels; ++x) {
@@ -5438,6 +5473,14 @@ void wavelet53_2Dforward( const uint8_t *input, uint8_t *output, int bitDepth, i
     uint8_t *outX = output + x*bytes;
     wavelet53_forward(outX,outX,bitDepth,1,size2,0,0,rowStep,0,0);
   }   // end x loop for columns
+
+#if 0 && !defined(NDEBUG)
+// dump buffer at end and check that things look as expected
+// and this looks as expected
+  if (size2 > 1)
+    dumpImage( output, bitDepth, channels, size1, size2, "wavelet532D" );
+#endif
+
 }
 
 /******************************************************************************/
@@ -6694,6 +6737,86 @@ void unitTestSplits(void)
 
 /******************************************************************************/
 
+#ifndef NDEBUG
+void unitTestWaveletsInner(uint16_t *input, uint16_t *output, uint16_t *verify,
+                        size_t width, size_t height, int channels, const char *name )
+{
+  size_t pixels = width * height;
+
+  for (int c = 1; c <= channels; ++c) {
+    wavelet53_2Dforward((uint8_t*)input,(uint8_t*)output,8,c,width,height,0,c,width*c,0);
+    wavelet53_2Dreverse((uint8_t*)output,(uint8_t*)verify,8,c,width,height,0,c,width*c,0);
+    if (memcmp( verify, input, pixels*c) != 0)
+      LogAnError(stderr, "ERROR - wavelet53 %s 8 bit %d channels failed\n", name, c );
+
+    wavelet53_2Dforward((uint8_t*)input,(uint8_t*)output,16,c,width,height,0,c,width*c,0);
+    wavelet53_2Dreverse((uint8_t*)output,(uint8_t*)verify,16,c,width,height,0,c,width*c,0);
+    if (memcmp( verify, input, pixels*2*c) != 0)
+      LogAnError(stderr, "ERROR - wavelet53 %s 16 bit %d channels failed\n", name, c );
+  }
+}
+#endif
+
+/******************************************************************************/
+
+// sanity check!
+static
+void unitTestWavelets(void)
+{
+#ifndef NDEBUG
+  size_t width = 20;
+  size_t height = 32;
+  int channels = 4;
+  
+  size_t pixelCount = width * height * channels;
+  
+  std::unique_ptr<uint16_t[]> inputBuffer(  new uint16_t[ pixelCount ] );
+  std::unique_ptr<uint16_t[]> outputBuffer( new uint16_t[ pixelCount ] );
+  std::unique_ptr<uint16_t[]> verifyBuffer( new uint16_t[ pixelCount ] );
+  uint16_t *input = inputBuffer.get();
+  uint16_t *output = outputBuffer.get();
+  uint16_t *verify = verifyBuffer.get();
+
+  // vertical pattern
+  size_t rowStep = width*channels;
+  for (size_t y = 0; y < height; ++y)
+    for(size_t x = 0; x < rowStep; ++x)
+      input[y*rowStep+x] = x * 4;
+  unitTestWaveletsInner(input,output,verify,width,height,channels,"vertical");
+
+  // horizontal pattern
+  for (size_t y = 0; y < height; ++y)
+    for(size_t x = 0; x < rowStep; ++x)
+      input[y*rowStep+x] = y * 4;
+  unitTestWaveletsInner(input,output,verify,width,height,channels,"horizontal");
+
+  // diagonal pattern
+  for (size_t y = 0; y < height; ++y)
+    for(size_t x = 0; x < rowStep; ++x)
+      input[y*rowStep+x] = (x+y)*3;
+  unitTestWaveletsInner(input,output,verify,width,height,channels,"diagonal");
+
+  // sinusoid pattern
+  for (size_t y = 0; y < height; ++y)
+    for(size_t x = 0; x < rowStep; ++x)
+      input[y*rowStep+x] = (uint16_t)(65535.0 * (0.5 + 0.25 * (sinf(x*M_PI/width) + sinf(y*M_PI/height))));
+  unitTestWaveletsInner(input,output,verify,width,height,channels,"sinusoid");
+
+  // random values
+  srandom(0x42424242);
+  for (size_t y = 0; y < height; ++y)
+    for(size_t x = 0; x < rowStep; ++x)
+      input[y*rowStep+x] = random();
+  unitTestWaveletsInner(input,output,verify,width,height,channels,"random");
+
+  // other patterns?
+
+#endif      // DEBUG
+} // end unitTestWavelets
+
+
+/******************************************************************************/
+
 static
 void printUsage(void)
 {
@@ -6787,7 +6910,8 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 1
+  unitTestWavelets();
+#if 0
   unitTestPredictors();
 #endif
 
