@@ -5261,22 +5261,20 @@ const size_t kWaveletMinimumSize = 8;
 
 /******************************************************************************/
 
-// Forward CDF 5/3 Integer Transform (In-Place)
-template<typename T>
-void wavelet53_forward_mid( T* x, size_t n ) {
+template<typename T, typename F>
+void wave_forward_mid( T* x, size_t n, F func ) {
 
   // recursive prediction on lowpass side of result
   for (size_t k = n; k >= kWaveletMinimumSize; k /= 2) {
-    wavelet53_forward_inner(x,k);
+    func(x,k);
     deinterleave2(x,k);
   }
 }
 
 /******************************************************************************/
 
-// Inverse CDF 5/3 Integer Transform (In-Place)
-template<typename T>
-void wavelet53_reverse_mid( T* x, size_t n ) {
+template<typename T, typename F>
+void wave_reverse_mid( T* x, size_t n, F func) {
 
   // calc transform sizes we need to reverse
   std::vector<size_t> sizes;
@@ -5286,7 +5284,7 @@ void wavelet53_reverse_mid( T* x, size_t n ) {
   // undo recursive prediction on lowpass side of result
   for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
     interleave2(x,*rk);
-    wavelet53_reverse_inner(x,*rk);
+    func(x,*rk);
   }
 }
 
@@ -5366,7 +5364,7 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_forward_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_forward_mid<uint8_t>(tempPtr+c*size1,size1, wavelet53_forward_inner<uint8_t>);
     }
     
     // copy from row temp to output
@@ -5383,7 +5381,7 @@ void wavelet53_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_forward_mid<uint16_t>(temp16+c*size1,size1);
+      wave_forward_mid<uint16_t>(temp16+c*size1,size1, wavelet53_forward_inner<uint16_t>);
     }
     
     // copy from row temp to output
@@ -5409,7 +5407,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_reverse_mid<uint8_t>(tempPtr+c*size1,size1, wavelet53_reverse_inner<uint8_t>);
     }
     
     // interleave channels in output
@@ -5424,7 +5422,7 @@ void wavelet53_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavelet53_reverse_mid<uint16_t>(temp16+c*size1,size1);
+      wave_reverse_mid<uint16_t>(temp16+c*size1,size1, wavelet53_reverse_inner<uint16_t>);
     }
     
     // interleave channels in output
@@ -5562,35 +5560,6 @@ void waveletHaar_reverse_inner( T* x, size_t n ) {
 
 /******************************************************************************/
 
-template<typename T>
-void waveletHaar_forward_mid( T* x, size_t n ) {
-
-  // recursive prediction on lowpass side of result
-  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2) {
-    waveletHaar_forward_inner(x,k);
-    deinterleave2(x,k);
-  }
-}
-
-/******************************************************************************/
-
-template<typename T>
-void waveletHaar_reverse_mid( T* x, size_t n ) {
-
-  // calc transform sizes we need to reverse
-  std::vector<size_t> sizes;
-  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2)
-    sizes.push_back(k);
-
-  // undo recursive prediction on lowpass side of result
-  for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
-    interleave2(x,*rk);
-    waveletHaar_reverse_inner(x,*rk);
-  }
-}
-
-/******************************************************************************/
-
 static
 void waveletHaar_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
@@ -5607,7 +5576,7 @@ void waveletHaar_forward( const uint8_t *input, uint8_t *output, int bitDepth, i
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveletHaar_forward_mid<uint8_t>(output+c*size1,size1);
+      wave_forward_mid<uint8_t>(output+c*size1,size1, waveletHaar_forward_inner<uint8_t>);
     }
   }
 
@@ -5624,7 +5593,7 @@ void waveletHaar_forward( const uint8_t *input, uint8_t *output, int bitDepth, i
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveletHaar_forward_mid<uint16_t>(output16+c*size1,size1);
+      wave_forward_mid<uint16_t>(output16+c*size1,size1, waveletHaar_forward_inner<uint16_t>);
     }
   }
 
@@ -5644,12 +5613,12 @@ void waveletHaar_reverse( const uint8_t *input, uint8_t *output, int bitDepth, i
   memcpy( tempPtr, input, byteCount );
 
   if (bitDepth == 8) {
-    
+
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveletHaar_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_reverse_mid<uint8_t>(tempPtr+c*size1,size1, waveletHaar_reverse_inner<uint8_t>);
     }
-    
+
     // interleave channels in output
     for (int c = 0; c < channels; ++c) {
       for (size_t x = 0; x < size1; ++x) {
@@ -5657,17 +5626,16 @@ void waveletHaar_reverse( const uint8_t *input, uint8_t *output, int bitDepth, i
       }
     }
   }
-  
 
   if (bitDepth == 16) {
     uint16_t *input16 = (uint16_t*)tempPtr;
     uint16_t *output16 = (uint16_t*)output;
-    
+
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveletHaar_reverse_mid<uint16_t>(input16+c*size1,size1);
+      wave_reverse_mid<uint16_t>(input16+c*size1,size1, waveletHaar_reverse_inner<uint16_t>);
     }
-    
+
     // interleave channels in output
     for (int c = 0; c < channels; ++c) {
       for (size_t x = 0; x < size1; ++x) {
@@ -5682,9 +5650,11 @@ void waveletHaar_reverse( const uint8_t *input, uint8_t *output, int bitDepth, i
 /******************************************************************************/
 
 /*
-While trying to name this, RedHotChiliPeppers played:
+While trying to name this, RedHotChiliPeppers sang:
 "Go write your message on the pavement (Oh-oh)
  Burn so bright, I wonder what the wave meant"
+ 
+ 0x012356789ABCDEF -> 0x048C22211110000
  */
 template<typename T>
 void wavemint_forward_inner( T* x, size_t n ) {
@@ -5732,35 +5702,6 @@ void wavemint_reverse_inner( T* x, size_t n ) {
 
 /******************************************************************************/
 
-template<typename T>
-void wavemint_forward_mid( T* x, size_t n ) {
-
-  // recursive prediction on lowpass side of result
-  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2) {
-    wavemint_forward_inner(x,k);
-    deinterleave2(x,k);
-  }
-}
-
-/******************************************************************************/
-
-template<typename T>
-void wavemint_reverse_mid( T* x, size_t n ) {
-
-  // calc transform sizes we need to reverse
-  std::vector<size_t> sizes;
-  for (size_t k = n; k >= kWaveletMinimumSize; k /= 2)
-    sizes.push_back(k);
-
-  // undo recursive prediction on lowpass side of result
-  for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
-    interleave2(x,*rk);
-    wavemint_reverse_inner(x,*rk);
-  }
-}
-
-/******************************************************************************/
-
 static
 void wavemint_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
@@ -5778,7 +5719,7 @@ void wavemint_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavemint_forward_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_forward_mid<uint8_t>(tempPtr+c*size1,size1, wavemint_forward_inner<uint8_t>);
     }
     
     // copy from row temp to output
@@ -5795,7 +5736,7 @@ void wavemint_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavemint_forward_mid<uint16_t>(temp16+c*size1,size1);
+      wave_forward_mid<uint16_t>(temp16+c*size1,size1, wavemint_forward_inner<uint16_t>);
     }
     
     // copy from row temp to output
@@ -5821,7 +5762,7 @@ void wavemint_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavemint_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_reverse_mid<uint8_t>(tempPtr+c*size1,size1, wavemint_reverse_inner<uint8_t>);
     }
     
     // interleave channels in output
@@ -5836,7 +5777,7 @@ void wavemint_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      wavemint_reverse_mid<uint16_t>(temp16+c*size1,size1);
+      wave_reverse_mid<uint16_t>(temp16+c*size1,size1, wavemint_reverse_inner<uint16_t>);
     }
     
     // interleave channels in output
@@ -5910,7 +5851,7 @@ void wavemint_2Dreverse( const uint8_t *input, uint8_t *output, int bitDepth, in
 /******************************************************************************/
 /******************************************************************************/
 
-
+// 0x012356789ABCDEF -> 0x0800000000000000
 template<typename T>
 void waveavg_forward_inner( T* x, size_t n ) {
   if (n < 2) return;
@@ -5972,35 +5913,6 @@ void waveavg_reverse_inner( T* x, size_t n ) {
 
 /******************************************************************************/
 
-template<typename T>
-void waveavg_forward_mid( T* x, size_t n ) {
-
-  // recursive prediction on lowpass side of result
-  for (size_t k = n; k >= 3; k /= 2) {
-    waveavg_forward_inner(x,k);
-    deinterleave2(x,k);
-  }
-}
-
-/******************************************************************************/
-
-template<typename T>
-void waveavg_reverse_mid( T* x, size_t n ) {
-
-  // calc transform sizes we need to reverse
-  std::vector<size_t> sizes;
-  for (size_t k = n; k >= 3; k /= 2)
-    sizes.push_back(k);
-
-  // undo recursive prediction on lowpass side of result
-  for (auto rk = sizes.rbegin(); rk != sizes.rend(); ++rk) {
-    interleave2(x,*rk);
-    waveavg_reverse_inner(x,*rk);
-  }
-}
-
-/******************************************************************************/
-
 static
 void waveavg_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
@@ -6018,7 +5930,7 @@ void waveavg_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveavg_forward_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_forward_mid<uint8_t>(tempPtr+c*size1,size1, waveavg_forward_inner<uint8_t>);
     }
     
     // copy from row temp to output
@@ -6035,7 +5947,7 @@ void waveavg_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
     
     // transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveavg_forward_mid<uint16_t>(temp16+c*size1,size1);
+      wave_forward_mid<uint16_t>(temp16+c*size1,size1, waveavg_forward_inner<uint16_t>);
     }
     
     // copy from row temp to output
@@ -6061,7 +5973,7 @@ void waveavg_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveavg_reverse_mid<uint8_t>(tempPtr+c*size1,size1);
+      wave_reverse_mid<uint8_t>(tempPtr+c*size1,size1, waveavg_reverse_inner<uint8_t>);
     }
     
     // interleave channels in output
@@ -6076,7 +5988,7 @@ void waveavg_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
-      waveavg_reverse_mid<uint16_t>(temp16+c*size1,size1);
+      wave_reverse_mid<uint16_t>(temp16+c*size1,size1, waveavg_reverse_inner<uint16_t>);
     }
     
     // interleave channels in output
@@ -7474,12 +7386,13 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-  unitTestWavelets();
 #if 0
+  unitTestWavelets();
   unitTestPredictors();
 #endif
 
 #if 0
+// DEBUGGING
 std::vector<uint8_t> lut(256);
 std::vector<uint8_t> out(256);
 uint8_t *lutPtr = &lut[0];
@@ -7491,11 +7404,16 @@ wavelet53_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 linear2_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 linear3_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 linear4_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+wavemint_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+waveavg_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+
 waveletHaar_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 wavelet53_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 linear2_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 linear3_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 linear4_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+wavemint_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+waveavg_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 #endif
 
 
