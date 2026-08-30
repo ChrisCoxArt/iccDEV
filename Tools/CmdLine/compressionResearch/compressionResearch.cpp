@@ -209,6 +209,8 @@ static func_predictor wavelet53_forward;
 static func_predictor wavelet53_reverse;
 static func_predictor waveletHaar_forward;
 static func_predictor waveletHaar_reverse;
+static func_predictor linear_forward;
+static func_predictor linear_reverse;
 static func_predictor linear2_forward;
 static func_predictor linear2_reverse;
 static func_predictor linear3_forward;
@@ -245,6 +247,8 @@ static func_predictor Paeth_forward;
 static func_predictor Paeth_reverse;
 static func_predictor MinGrad_forward;
 static func_predictor MinGrad_reverse;
+static func_predictor bilinear_forward;
+static func_predictor bilinear_reverse;
 static func_predictor wavelet53_2Dforward;
 static func_predictor wavelet53_2Dreverse;
 static func_predictor wavemint_2Dforward;
@@ -396,6 +400,7 @@ std::vector<predictor_desc> predictorList =
  { "GamutBinaryXOR", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbinxor_forward, gamutbinxor_reverse },
  { "Previous", PREDICTOR_TYPE_1D, FLAG_NONE, prev_forward, prev_reverse },
  { "Next", PREDICTOR_TYPE_1D, FLAG_NONE, next_forward, next_reverse },
+ { "Linear", PREDICTOR_TYPE_1D, FLAG_NONE, linear_forward, linear_reverse },
  { "Linear2", PREDICTOR_TYPE_1D, FLAG_NONE, linear2_forward, linear2_reverse },
  { "Linear3", PREDICTOR_TYPE_1D, FLAG_NONE, linear3_forward, linear3_reverse },
  { "Linear4", PREDICTOR_TYPE_1D, FLAG_NONE, linear4_forward, linear4_reverse },
@@ -419,7 +424,8 @@ std::vector<predictor_desc> predictorList =
  { "WaveletHaarSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<waveletHaar_forward>, unsplitwrap<waveletHaar_reverse> },
  { "WavemintSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<wavemint_forward>, unsplitwrap<wavemint_reverse> },
  { "WaveavgSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<waveavg_forward>, unsplitwrap<waveavg_reverse> },
-
+ { "LinearSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear_forward>, unsplitwrap<linear_reverse> },
+ { "LinearSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear_forward>, unsplitwrap<linear_reverse> },
  { "Linear2Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
  { "Linear2SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear2_forward>, unsplitwrap<linear2_reverse> },
  { "Linear3Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear3_forward>, unsplitwrap<linear3_reverse> },
@@ -438,6 +444,7 @@ std::vector<predictor_desc> predictorList =
  { "MED", PREDICTOR_TYPE_2D, FLAG_NONE, MED_forward, MED_reverse },
  { "Paeth", PREDICTOR_TYPE_2D, FLAG_NONE, Paeth_forward, Paeth_reverse },
  { "MinGrad", PREDICTOR_TYPE_2D, FLAG_NONE, MinGrad_forward, MinGrad_reverse },
+ { "Bilinear", PREDICTOR_TYPE_2D, FLAG_NONE, bilinear_forward, bilinear_reverse },
  { "Wavelet53_2D", PREDICTOR_TYPE_2D, FLAG_NONE, wavelet53_2Dforward, wavelet53_2Dreverse },
  { "Wavemint_2D", PREDICTOR_TYPE_2D, FLAG_NONE, wavemint_2Dforward, wavemint_2Dreverse },
  { "Waveavg_2D", PREDICTOR_TYPE_2D, FLAG_NONE, waveavg_2Dforward, waveavg_2Dreverse },
@@ -465,10 +472,13 @@ std::vector<predictor_desc> predictorList =
  { "PaethSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<Paeth_forward>, unsplitchannelswrap<Paeth_reverse> },
  { "MinGradSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<MinGrad_forward>, unsplitwrap<MinGrad_reverse> },
  { "MinGradSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<MinGrad_forward>, unsplitchannelswrap<MinGrad_reverse> },
+ { "BilinearSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<bilinear_forward>, unsplitwrap<bilinear_reverse> },
+ { "BilinearSplitChan", PREDICTOR_TYPE_2D, FLAG_NONE, splitchannelswrap<bilinear_forward>, unsplitchannelswrap<bilinear_reverse> },
  { "Wavelet53_2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavelet53_2Dforward>, unsplitwrap<wavelet53_2Dreverse> },
  { "Wavemint_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavemint_2Dforward>, unsplitwrap<wavemint_2Dreverse> },
  { "Waveavg_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<waveavg_2Dforward>, unsplitwrap<waveavg_2Dreverse> },
 
+#if 0
  { "Prev3D", PREDICTOR_TYPE_3D, FLAG_NONE, prev3D_forward, prev3D_reverse },
  { "Next3D", PREDICTOR_TYPE_3D, FLAG_NONE, next3D_forward, next3D_reverse },
  { "Up3D", PREDICTOR_TYPE_3D, FLAG_NONE, up3D_forward, up3D_reverse },
@@ -492,6 +502,7 @@ std::vector<predictor_desc> predictorList =
  { "Max3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
+#endif
 
 };
 
@@ -4563,6 +4574,329 @@ void median3D_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
 
 /******************************************************************************/
 
+// Simple end point interpolation
+// 0123456789ABCDEF -> 000000000000000F
+// NOTE - adding rounding increased size in many cases
+static
+void linear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 3) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
+    }
+    for (size_t x = 1; x < (size1-1); ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        // first + (last-first)*fraction
+        uint8_t pred = (uint8_t) (output[c] + (((int)output[(size1-1)*colStep+c] - (int)output[c]) * x)/(size1-1));
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
+    }
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        // first + (last-first)*fraction
+        uint16_t pred = (uint16_t) (output16[c] + (((int)output16[(size1-1)*colStep+c] - (int)output16[c]) * x)/(size1-1));
+        output16[x*colStep+c] = input16[x*colStep+c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void linear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 < 2) {
+    prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
+    }
+    for (size_t x = 1; x < (size1-1); ++x) {
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t) (output[c] + (((int)output[(size1-1)*colStep+c] - (int)output[c]) * x)/(size1-1));
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
+    }
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        // first + (last-first)*fraction
+        uint16_t pred = (uint16_t) (output16[c] + (((int)output16[(size1-1)*colStep+c] - (int)output16[c]) * x)/(size1-1));
+        output16[x*colStep+c] = input16[x*colStep+c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+// 2D end point interpolation
+static
+void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (size1 < 3 || size2 < 3) {
+    prev2D_forward(input,output,bitDepth,channels,size1,size2,0,colStep,rowStep,0);
+    return;
+  }
+  
+  if (bitDepth == 8) {
+    // copy 4 corner pixels
+    size_t UL = 0;
+    size_t UR = (size1-1)*colStep;
+    size_t LL = (size2-1)*rowStep;
+    size_t LR = UR + LL;
+
+    for (int c = 0; c < channels; ++c) {
+      output[UL+c] = input[UL+c];
+      output[UR+c] = input[UR+c];
+      output[LL+c] = input[LL+c];
+      output[LR+c] = input[LR+c];
+    }
+    
+    // linear interpolate 4 edges and diff
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/(size1-1));
+        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/(size1-1));
+        output[UL+x*colStep+c] = input[UL+x*colStep+c] - predT;
+        output[LL+x*colStep+c] = input[LL+x*colStep+c] - predB;
+      }
+    }
+    for (size_t y = 1; y < (size2-1); ++y) {
+      for (int c = 0; c < channels; ++c) {
+        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/(size2-1));
+        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/(size2-1));
+        output[UL+y*rowStep+c] = input[UL+y*rowStep+c] - predL;
+        output[UR+y*rowStep+c] = input[UR+y*rowStep+c] - predR;
+      }
+    }
+    
+    // bilinear interpolate interior
+    for (size_t y = 1; y < (size2-1); ++y) {
+      const uint8_t *inY = input + y*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      for (size_t x = 1; x < (size1-1); ++x) {
+        const uint8_t *inX = inY + x*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+// TODO - should interpolate from corners?
+          uint8_t pred = (uint8_t) (inY[0+c] + (((int)inY[UR+c] - (int)inY[0+c]) * x)/(size1-1));
+          outX[c] = inX[c] - pred;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    size_t UL = 0;
+    size_t UR = (size1-1)*colStep;
+    size_t LL = (size2-1)*rowStep;
+    size_t LR = UR + LL;
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+  
+    for (int c = 0; c < channels; ++c) {
+      output16[UL+c] = input16[UL+c];
+      output16[UR+c] = input16[UR+c];
+      output16[LL+c] = input16[LL+c];
+      output16[LR+c] = input16[LR+c];
+    }
+    
+    // linear interpolate 4 edges and diff
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/(size1-1));
+        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/(size1-1));
+        output16[UL+x*colStep+c] = input16[UL+x*colStep+c] - predT;
+        output16[LL+x*colStep+c] = input16[LL+x*colStep+c] - predB;
+      }
+    }
+    for (size_t y = 1; y < (size2-1); ++y) {
+      for (int c = 0; c < channels; ++c) {
+        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/(size2-1));
+        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/(size2-1));
+        output16[UL+y*rowStep+c] = input16[UL+y*rowStep+c] - predL;
+        output16[UR+y*rowStep+c] = input16[UR+y*rowStep+c] - predR;
+      }
+    }
+    
+    // bilinear interpolate interior
+    for (size_t y = 1; y < (size2-1); ++y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      for (size_t x = 1; x < (size1-1); ++x) {
+        const uint16_t *inX = inY + x*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+// TODO - should interpolate from corners?
+          uint16_t pred = (uint16_t) (inY[0+c] + (((int)inY[UR+c] - (int)inY[0+c]) * x)/(size1-1));
+          outX[c] = inX[c] - pred;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
+static
+void bilinear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t size2, size_t /*size3*/,
+                size_t colStep, size_t rowStep, size_t /*planeStep*/ )
+{
+  if (size1 < 3 || size2 < 3) {
+    prev2D_reverse(input,output,bitDepth,channels,size1,size2,0,colStep,rowStep,0);
+    return;
+  }
+
+  if (bitDepth == 8) {
+    // copy 4 corner pixels
+    size_t UL = 0;
+    size_t UR = (size1-1)*colStep;
+    size_t LL = (size2-1)*rowStep;
+    size_t LR = UR + LL;
+
+    for (int c = 0; c < channels; ++c) {
+      output[UL+c] = input[UL+c];
+      output[UR+c] = input[UR+c];
+      output[LL+c] = input[LL+c];
+      output[LR+c] = input[LR+c];
+    }
+    
+    // linear interpolate 4 edges and diff
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/(size1-1));
+        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/(size1-1));
+        output[UL+x*colStep+c] = input[UL+x*colStep+c] + predT;
+        output[LL+x*colStep+c] = input[LL+x*colStep+c] + predB;
+      }
+    }
+    for (size_t y = 1; y < (size2-1); ++y) {
+      for (int c = 0; c < channels; ++c) {
+        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/(size2-1));
+        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/(size2-1));
+        output[UL+y*rowStep+c] = input[UL+y*rowStep+c] + predL;
+        output[UR+y*rowStep+c] = input[UR+y*rowStep+c] + predR;
+      }
+    }
+
+    // bilinear interpolate interior
+    for (size_t y = 1; y < (size2-1); ++y) {
+      const uint8_t *inY = input + y*rowStep;
+      uint8_t *outY = output + y*rowStep;
+      for (size_t x = 1; x < (size1-1); ++x) {
+        const uint8_t *inX = inY + x*colStep;
+        uint8_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+          // use the already interpolated sides
+          uint8_t pred = (uint8_t) (outY[0+c] + (((int)outY[UR+c] - (int)outY[0+c]) * x)/(size1-1));
+          outX[c] = inX[c] + pred;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 8 bit
+
+  if (bitDepth == 16) {
+    size_t UL = 0;
+    size_t UR = (size1-1)*colStep;
+    size_t LL = (size2-1)*rowStep;
+    size_t LR = UR + LL;
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+  
+    for (int c = 0; c < channels; ++c) {
+      output16[UL+c] = input16[UL+c];
+      output16[UR+c] = input16[UR+c];
+      output16[LL+c] = input16[LL+c];
+      output16[LR+c] = input16[LR+c];
+    }
+    
+    // linear interpolate 4 edges and diff
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/(size1-1));
+        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/(size1-1));
+        output16[UL+x*colStep+c] = input16[UL+x*colStep+c] + predT;
+        output16[LL+x*colStep+c] = input16[LL+x*colStep+c] + predB;
+      }
+    }
+    for (size_t y = 1; y < (size2-1); ++y) {
+      for (int c = 0; c < channels; ++c) {
+        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/(size2-1));
+        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/(size2-1));
+        output16[UL+y*rowStep+c] = input16[UL+y*rowStep+c] + predL;
+        output16[UR+y*rowStep+c] = input16[UR+y*rowStep+c] + predR;
+      }
+    }
+    
+    // bilinear interpolate interior
+    for (size_t y = 1; y < (size2-1); ++y) {
+      const uint16_t *inY = input16 + y*rowStep;
+      uint16_t *outY = output16 + y*rowStep;
+      for (size_t x = 1; x < (size1-1); ++x) {
+        const uint16_t *inX = inY + x*colStep;
+        uint16_t *outX = outY + x*colStep;
+        for (int c = 0; c < channels; ++c) {
+// TODO - should interpolate from corners?
+          uint16_t pred = (uint16_t) (outY[0+c] + (((int)outY[UR+c] - (int)outY[0+c]) * x)/(size1-1));
+          outX[c] = inX[c] + pred;   // overflow/underflow is intentional
+        }
+      }  // end x loop
+    }   // end y loop
+  } // end 16 bit
+
+}
+
+/******************************************************************************/
+
 // Simple 2 value linear predictor
 // 0123456789ABCDEF -> 0100000000000000
 static
@@ -5650,11 +5984,12 @@ void waveletHaar_reverse( const uint8_t *input, uint8_t *output, int bitDepth, i
 /******************************************************************************/
 
 /*
+"wavelet minimum"?  "wavemin"?  "minimum wavelet"?
 While trying to name this, RedHotChiliPeppers sang:
 "Go write your message on the pavement (Oh-oh)
  Burn so bright, I wonder what the wave meant"
  
- 0x012356789ABCDEF -> 0x048C22211110000
+ 0x012356789ABCDEF -> 0x048C222211111111
  */
 template<typename T>
 void wavemint_forward_inner( T* x, size_t n ) {
@@ -5851,6 +6186,26 @@ void wavemint_2Dreverse( const uint8_t *input, uint8_t *output, int bitDepth, in
 /******************************************************************************/
 /******************************************************************************/
 
+/*
+
+Hypothesis: the low frequency calculations in wavelets are counterproductive/useless
+in image compression.  Leaving values as-is, aka point sampling, compressses better.
+
+Secondary: for images, applying a previous predictor to the low frequency leftovers
+may improve compression.
+
+Does reversing the resulting stream improve compression (high freq, lower values first)?
+     harder to manage for 2D/3D?
+     reverse always:  Sometimes improves, sometimes a small loss.
+     reverse horizontal only: sometimes improves, sometimes a small loss.
+
+Does interleaving the output help?  LLL HHH
+  much worse on some output, only slightly better on others
+
+Reverse and interleave?
+  some slightly better (10%), some much worse (2x)
+
+ */
 // 0x012356789ABCDEF -> 0x0800000000000000
 template<typename T>
 void waveavg_forward_inner( T* x, size_t n ) {
@@ -5859,7 +6214,7 @@ void waveavg_forward_inner( T* x, size_t n ) {
   // Predict step (odd samples)
   // Right boundary extension (symmetric)
   if (n > 2)
-    x[n-1] -= (x[n-2] - x[n-3]) + x[n-2]; // extrapolation from 2 previous terms
+    x[n-1] -= (2*x[n-2] - x[n-3]); // extrapolation from 2 previous terms
   else
     x[n-1] -= x[n-2];
   for (size_t i = 1; i < (n - 1); i += 2) {
@@ -5869,8 +6224,7 @@ void waveavg_forward_inner( T* x, size_t n ) {
 
   // Update step (even samples)
 #if 0
-// fails on reverse
-  for (size_t i = 2; i < n; i += 2) {
+  for ( size_t i=((n-1)&~1); i >= 2; i-=2) {
     x[i] -= x[i-2];
   }
 #endif
@@ -5919,7 +6273,7 @@ void waveavg_reverse_inner( T* x, size_t n ) {
     x[i] += (x[i-1] + x[i+1]) / 2;
   }
   if (n > 2)
-    x[n-1] += (x[n-2] - x[n-3]) + x[n-2]; // extrapolation from 2 previous terms
+    x[n-1] += (2*x[n-2] - x[n-3]); // extrapolation from 2 previous terms
   else
     x[n-1] += x[n-2];
 }
@@ -5946,8 +6300,12 @@ void waveavg_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
       wave_forward_mid<uint8_t>(tempPtr+c*size1,size1, waveavg_forward_inner<uint8_t>, 3);
     }
     
+//    if (colStep == channels)
+//    std::reverse( tempPtr, tempPtr+size1*channels );
+    
     // copy from row temp to output
     stepCopy( tempPtr, output, channels, size1, channels, colStep );
+//    interleaveChannels( tempPtr, output, channels, size1, colStep );
   }
 
   if (bitDepth == 16) {
@@ -5963,8 +6321,12 @@ void waveavg_forward( const uint8_t *input, uint8_t *output, int bitDepth, int c
       wave_forward_mid<uint16_t>(temp16+c*size1,size1, waveavg_forward_inner<uint16_t>, 3);
     }
     
+//    if (colStep == channels)
+//    std::reverse( temp16, temp16+size1*channels );
+    
     // copy from row temp to output
     stepCopy( temp16, output16, channels, size1, channels, colStep );
+//    interleaveChannels( temp16, output16, channels, size1, colStep );
   }
 }
 
@@ -5983,6 +6345,10 @@ void waveavg_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 
   if (bitDepth == 8) {
     stepCopy( input, tempPtr, channels, size1, colStep, channels );
+//    deinterleaveChannels(input, tempPtr, channels, size1, colStep );
+    
+//    if (colStep == channels)
+//    std::reverse( tempPtr, tempPtr+size1*channels );
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
@@ -5998,6 +6364,10 @@ void waveavg_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
     uint16_t *temp16 = (uint16_t*)tempPtr;
     uint16_t *output16 = (uint16_t*)output;
     stepCopy( input16, temp16, channels, size1, colStep, channels );
+//    deinterleaveChannels(input16, temp16, channels, size1, colStep );
+    
+//    if (colStep == channels)
+//    std::reverse( temp16, temp16+size1*channels );
     
     // reverse transform each channel
     for (int c = 0; c < channels; ++c) {
@@ -7399,7 +7769,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 0
+#if 1
   unitTestWavelets();
   unitTestPredictors();
 #endif
