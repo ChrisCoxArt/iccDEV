@@ -75,6 +75,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <set>
 #include "IccProfile.h"
 #include "IccTag.h"
 #include "IccUtil.h"
@@ -409,6 +410,7 @@ std::vector<predictor_desc> predictorList =
  { "Wavemint", PREDICTOR_TYPE_1D, FLAG_NONE, wavemint_forward, wavemint_reverse },
  { "Waveavg", PREDICTOR_TYPE_1D, FLAG_NONE, waveavg_forward, waveavg_reverse },
 
+
 // splits should only be used if depth > 8
  { "IdentitySplit", PREDICTOR_TYPE_1D, FLAG_1D_ONLY, splitwrap<identity_forward>, unsplitwrap<identity_reverse> },
  { "GamutBinarySplit", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, splitwrap<gamutbin_forward>, unsplitwrap<gamutbin_reverse> },
@@ -478,7 +480,6 @@ std::vector<predictor_desc> predictorList =
  { "Wavemint_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavemint_2Dforward>, unsplitwrap<wavemint_2Dreverse> },
  { "Waveavg_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<waveavg_2Dforward>, unsplitwrap<waveavg_2Dreverse> },
 
-#if 0
  { "Prev3D", PREDICTOR_TYPE_3D, FLAG_NONE, prev3D_forward, prev3D_reverse },
  { "Next3D", PREDICTOR_TYPE_3D, FLAG_NONE, next3D_forward, next3D_reverse },
  { "Up3D", PREDICTOR_TYPE_3D, FLAG_NONE, up3D_forward, up3D_reverse },
@@ -502,7 +503,6 @@ std::vector<predictor_desc> predictorList =
  { "Max3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
-#endif
 
 };
 
@@ -4675,6 +4675,8 @@ void linear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
 /******************************************************************************/
 
 // 2D end point interpolation
+// should be good for A2B tables
+// Currently estimates a bit high compared to real table, resulting in a lot of negatives
 static
 void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t size2, size_t /*size3*/,
@@ -4685,13 +4687,15 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
     return;
   }
   
+  const size_t UL = 0;
+  const size_t UR = (size1-1)*colStep;
+  const size_t LL = (size2-1)*rowStep;
+  const size_t LR = UR + LL;
+  const int rangeX = (int)(size1 - 1);
+  const int rangeY = (int)(size2 - 1);
+  
   if (bitDepth == 8) {
     // copy 4 corner pixels
-    size_t UL = 0;
-    size_t UR = (size1-1)*colStep;
-    size_t LL = (size2-1)*rowStep;
-    size_t LR = UR + LL;
-
     for (int c = 0; c < channels; ++c) {
       output[UL+c] = input[UL+c];
       output[UR+c] = input[UR+c];
@@ -4700,33 +4704,34 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
     }
     
     // linear interpolate 4 edges and diff
-    for (size_t x = 1; x < (size1-1); ++x) {
+    for (int x = 1; x < rangeX; ++x) {
       for (int c = 0; c < channels; ++c) {
-        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/(size1-1));
-        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/(size1-1));
+        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/rangeX);
+        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/rangeX);
         output[UL+x*colStep+c] = input[UL+x*colStep+c] - predT;
         output[LL+x*colStep+c] = input[LL+x*colStep+c] - predB;
       }
     }
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       for (int c = 0; c < channels; ++c) {
-        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/(size2-1));
-        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/(size2-1));
+        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
+        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
         output[UL+y*rowStep+c] = input[UL+y*rowStep+c] - predL;
         output[UR+y*rowStep+c] = input[UR+y*rowStep+c] - predR;
       }
     }
     
     // bilinear interpolate interior
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       const uint8_t *inY = input + y*rowStep;
       uint8_t *outY = output + y*rowStep;
-      for (size_t x = 1; x < (size1-1); ++x) {
+      for (int x = 1; x < rangeX; ++x) {
         const uint8_t *inX = inY + x*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-// TODO - should interpolate from corners?
-          uint8_t pred = (uint8_t) (inY[0+c] + (((int)inY[UR+c] - (int)inY[0+c]) * x)/(size1-1));
+          int left =  (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
+          int right = (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
+          uint8_t pred = (uint8_t) (left + ((right - left) * x)/rangeX);
           outX[c] = inX[c] - pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -4734,10 +4739,6 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
   } // end 8 bit
 
   if (bitDepth == 16) {
-    size_t UL = 0;
-    size_t UR = (size1-1)*colStep;
-    size_t LL = (size2-1)*rowStep;
-    size_t LR = UR + LL;
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
   
@@ -4749,34 +4750,38 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
     }
     
     // linear interpolate 4 edges and diff
-    for (size_t x = 1; x < (size1-1); ++x) {
+    for (int x = 1; x < rangeX; ++x) {
+      size_t offsetX = x*colStep;
       for (int c = 0; c < channels; ++c) {
-        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/(size1-1));
-        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/(size1-1));
-        output16[UL+x*colStep+c] = input16[UL+x*colStep+c] - predT;
-        output16[LL+x*colStep+c] = input16[LL+x*colStep+c] - predB;
+        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/rangeX);
+        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/rangeX);
+        output16[UL+offsetX+c] = input16[UL+offsetX+c] - predT;
+        output16[LL+offsetX+c] = input16[LL+offsetX+c] - predB;
       }
     }
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
+      size_t offsetY = y*rowStep;
       for (int c = 0; c < channels; ++c) {
-        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/(size2-1));
-        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/(size2-1));
-        output16[UL+y*rowStep+c] = input16[UL+y*rowStep+c] - predL;
-        output16[UR+y*rowStep+c] = input16[UR+y*rowStep+c] - predR;
+        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/rangeY);
+        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/rangeY);
+        output16[UL+offsetY+c] = input16[UL+offsetY+c] - predL;
+        output16[UR+offsetY+c] = input16[UR+offsetY+c] - predR;
       }
     }
     
     // bilinear interpolate interior
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       const uint16_t *inY = input16 + y*rowStep;
       uint16_t *outY = output16 + y*rowStep;
-      for (size_t x = 1; x < (size1-1); ++x) {
+      for (int x = 1; x < rangeX; ++x) {
         const uint16_t *inX = inY + x*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-// TODO - should interpolate from corners?
-          uint16_t pred = (uint16_t) (inY[0+c] + (((int)inY[UR+c] - (int)inY[0+c]) * x)/(size1-1));
-          outX[c] = inX[c] - pred;   // overflow/underflow is intentional
+          int left =  (input16[UL+c] + (((int)input16[LL+c] - (int)input16[UL+c]) * y)/rangeY);
+          int right = (input16[UR+c] + (((int)input16[LR+c] - (int)input16[UR+c]) * y)/rangeY);
+          uint16_t pred = (uint16_t) (left + ((right - left) * x)/rangeX);
+          uint16_t inValue = inX[c];
+          outX[c] = inValue - pred;   // overflow/underflow is intentional
         }
       }  // end x loop
     }   // end y loop
@@ -4795,49 +4800,52 @@ void bilinear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
     prev2D_reverse(input,output,bitDepth,channels,size1,size2,0,colStep,rowStep,0);
     return;
   }
+  
+  const size_t UL = 0;
+  const size_t UR = (size1-1)*colStep;
+  const size_t LL = (size2-1)*rowStep;
+  const size_t LR = UR + LL;
+  const int rangeX = (int)(size1 - 1);
+  const int rangeY = (int)(size2 - 1);
 
   if (bitDepth == 8) {
     // copy 4 corner pixels
-    size_t UL = 0;
-    size_t UR = (size1-1)*colStep;
-    size_t LL = (size2-1)*rowStep;
-    size_t LR = UR + LL;
-
     for (int c = 0; c < channels; ++c) {
       output[UL+c] = input[UL+c];
       output[UR+c] = input[UR+c];
       output[LL+c] = input[LL+c];
       output[LR+c] = input[LR+c];
     }
-    
+
     // linear interpolate 4 edges and diff
-    for (size_t x = 1; x < (size1-1); ++x) {
+    for (int x = 1; x < rangeX; ++x) {
       for (int c = 0; c < channels; ++c) {
-        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/(size1-1));
-        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/(size1-1));
+        uint8_t predT = (uint8_t) (output[UL+c] + (((int)output[UR+c] - (int)output[UL+c]) * x)/rangeX);
+        uint8_t predB = (uint8_t) (output[LL+c] + (((int)output[LR+c] - (int)output[LL+c]) * x)/rangeX);
         output[UL+x*colStep+c] = input[UL+x*colStep+c] + predT;
         output[LL+x*colStep+c] = input[LL+x*colStep+c] + predB;
       }
     }
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       for (int c = 0; c < channels; ++c) {
-        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/(size2-1));
-        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/(size2-1));
+        uint8_t predL = (uint8_t) (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
+        uint8_t predR = (uint8_t) (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
         output[UL+y*rowStep+c] = input[UL+y*rowStep+c] + predL;
         output[UR+y*rowStep+c] = input[UR+y*rowStep+c] + predR;
       }
     }
 
     // bilinear interpolate interior
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       const uint8_t *inY = input + y*rowStep;
       uint8_t *outY = output + y*rowStep;
-      for (size_t x = 1; x < (size1-1); ++x) {
+      for (int x = 1; x < rangeX; ++x) {
         const uint8_t *inX = inY + x*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-          // use the already interpolated sides
-          uint8_t pred = (uint8_t) (outY[0+c] + (((int)outY[UR+c] - (int)outY[0+c]) * x)/(size1-1));
+          int left =  (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
+          int right = (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
+          uint8_t pred = (uint8_t) (left + ((right - left) * x)/rangeX);
           outX[c] = inX[c] + pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -4845,48 +4853,47 @@ void bilinear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
   } // end 8 bit
 
   if (bitDepth == 16) {
-    size_t UL = 0;
-    size_t UR = (size1-1)*colStep;
-    size_t LL = (size2-1)*rowStep;
-    size_t LR = UR + LL;
     uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
-  
+
     for (int c = 0; c < channels; ++c) {
       output16[UL+c] = input16[UL+c];
       output16[UR+c] = input16[UR+c];
       output16[LL+c] = input16[LL+c];
       output16[LR+c] = input16[LR+c];
     }
-    
+
     // linear interpolate 4 edges and diff
-    for (size_t x = 1; x < (size1-1); ++x) {
+    for (int x = 1; x < rangeX; ++x) {
+      size_t offsetX = x*colStep;
       for (int c = 0; c < channels; ++c) {
-        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/(size1-1));
-        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/(size1-1));
-        output16[UL+x*colStep+c] = input16[UL+x*colStep+c] + predT;
-        output16[LL+x*colStep+c] = input16[LL+x*colStep+c] + predB;
+        uint16_t predT = (uint16_t) (output16[UL+c] + (((int)output16[UR+c] - (int)output16[UL+c]) * x)/rangeX);
+        uint16_t predB = (uint16_t) (output16[LL+c] + (((int)output16[LR+c] - (int)output16[LL+c]) * x)/rangeX);
+        output16[UL+offsetX+c] = input16[UL+offsetX+c] + predT;
+        output16[LL+offsetX+c] = input16[LL+offsetX+c] + predB;
       }
     }
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
+      size_t offsetY = y*rowStep;
       for (int c = 0; c < channels; ++c) {
-        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/(size2-1));
-        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/(size2-1));
-        output16[UL+y*rowStep+c] = input16[UL+y*rowStep+c] + predL;
-        output16[UR+y*rowStep+c] = input16[UR+y*rowStep+c] + predR;
+        uint16_t predL = (uint16_t) (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/rangeY);
+        uint16_t predR = (uint16_t) (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/rangeY);
+        output16[UL+offsetY+c] = input16[UL+offsetY+c] + predL;
+        output16[UR+offsetY+c] = input16[UR+offsetY+c] + predR;
       }
     }
-    
+
     // bilinear interpolate interior
-    for (size_t y = 1; y < (size2-1); ++y) {
+    for (int y = 1; y < rangeY; ++y) {
       const uint16_t *inY = input16 + y*rowStep;
       uint16_t *outY = output16 + y*rowStep;
-      for (size_t x = 1; x < (size1-1); ++x) {
+      for (int x = 1; x < rangeX; ++x) {
         const uint16_t *inX = inY + x*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
-// TODO - should interpolate from corners?
-          uint16_t pred = (uint16_t) (outY[0+c] + (((int)outY[UR+c] - (int)outY[0+c]) * x)/(size1-1));
+          int left =  (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/rangeY);
+          int right = (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/rangeY);
+          uint16_t pred = (uint16_t) (left + ((right - left) * x)/rangeX);
           outX[c] = inX[c] + pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -6936,7 +6943,7 @@ void processMBBType(CIccProfile *pIcc, CIccTag *tag, const std::string &sigDesc,
     LogAnError(stderr, "%s: Skipping %s: unable to convert LUT\n", basename.c_str(), sigDesc.c_str());
     return;
   }
-
+  
   std::string description;
   if (describe3DLUT( lut, pIcc, description, sigDesc, basename)) {
     return;
@@ -7121,13 +7128,24 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
     printf("\n"); // and finish the labels line
   }
 
+  // keep track of nD LUTs we've already visitied, to avoid aliases
+  std::set<uint32_t> offsets_tested;
+
   for ( auto &tag: pIcc->m_Tags ) {
     icTagSignature sig = tag.TagInfo.sig;
     //icTagTypeSignature typeSig = tag.pTag->GetType(); // unused
 
+    // don't repeat the same tag with aliases
+    uint32_t thisOffset = tag.TagInfo.offset;
+    if (offsets_tested.find(thisOffset) != offsets_tested.end())
+      continue;
+          
+    // add this tag to our list of already processed tags
+    offsets_tested.insert( thisOffset );
+
+
 // Switching by data type is easier from a programmming standpoint.
 // But name will limit us to known tags and ignore bogus tags.
-
     switch ((uint32_t)sig) {
 
       // 1D LUTs
@@ -7209,6 +7227,7 @@ void processProfile( CIccProfile *pIcc, const std::string &basename )
         break;
 
     }   // end switch over tag signatures
+    
   }   // end loop over tags
 
 }   // end processProfile()
@@ -7769,7 +7788,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 1
+#if 0
   unitTestWavelets();
   unitTestPredictors();
 #endif
