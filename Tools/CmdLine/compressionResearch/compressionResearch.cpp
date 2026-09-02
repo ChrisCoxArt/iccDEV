@@ -479,7 +479,7 @@ std::vector<predictor_desc> predictorList =
  { "Wavelet53_2DSplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavelet53_2Dforward>, unsplitwrap<wavelet53_2Dreverse> },
  { "Wavemint_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<wavemint_2Dforward>, unsplitwrap<wavemint_2Dreverse> },
  { "Waveavg_2Dplit", PREDICTOR_TYPE_2D, FLAG_NONE, splitwrap<waveavg_2Dforward>, unsplitwrap<waveavg_2Dreverse> },
-
+ 
  { "Prev3D", PREDICTOR_TYPE_3D, FLAG_NONE, prev3D_forward, prev3D_reverse },
  { "Next3D", PREDICTOR_TYPE_3D, FLAG_NONE, next3D_forward, next3D_reverse },
  { "Up3D", PREDICTOR_TYPE_3D, FLAG_NONE, up3D_forward, up3D_reverse },
@@ -4729,9 +4729,22 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
         const uint8_t *inX = inY + x*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
+#if 1
+// from sides
+// improvement over corners - still not great
+          int left =   input[UL+y*rowStep+c];
+          int right =  input[UR+y*rowStep+c];
+          int top =    input[UL+x*colStep+c];
+          int bottom = input[LL+x*colStep+c];
+          uint8_t predX = (uint8_t) (left + ((right - left) * x)/rangeX);
+          uint8_t predY = (uint8_t) (top + ((bottom - top) * y)/rangeY);
+          uint8_t pred = std::min(predX,predY);
+//          uint8_t pred = (predX + predY)/2;  // average fared worse
+#else
           int left =  (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
           int right = (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
           uint8_t pred = (uint8_t) (left + ((right - left) * x)/rangeX);
+#endif
           outX[c] = inX[c] - pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -4777,9 +4790,23 @@ void bilinear_forward( const uint8_t *input, uint8_t *output, int bitDepth, int 
         const uint16_t *inX = inY + x*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
+#if 1
+// from sides
+// improvement over corners - still not great
+          int left =  input16[UL+y*rowStep+c];
+          int right = input16[UR+y*rowStep+c];
+          int top = input16[UL+x*colStep+c];
+          int bottom = input16[LL+x*colStep+c];
+          uint16_t predX = (uint16_t) (left + ((right - left) * x)/rangeX);
+          uint16_t predY = (uint16_t) (top + ((bottom - top) * y)/rangeY);
+          uint16_t pred = std::min(predX,predY);
+//          uint16_t pred = (predX + predY)/2;  // average fared worse
+#else
+// from corners
           int left =  (input16[UL+c] + (((int)input16[LL+c] - (int)input16[UL+c]) * y)/rangeY);
           int right = (input16[UR+c] + (((int)input16[LR+c] - (int)input16[UR+c]) * y)/rangeY);
           uint16_t pred = (uint16_t) (left + ((right - left) * x)/rangeX);
+#endif
           uint16_t inValue = inX[c];
           outX[c] = inValue - pred;   // overflow/underflow is intentional
         }
@@ -4843,9 +4870,22 @@ void bilinear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
         const uint8_t *inX = inY + x*colStep;
         uint8_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
+#if 1
+// from sides
+// improvement over corners - still not great
+          int left =   output[UL+y*rowStep+c];
+          int right =  output[UR+y*rowStep+c];
+          int top =    output[UL+x*colStep+c];
+          int bottom = output[LL+x*colStep+c];
+          uint8_t predX = (uint8_t) (left + ((right - left) * x)/rangeX);
+          uint8_t predY = (uint8_t) (top + ((bottom - top) * y)/rangeY);
+          uint8_t pred = std::min(predX,predY);
+//          uint8_t pred = (predX + predY)/2;  // average fared worse
+#else
           int left =  (output[UL+c] + (((int)output[LL+c] - (int)output[UL+c]) * y)/rangeY);
           int right = (output[UR+c] + (((int)output[LR+c] - (int)output[UR+c]) * y)/rangeY);
           uint8_t pred = (uint8_t) (left + ((right - left) * x)/rangeX);
+#endif
           outX[c] = inX[c] + pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -4891,9 +4931,20 @@ void bilinear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int 
         const uint16_t *inX = inY + x*colStep;
         uint16_t *outX = outY + x*colStep;
         for (int c = 0; c < channels; ++c) {
+#if 1
+          int left =  output16[UL+y*rowStep+c];
+          int right = output16[UR+y*rowStep+c];
+          int top = output16[UL+x*colStep+c];
+          int bottom = output16[LL+x*colStep+c];
+          uint16_t predX = (uint16_t) (left + ((right - left) * x)/rangeX);
+          uint16_t predY = (uint16_t) (top + ((bottom - top) * y)/rangeY);
+          uint16_t pred = std::min(predX,predY);
+//          uint16_t pred = (predX + predY)/2;    // worse
+#else
           int left =  (output16[UL+c] + (((int)output16[LL+c] - (int)output16[UL+c]) * y)/rangeY);
           int right = (output16[UR+c] + (((int)output16[LR+c] - (int)output16[UR+c]) * y)/rangeY);
           uint16_t pred = (uint16_t) (left + ((right - left) * x)/rangeX);
+#endif
           outX[c] = inX[c] + pred;   // overflow/underflow is intentional
         }
       }  // end x loop
@@ -7788,7 +7839,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 0
+#if 1
   unitTestWavelets();
   unitTestPredictors();
 #endif
