@@ -22,6 +22,8 @@ maintainer asks for `ci-pr-action` fast-lane validation.
 
 - Prefer a single linear stack for related changes. Each layer must contain one
   independently reviewable concern and target the branch immediately below it.
+- For non-stack branch grooming, use `../../../docs/linear-stack-workflow.md`
+  instead of ad hoc merges or pulls.
 - Use separate stacks for unrelated or parallel work. Do not use a stack to
   combine opportunistic cleanup with the requested change.
 - Before stack work, update the plugin and inspect the tracked state:
@@ -59,8 +61,8 @@ success as merge approval.
 
 Fast lane applies only to an open same-repository PR and runs exact GCC 15.2
 Release LTO plus GCC 15.2 ASAN+UBSAN Debug tool validation. It defaults to
-the latest CTest, with Windows opt-in. Docker verification is scheduled whenever
-the selected PR changes the container surface. It is an accelerator, not a
+the latest CTest, with Windows opt-in. It does not run Docker verification for
+container-surface changes. It is an accelerator, not a
 replacement for required PR gates or the long-cycle `ci_scope=full` gate.
 
 Confirm the target before dispatch:
@@ -92,9 +94,10 @@ gh run watch <run-id> --repo InternationalColorConsortium/iccDEV --exit-status
 ```
 
 Trigger shared-concurrency runs sequentially. Add Windows only when the change
-needs that surface. Docker is required for container-surface changes, including
-the unified Dockerfile, packaged MCP source, and `ci-docker-pr.yml`. Escalate
-to `ci_scope=full` when the changed surface or merge policy requires the long
+needs that surface. Container-surface changes, including the unified Dockerfile,
+packaged MCP source, and `ci-docker-pr.yml`, require local canonical-image
+validation; `ci-pr-action` does not run a Docker PR lane. Escalate to
+`ci_scope=full` when the changed surface or merge policy requires the long
 cycle.
 
 ## References

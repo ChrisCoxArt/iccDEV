@@ -62,6 +62,7 @@
 #include "IccUtilJson.h"
 #include "IccUtil.h"
 #include "IccTagFactory.h"
+#include "IccArrayBasic.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -301,7 +302,22 @@ bool CIccProfileJson::ToJson(std::string &jsonString, int indent)
 // represented in type icUInt32Number". atoi() is also undefined on an
 // out-of-range input, which a digit-by-digit parse of at most two digits cannot
 // hit.
-static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut)
+// bFractional marks the minor component, whose digits are positional: "5.1" is
+// five-and-one-TENTH, so the digit belongs in the high nibble as 0x10, matching
+// the canonical "5.10" that CIccInfo::GetVersionName writes.  Encoding it as the
+// integer 1 gave 0x01 -- 5.01 -- which is #2383.  The XML twin (parseVersion in
+// IccProfileXml.cpp) carries the identical SCALING rule and the same one-or-two
+// digit contract, so a version the two both accept encodes to the same header
+// word.  That is the guarantee -- NOT that the two accept the same inputs.  The
+// XML side is deliberately the more tolerant of the pair, and measurably so:
+//   - it trims surrounding whitespace, because element text is subject to
+//     pretty-printing ("<ProfileVersion>\n  5.10\n</ProfileVersion>");
+//   - it accepts ',' as a component separator, so "5,1" parses there and not here;
+//   - it accepts third and fourth components ("5.10.12.34"), which this parser
+//     hands to a single byte helper that refuses more than two characters.
+// Each of those yields 0 here, which GetVersionName renders as a plain "0.00".
+static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut,
+                               bool bFractional)
 {
   if (sPart.empty() || sPart.size() > 2)
     return false;
@@ -312,6 +328,11 @@ static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut)
       return false;
     v = v * 10 + (unsigned int)(sPart[i] - '0');
   }
+
+  // Keyed on the digit COUNT, not the value, so an explicit "05" still means
+  // five hundredths and stays 0x05 while a bare "5" becomes 0x50.
+  if (bFractional && sPart.size() == 1)
+    v *= 10;
 
   nOut = (icUInt32Number)(((v / 10) % 10) * 16 + (v % 10));
   return true;
@@ -332,7 +353,7 @@ static icUInt32Number icJsonParseBCDVersionStr(const char *szVer)
   for (; *szVer && *szVer != '.'; szVer++) part += *szVer;
 
   icUInt32Number hi = 0, lo = 0;
-  if (!icJsonParseBCDByte(part, hi))
+  if (!icJsonParseBCDByte(part, hi, false))
     return 0;
 
   part.clear();
@@ -341,7 +362,7 @@ static icUInt32Number icJsonParseBCDVersionStr(const char *szVer)
 
   // A missing minor component stays 0 ("4" == "4.0"), matching the previous
   // behaviour; a present but malformed one rejects the whole version.
-  if (!part.empty() && !icJsonParseBCDByte(part, lo))
+  if (!part.empty() && !icJsonParseBCDByte(part, lo, true))
     return 0;
 
   return (hi << 8) | lo;
@@ -485,6 +506,10 @@ bool CIccProfileJson::ParseTag(const std::string &key, const IccJson &tagValue,
       parseStr += "Unable to attach sameAs tag '" + key + "'\n";
       return false;
     }
+    //A shared tag takes the spaces of the signature it was last attached under,
+    //which is how the XML reader resolves a tag node carrying several
+    //TagSignature children.
+    SetTagColorSpaces(sig, pRefTag);
     keyToSig[key] = sig;
     return true;
   }
@@ -551,8 +576,84 @@ bool CIccProfileJson::ParseTag(const std::string &key, const IccJson &tagValue,
     return false;
   }
 
+  //A lut or named colour tag carries no colour spaces of its own: it takes them
+  //from the header of the profile it is attached to. The binary reader does this
+  //in LoadTag() and the XML reader at the end of ParseTag(); without it the tag
+  //keeps the constructor's zeroes, which Validate() then compares against the
+  //tag's real channel counts. Header is parsed before Tags, so m_Header is set.
+  SetTagColorSpaces(sig, pTag);
+
   keyToSig[key] = sig;
   return true;
+}
+
+/**
+******************************************************************************
+* Name: CIccProfileJson::SetTagColorSpaces
+*
+* Purpose: Give a freshly attached tag the header colour spaces its class needs,
+*  matching CIccProfileXml::ParseTag(). The XML set is used rather than the
+*  binary reader's because both are document readers: it carries AToB3/BToA3 and
+*  the HToS tags, which a v5 document can hold and the binary switch omits.
+*
+* Args:
+*  sig = the tag signature the tag was attached under
+*  pTag = the attached tag
+******************************************************************************/
+void CIccProfileJson::SetTagColorSpaces(icTagSignature sig, CIccTag *pTag)
+{
+  if (!pTag)
+    return;
+
+  switch (sig) {
+  case icSigAToB0Tag:
+  case icSigAToB1Tag:
+  case icSigAToB2Tag:
+  case icSigAToB3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.colorSpace, m_Header.pcs);
+    break;
+
+  case icSigBToA0Tag:
+  case icSigBToA1Tag:
+  case icSigBToA2Tag:
+  case icSigBToA3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
+    break;
+
+  case icSigHToS0Tag:
+  case icSigHToS1Tag:
+  case icSigHToS2Tag:
+  case icSigHToS3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.pcs);
+    break;
+
+  case icSigGamutTag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, icSigGamutData);
+    break;
+
+  case icSigNamedColor2Tag:
+    if (pTag->GetType() == icSigNamedColor2Type) {
+      ((CIccTagNamedColor2*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
+    }
+    else if (pTag->GetTagArrayType() == icSigNamedColorArray) {
+      CIccArrayNamedColor *pAry = (CIccArrayNamedColor*)icGetTagArrayHandler(pTag);
+
+      if (pAry) {
+        pAry->SetColorSpaces(m_Header.pcs, m_Header.colorSpace,
+                             m_Header.spectralPCS,
+                             &m_Header.spectralRange,
+                             &m_Header.biSpectralRange);
+      }
+    }
+    break;
+
+  default:
+    break;
+  }
 }
 
 bool CIccProfileJson::ParseJson(const IccJson &root, std::string &parseStr)

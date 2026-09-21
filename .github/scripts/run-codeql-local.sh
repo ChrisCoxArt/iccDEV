@@ -8,7 +8,7 @@
 ## Intent: Run CodeQL analysis locally and generate a report
 #
 ## Prerequisites:
-##   - gh codeql (GitHub CLI CodeQL extension)
+##   - CodeQL CLI, or gh codeql (GitHub CLI CodeQL extension)
 ##   - clang/clang++ available
 ##
 ## Usage:
@@ -62,6 +62,11 @@ Build configuration:
   The CodeQL database is built out-of-tree with ICC_JSON_ORDERED=ON so CI and
   local analysis use deterministic JSON key ordering.
 
+  Scope is the product build only: ENABLE_TESTS=OFF, matching
+  ci-codeql-security.yml. The regression suite under .github/ci/regression is
+  NOT in the database, so an alert reported there will not reproduce here --
+  that is expected, not evidence the alert is fixed.
+
 Examples:
   # Full analysis from scratch
   $(basename "$0")
@@ -106,17 +111,17 @@ cd "$REPO_ROOT"
 
 # Verify prerequisites
 echo "=== Checking prerequisites ==="
-if ! command -v gh >/dev/null 2>&1; then
-    echo "[FAIL] gh CLI not found. Install: https://cli.github.com/" >&2
+if command -v codeql >/dev/null 2>&1; then
+    CODEQL=(codeql)
+elif command -v gh >/dev/null 2>&1 && gh codeql version >/dev/null 2>&1; then
+    CODEQL=(gh codeql)
+else
+    echo "[FAIL] CodeQL CLI not found. Install it from https://github.com/github/codeql-action/releases, or run: gh extension install github/gh-codeql" >&2
     exit 1
 fi
-if ! gh codeql version >/dev/null 2>&1; then
-    echo "[FAIL] gh codeql extension not found. Install: gh extension install github/gh-codeql" >&2
-    exit 1
-fi
-CODEQL_VERSION="$(gh codeql version 2>&1)"
+CODEQL_VERSION="$("${CODEQL[@]}" version 2>&1)"
 CODEQL_VERSION="${CODEQL_VERSION%%$'\n'*}"
-echo "[OK] gh codeql $CODEQL_VERSION"
+echo "[OK] ${CODEQL[*]} $CODEQL_VERSION"
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
     if [ ! -f "$REPO_ROOT/Build/Cmake/CMakeLists.txt" ]; then
@@ -128,7 +133,7 @@ fi
 # Install pack dependencies
 echo ""
 echo "=== Installing CodeQL pack dependencies ==="
-gh codeql pack install .github/codeql-queries/
+"${CODEQL[@]}" pack install .github/codeql-queries/
 
 # Build database
 if [ "$SKIP_BUILD" -eq 0 ]; then
@@ -137,14 +142,18 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
 
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"
+    # ENABLE_TESTS=OFF to match ci-codeql-security.yml: the database covers
+    # whatever `all` builds, so without it a local scan sees the regression
+    # suite and reports alerts CI would not.
     cmake -S "$REPO_ROOT/Build/Cmake" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Debug \
         -DENABLE_TOOLS=ON \
+        -DENABLE_TESTS=OFF \
         -DICC_JSON_ORDERED=ON \
         -DCMAKE_C_COMPILER=clang \
         -DCMAKE_CXX_COMPILER=clang++
 
-    gh codeql database create "$DB_DIR" \
+    "${CODEQL[@]}" database create "$DB_DIR" \
         --language=cpp \
         --overwrite \
         --command="cmake --build $BUILD_DIR --clean-first -j $JOBS" \
@@ -167,7 +176,7 @@ echo "=== Running CodeQL analysis ==="
 # Standard suite
 if [ "$CUSTOM_ONLY" -eq 0 ] && [ "$JSONLIB_ONLY" -eq 0 ]; then
     echo "  Running standard cpp-security-and-quality suite..."
-    gh codeql database analyze "$DB_DIR" \
+    "${CODEQL[@]}" database analyze "$DB_DIR" \
         --format=sarif-latest \
         --output="$RESULTS_DIR/cpp-security-and-quality.sarif" \
         --threads=0 \
@@ -178,7 +187,7 @@ fi
 # Custom core suite
 if [ "$STANDARD_ONLY" -eq 0 ] && [ "$JSONLIB_ONLY" -eq 0 ]; then
     echo "  Running custom iccDEV security queries..."
-    gh codeql database analyze "$DB_DIR" \
+    "${CODEQL[@]}" database analyze "$DB_DIR" \
         --format=sarif-latest \
         --output="$RESULTS_DIR/iccdev-security.sarif" \
         --threads=0 \
@@ -189,7 +198,7 @@ fi
 # IccJSON/IccConnect suite
 if [ "$STANDARD_ONLY" -eq 0 ] && [ "$CUSTOM_ONLY" -eq 0 ]; then
     echo "  Running IccJSON/IccConnect targeted security queries..."
-    gh codeql database analyze "$DB_DIR" \
+    "${CODEQL[@]}" database analyze "$DB_DIR" \
         --format=sarif-latest \
         --output="$RESULTS_DIR/iccdev-jsonlib-security.sarif" \
         --threads=0 \

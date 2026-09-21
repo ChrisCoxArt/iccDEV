@@ -10,8 +10,11 @@ point to deeper references.
 |-------|------------------|
 | User install and packaging | `docs/install.md` |
 | User build instructions | `docs/build.md` |
+| Apple mobile static cores and smoke app | `docs/build.md`, `.github/instructions/build-system.instructions.md`, and `.github/skills/maintainer-ci-ctest/SKILL.md` |
+| Manual iOS example apps | `docs/build.md`, `examples/ios-*/README.md`, and app-specific skills or prompts |
 | MATLAB bindings and Windows PowerShell setup | `docs/matlab-bindings.md` |
-| MATLAB PAWG Q1 runtime, native contract, and release support files | `docs/matlab-bindings.md` and `.github/skills/matlab-bindings-test/SKILL.md` |
+| MATLAB MEX code review | `.github/instructions/matlab-code-review.instructions.md` and `.github/skills/code-review/SKILL.md` |
+| MATLAB IccJSON conversion, PAWG Q1 runtime, native contract, and release support files | `docs/matlab-bindings.md`, `docs/iccjson.md`, and `.github/skills/matlab-bindings-test/SKILL.md` |
 | CTest tool suites and add-test process | `docs/ctest.md` |
 | CLI tools and shared option tables | `docs/tools-cli-reference.md` |
 | JSON workflow | `docs/iccjson.md` |
@@ -21,6 +24,7 @@ point to deeper references.
 | Threaded CMM apply (`CIccThreadedCmm`) | `docs/icc-cmm-threading.md` |
 | Bisect workflow | `docs/bisect.md` |
 | Pre-PR security cycle | `docs/pre-pr-security-cycle.md` and `.github/skills/pre-pr-security-cycle/SKILL.md` |
+| Maintainer local Git and linear-history defaults | `docs/linear-stack-workflow.md` |
 | Maintainer regression container operations | `docs/regression-container.md`, `.github/skills/regression-container-maintainer/SKILL.md`, and `.github/prompts/regression-container-maintainer.prompt.md` |
 | Regression workflow updates | `docs/regression-workflow-governance.md` |
 | Maintainer label system | `docs/label-system.md`, `.github/labels.yml`, `.github/labeler.yml`, and `.github/skills/maintainer-label-system/SKILL.md` |
@@ -37,6 +41,7 @@ point to deeper references.
 | Maintainer label workflow | `.github/skills/maintainer-label-system/SKILL.md` and `.github/prompts/maintainer-label-triage.prompt.md` |
 | IIS sample setup | `Tools/Winnt/IccIisIsapi/isapi-instructions.md` |
 | IIS API reference | `Tools/Winnt/IccIisIsapi/api.md` |
+| PCS adjustment placement (`CIccPcsXform` refactor) | `docs/pcs-adjustment-placement.md` |
 
 ## Editing Checklist
 
@@ -59,6 +64,8 @@ point to deeper references.
   `python/README.md` or an `examples/.../README.md` page), prefer an explicit
   HTML anchor like `<a href="../python/README.md">python/README.md</a>` to keep
   the generated docs warning-free without changing the rendered link target.
+- Run `doxygen .github/ci/doxygen/Doxyfile` for documentation changes and
+  require `docs/generated/doxygen-warnings.log` to be empty before handoff.
 - Do not add generated artifacts, logs, crash files, or local environment paths.
 - New or relocated C/C++ sources and headers must retain the complete ICC
   Software License block from an adjacent established file. Do not use
@@ -83,11 +90,15 @@ the pull request head branch, so instruction changes can be reviewed in the
 same PR. Keep review guidance actionable and scoped to the owning surface.
 Copilot submits advisory `Comment` reviews rather than approvals or requests
 for changes, so it does not replace required human review or branch protection.
+Use `matlab-code-review.instructions.md` for concise MATLAB MEX review checks;
+keep implementation rules in `matlab-mex.instructions.md` and broader review
+process in `.github/skills/code-review/SKILL.md`.
 
 References:
 
 - <https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/add-custom-instructions/add-repository-instructions>
 - <https://docs.github.com/en/copilot/how-tos/use-copilot-agents/request-a-code-review/use-code-review>
+- <https://docs.github.com/en/copilot/tutorials/customize-code-review>
 
 ## Validation
 

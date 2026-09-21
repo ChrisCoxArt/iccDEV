@@ -30,6 +30,8 @@ They complement GitHub's standard `cpp-security-and-quality` suite. The
 | `json-size-overflow` | CWE-680, CWE-190 | JSON array size cast to narrow integer without bounds check |
 | `localized-text-unsafe-serialization` | CWE-116, CWE-20 | Localized ICC text emitted without XML/JSON hex fallback |
 | `multiplication-overflow-alloc` | CWE-190, CWE-680, CWE-787 | Multiplication overflow before allocation |
+| `fixed-buffer-loop-bound` | CWE-121, CWE-787 | Fixed aggregate position table indexed by a member-count loop that can exceed the array (#2608) |
+| `counted-buffer-off-by-one` | CWE-125, CWE-787 | `index > count` guard permits a one-past-end counted-buffer access |
 | `new-array-delete-mismatch` | CWE-762 | `new[]` allocation released with scalar `delete` |
 | `null-after-read` | CWE-476 | Pointer dereferenced after `Read()` / `ParseXml()` without null check |
 | `recursive-parse-no-depth-limit` | CWE-674 | Recursive parse/read/apply call lacks depth guard |
@@ -82,6 +84,26 @@ Results are written to `codeql-results/`:
 3. Test against a local database:
    `gh codeql database analyze <db> .github/codeql-queries/my-query.ql --format=sarif-latest --output=/tmp/test.sarif`
 4. Verify results before committing.
+
+Run the checked-in query tests after changing query logic:
+
+```bash
+codeql pack install .github/codeql-queries
+codeql pack install .github/codeql-queries/test \
+  --additional-packs=.github/codeql-queries
+codeql test run .github/codeql-queries/test \
+  --additional-packs=.github/codeql-queries
+```
+
+`unbounded-profile-loop` treats `Begin()` as an invariant-establishing setup
+method, alongside `Init()`, `Read()`, and the other setup methods recognized by
+the query. Alerts #999, #1000, and #1647 were false positives after
+`CIccCLUT::Begin()` bounded `m_nNodes` and its CMM callers propagated failure.
+The rule also excludes the exact internal/derived fields behind alerts #2360
+and #881; neither is an untrusted profile loop bound. Do not generalize those
+exclusions to other job or count fields.
+Keep the negative query-test case: genuinely unguarded profile-count loops must
+still be reported.
 
 Standard-suite findings such as CLI path input or intentional float comparisons
 may be informational rather than vulnerabilities; triage them in context.

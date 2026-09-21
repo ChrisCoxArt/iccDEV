@@ -321,13 +321,24 @@ if(DEFINED ICCDEV_TOOLCHAIN_FILE AND NOT "${ICCDEV_TOOLCHAIN_FILE}" STREQUAL "")
   # the installed tree is both faster and what is actually under test.
   list(APPEND _common_args "-DVCPKG_MANIFEST_MODE=OFF")
 endif()
+if(DEFINED ICCDEV_VCPKG_INSTALLED_DIR AND
+   NOT "${ICCDEV_VCPKG_INSTALLED_DIR}" STREQUAL "")
+  # Manifest mode is disabled above, so vcpkg would otherwise search its global
+  # classic tree instead of the dependency tree populated for the parent build.
+  list(APPEND _common_args
+    "-DVCPKG_INSTALLED_DIR=${ICCDEV_VCPKG_INSTALLED_DIR}")
+endif()
 if(DEFINED ICCDEV_VCPKG_TRIPLET AND NOT "${ICCDEV_VCPKG_TRIPLET}" STREQUAL "")
   list(APPEND _common_args "-DVCPKG_TARGET_TRIPLET=${ICCDEV_VCPKG_TRIPLET}")
 endif()
 if(DEFINED ICCDEV_MSVC_RUNTIME_LIBRARY AND NOT "${ICCDEV_MSVC_RUNTIME_LIBRARY}" STREQUAL "")
   list(APPEND _common_args "-DCMAKE_MSVC_RUNTIME_LIBRARY=${ICCDEV_MSVC_RUNTIME_LIBRARY}")
 endif()
-if(NOT ICCDEV_GENERATOR MATCHES "Visual Studio|Xcode|Multi-Config")
+if(ICCDEV_GENERATOR STREQUAL "Ninja Multi-Config")
+  # Ninja Multi-Config omits MinSizeRel from its default configuration set.
+  # Generate the exact parent configuration that --build --config requests.
+  list(APPEND _common_args "-DCMAKE_CONFIGURATION_TYPES=${ICCDEV_CONFIG}")
+elseif(NOT ICCDEV_GENERATOR MATCHES "Visual Studio|Xcode|Multi-Config")
   list(APPEND _common_args "-DCMAKE_BUILD_TYPE=${ICCDEV_CONFIG}")
 endif()
 
@@ -340,9 +351,9 @@ set(_consumer_source "\
 #include \"IccProfile.h\"\n\
 #include \"IccUtil.h\"\n\
 #include \"IccCmdLineUtil.h\"\n\
-#include \"IccJsonTypes.h\"\n\
 #include \"IccProfileXml.h\"\n\
 #ifdef ICCDEV_INSTALLED_JSON\n\
+#include \"IccJsonTypes.h\"\n\
 #include \"IccProfileJson.h\"\n\
 #endif\n\
 #ifdef ICCDEV_INSTALLED_CONNECT\n\
@@ -675,7 +686,7 @@ target_link_libraries(iccdev-installed-consumer PRIVATE
 
 _run_consumer("MODULE mode" "${_module_src}" "${_work_root}/build-module"
   "${_prefix_module}"
-  "-DICCDEV_MODULE_PATH=${ICCDEV_REPO_ROOT}/Build/Cmake/Modules;-DCMAKE_PREFIX_PATH=${_prefix_module}"
+  "-DICCDEV_MODULE_PATH=${ICCDEV_REPO_ROOT}/Build/Cmake/Modules;-DCMAKE_PREFIX_PATH=${_prefix_module};-DREFICCMAX_SKIP_CONFIG=ON"
   _module_error)
 _note("${_arm_log}")
 set(_module_cfg_stdout "${_arm_stdout}")

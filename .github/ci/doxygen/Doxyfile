@@ -15,8 +15,7 @@ PROJECT_BRIEF          = "ICC Color Profile Library - ProfLib, XML, JSON, Connec
 OUTPUT_DIRECTORY       = docs/generated
 HTML_OUTPUT            = html
 
-INPUT                  = README.md \
-                         IccProfLib \
+INPUT                  = IccProfLib \
                          IccXML/IccLibXML \
                          IccXML/CmdLine \
                          IccJSON/IccLibJSON \
@@ -27,16 +26,35 @@ INPUT                  = README.md \
                          Tools/Winnt/IccIisIsapi/iis-isapi.openapi.yaml \
                          Tools/wxWidget \
                          examples/hello-iccdev/hello-iccdev.cpp \
+                         examples/ios-apply-preview/README.md \
+                         examples/ios-apply-preview/main.mm \
+                         examples/ios-apply-preview/ApplyPreviewHost.h \
+                         examples/ios-apply-preview/ApplyPreviewHost.mm \
+                         examples/ios-clut-editor/README.md \
+                         examples/ios-clut-editor/main.mm \
+                         examples/ios-clut-editor/ClutEditorHost.h \
+                         examples/ios-clut-editor/ClutEditorHost.mm \
                          examples/c-validation-dlopen/main.c \
+                         examples/ios-benchapply/README.md \
+                         examples/ios-benchapply/BenchApplyHost.h \
+                         examples/ios-benchapply/BenchApplyHost.mm \
+                         examples/ios-benchapply/main.mm \
                          docs \
+                         .github/ci/doxygen/curated-navigation.dox \
                          .github/ci/quality-assurance/scripts
-USE_MDFILE_AS_MAINPAGE = README.md
-FILE_PATTERNS          = *.h *.h.in *.hpp *.c *.cc *.cpp *.cxx *.md *.dox *.dot *.sh *.yaml *.yml
+USE_MDFILE_AS_MAINPAGE =
+FILE_PATTERNS          = *.h *.h.in *.hpp *.c *.cc *.cpp *.cxx *.mm *.md *.dox *.dot *.sh *.yaml *.yml
 RECURSIVE              = YES
 EXCLUDE                = docs/generated \
+                         docs/index.md \
+                         docs/documentation.md \
+                         docs/libraries.md \
+                         docs/tools.md \
+                         docs/testing.md \
+                         docs/superpowers \
+                         docs/governance/incidents \
                          docs/Testing/test-json-tools.sh \
                          IccProfLib/registry/README.md \
-                         Tools/Winnt/IccDEVCmm/README.md \
                          Build \
                          .git
 EXCLUDE_PATTERNS       = */Build/* \
@@ -64,7 +82,8 @@ INCLUDE_PATH           = IccProfLib \
                          Tools/CmdLine/IccProfileVisualize \
                          Tools/Winnt/IccIisIsapi \
                          examples/hello-iccdev \
-                         /usr/include
+                         examples/ios-clut-editor \
+                         examples/ios-benchapply
 
 # Extraction settings. Keep file-local anonymous namespaces out of the public
 # hierarchy/UI: they are implementation details and make inherits.html split into

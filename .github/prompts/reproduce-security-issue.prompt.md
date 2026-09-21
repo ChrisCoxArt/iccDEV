@@ -6,6 +6,19 @@ investigating a crash reported against an ICC profile or image file.
 ## Examples
 - https://github.com/InternationalColorConsortium/iccDEV/issues/696 https://github.com/InternationalColorConsortium/iccDEV/issues/700 https://github.com/InternationalColorConsortium/iccDEV/issues/734 https://github.com/InternationalColorConsortium/iccDEV/issues/753
 
+## Step 0: Establish Tool Reachability
+
+For a CodeQL report, trace the untrusted field from its parser through setup and
+the affected operation before synthesizing an artifact. Check whether `Init()`,
+`Read()`, or `Begin()` bounds the field and whether every command-line tool
+propagates a failed setup result. A direct library call that skips a required
+setup method does not prove profile-to-tool reachability.
+
+If the path is blocked, record the guard and call-chain evidence, add a CodeQL
+query test with a guarded case and an unguarded control, and report a false
+positive instead of creating a PoC. Alerts #999, #1000, and #1647 are the
+reference case for a `Begin()`-established Apply invariant.
+
 ## Step 1: Identify the Advisory
 
 ```bash
@@ -39,6 +52,28 @@ which is well-defined per C/C++ standard and NOT caught by `undefined` alone.
 Issue #769 required this flag. MSVC does not support it. Do not add coverage
 flags or `-DENABLE_COVERAGE=ON` when reproducing sanitizer findings; coverage
 instrumentation can mask a bug.
+
+For uninitialized-memory findings, do not keep suppressing frames when a JSON
+or threaded run stops in `libstdc++` or an ordinary distro `libc++`. That is an
+uninstrumented runtime boundary, not proof that the application frame is safe
+or unsafe. Build the pinned MSan libc++ runtime and run the paired controls:
+
+```bash
+.github/scripts/iccdev-build-msan-libcxx.sh --prefix /tmp/iccdev-msan-libcxx
+.github/scripts/iccdev-msan-taint-qa.sh \
+  --source-dir "$PWD" \
+  --build-dir /tmp/iccdev-msan-build \
+  --runtime-dir /tmp/iccdev-msan-libcxx
+```
+
+The taint-trace option is diagnostic-only. Configure it in Debug; Release,
+RelWithDebInfo, and MinSizeRel compile it out even when explicitly requested.
+Treat malformed parametric-curve arrays as fail-closed controls after #2543;
+use the nonnumeric colorant PCS fixture as the positive uninitialized-read case.
+
+Keep the matrix distinct: ASAN/UBSAN for memory safety and undefined behavior,
+MSan or Memcheck for uninitialized reads, and TSan or Helgrind for races. Run
+Valgrind only on a non-sanitized binary.
 
 ## Step 3: Reproduce
 

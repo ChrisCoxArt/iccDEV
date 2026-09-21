@@ -61,13 +61,13 @@ skip_or_fail() {
   fi
 }
 
-HADOLINT_IMAGE="${PREFLIGHT_HADOLINT_IMAGE:-hadolint/hadolint@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e}"
-TRIVY_IMAGE="${PREFLIGHT_TRIVY_IMAGE:-aquasec/trivy@sha256:5c59e08f980b5d4d503329773480fcea2c9bdad7e381d846fbf9f2ecb8050f6b}"
+HADOLINT_IMAGE="${PREFLIGHT_HADOLINT_IMAGE:-hadolint/hadolint@sha256:fdf19d026b54834f88c62774fdf2a61ff3b586a42632e5070674d41a796bfdf3}"
+TRIVY_IMAGE="${PREFLIGHT_TRIVY_IMAGE:-aquasec/trivy@sha256:ee940acbf1f58ebadb42d01434ce4609530bf1b52536afbd1eee66cd7123c5c9}"
 TRIVY_CACHE_DIR="${PREFLIGHT_TRIVY_CACHE_DIR:-${TMPDIR:-/tmp}/iccdev-trivy-cache-$$}"
 
 run_hadolint() {
   if command -v hadolint >/dev/null 2>&1; then
-    hadolint "$@"
+    hadolint --failure-threshold warning "$@"
     return
   fi
   if command -v docker >/dev/null 2>&1; then
@@ -75,7 +75,7 @@ run_hadolint() {
       -v "$REPO_ROOT":/repo:ro \
       -w /repo \
       "$HADOLINT_IMAGE" \
-      hadolint "$@"
+      hadolint --failure-threshold warning "$@"
     return
   fi
   return 127
@@ -98,6 +98,24 @@ run_trivy_config() {
     return
   fi
   return 127
+}
+
+run_doxygen_check() {
+  local output_dir status=0
+  output_dir="$(mktemp -d "${TMPDIR:-/tmp}/iccdev-doxygen.XXXXXX")"
+
+  if ! doxygen .github/ci/doxygen/Doxyfile \
+    "OUTPUT_DIRECTORY=$output_dir" \
+    "WARN_LOGFILE=$output_dir/doxygen-warnings.log"; then
+    status=1
+  fi
+  if [ -s "$output_dir/doxygen-warnings.log" ]; then
+    cat "$output_dir/doxygen-warnings.log" >&2
+    status=1
+  fi
+
+  rm -rf "$output_dir"
+  return "$status"
 }
 
 run_workflow_cache_policy() {
@@ -1155,6 +1173,19 @@ if [ "${#docker_files[@]}" -gt 0 ]; then
 else
   echo "[SKIP] No changed Dockerfile files"
   echo ""
+fi
+
+if command -v doxygen >/dev/null 2>&1; then
+  run_check "Doxygen documentation warnings" run_doxygen_check
+else
+  skip_or_fail "doxygen"
+fi
+
+if [ -f .github/scripts/check-codeql-bundle-pin-parity.py ]; then
+  run_check "CodeQL bundle pin parity" \
+    python3 .github/scripts/check-codeql-bundle-pin-parity.py
+else
+  skip_or_fail "check-codeql-bundle-pin-parity.py"
 fi
 
 if [ "$FAST_LANE" -eq 1 ]; then

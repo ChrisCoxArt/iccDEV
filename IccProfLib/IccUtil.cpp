@@ -701,11 +701,18 @@ icFloat16Number ICCPROFLIB_API icFtoF16(icFloat32Number num)
 {
   icUInt16Number rv;
   icUInt16Number rvsgn, rvexp, rvmnt;
-  icUInt32Number flt, *fltp, fltsgn, fltexp, fltmnt;
+  icUInt32Number flt, fltsgn, fltexp, fltmnt;
   int exp;
 
-  fltp = (icUInt32Number*)&num;
-  flt = *fltp;
+  // The bit pattern is copied out instead of being read through an
+  // icUInt32Number lvalue aimed at the float argument. num is a float object,
+  // and a wide-integer load of it is undefined -- the same defect #1948 fixed
+  // in CIccIO::Write16/32/64, reported here by cppcheck as invalidPointerCast
+  // (#2504). icF16toF above already returns its result through memcpy; only
+  // this direction was left punning, so it inherits the twin's idiom rather
+  // than a new one.
+  static_assert(sizeof(flt) == sizeof(num), "icFloat32Number must match icUInt32Number width for icFtoF16");
+  memcpy(&flt, &num, sizeof(flt));
   if (!(flt & 0x7FFFFFFF)) {
     rv = (icUInt16Number) (flt >> 16);
   } else { 
@@ -1435,6 +1442,7 @@ icUInt32Number icGetSpaceSamples(icColorSpaceSignature sig)
   case icSigLuvData:
   case icSigYCbCrData:
   case icSigYxyData:
+  case icSigLmsData:
   case icSigRgbData:
   case icSigHsvData:
   case icSigHlsData:
@@ -1705,6 +1713,14 @@ const icChar *CIccInfo::GetTechnologySigName(icTechnologySignature sig)
   case icSigAMDisplay:
     return "AMDisplay";
 
+  // ICC.1:2022 Table 29 rows that never reached the enum, so every list below keyed
+  // off it silently omitted them and GetSigName() reported "Unknown 'LCD '" (#2101).
+  case icSigLCDDisplay:
+    return "LCDDisplay";
+
+  case icSigOLEDDisplay:
+    return "OLEDDisplay";
+
   case icSigPhotoCD:
     return "PhotoCD";
 
@@ -1722,6 +1738,24 @@ const icChar *CIccInfo::GetTechnologySigName(icTechnologySignature sig)
 
   case icSigFlexography:
     return "Flexography";
+
+  // The motion picture and digital cinema rows arrived with ICC.1 v4.3 and were never
+  // added here, so CIccTagSignature::Validate accepted them as compliant while every
+  // caller of GetSigName() -- iccDumpProfile among them -- reported them as
+  // "Unknown 'mpfs'" and so on.  Naming them is what makes the two agree (#2101).
+  case icSigMotionPictureFilmScanner:
+    return "MotionPictureFilmScanner";
+
+  case icSigMotionPictureFilmRecorder:
+    return "MotionPictureFilmRecorder";
+
+  case icSigDigitalMotionPictureCamera:
+    return "DigitalMotionPictureCamera";
+
+  // Named by the enum's value, not by the mnemonic ICC.1 prints beside it; see the
+  // SPEC-ISSUE #2101 note at icProfileHeader.h's icSigDigitalCinemaProjector.
+  case icSigDigitalCinemaProjector:
+    return "DigitalCinemaProjector";
 
   default:
     return GetUnknownName(sig);
@@ -1796,6 +1830,9 @@ const icChar *CIccInfo::GetColorSpaceSigName(icColorSpaceSignature sig)
 
   case icSigYxyData:
     return "YxyData";
+
+  case icSigLmsData:
+    return "LmsData";
 
   case icSigRgbData:
     return "RgbData";
@@ -2513,6 +2550,12 @@ const icChar *CIccInfo::GetColorantEncoding(icColorantEncoding colorant)
     case icColorantP22:
       return "P22";
 
+    case icColorantP3:
+      return "P3";
+
+    case icColorantBT2020:
+      return "ITU-R BT.2020";
+
     default:
       return "Customized Encoding";
   }
@@ -2821,6 +2864,7 @@ bool CIccInfo::IsValidSpace(icColorSpaceSignature sig)
   case icSigLuvData:
   case icSigYCbCrData:
   case icSigYxyData:
+  case icSigLmsData:
   case icSigRgbData:
   case icSigGrayData:
   case icSigHsvData:
@@ -3110,10 +3154,16 @@ const char *icUtf16ToUtf8(std::string &buf, const icUInt16Number *szSrc, int siz
       buf.clear();
       return buf.c_str();
     }
-    char *szDest = szBuf;
-    icConvertUTF16toUTF8(&szSrc, &szSrc[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    // icConvertUTF16toUTF8 stores its advanced cursor through a UTF8** out
+    // parameter. The old (UTF8**)&szDest aimed that at a char* object, so the
+    // callee wrote a UTF8* through a char* lvalue and this function read it
+    // back as char* -- undefined for the same reason as :707 above. Declaring
+    // the cursor UTF8* removes the pun rather than hiding it; UTF8 is unsigned
+    // char, so the bytes written and the length computed are unchanged.
+    UTF8 *szDest = (UTF8*)szBuf;
+    icConvertUTF16toUTF8(&szSrc, &szSrc[sizeSrc], &szDest, (UTF8*)&szBuf[n], lenientConversion);
     *szDest = '\0';
-    buf.assign(szBuf, (size_t)(szDest - szBuf));
+    buf.assign(szBuf, (size_t)(szDest - (UTF8*)szBuf));
     free(szBuf);
   } else {
     buf.clear();
@@ -3149,16 +3199,48 @@ const char *icWCharToUtf8(std::string &buf, const wchar_t *szSrc, size_t sizeSrc
       buf.clear();
       return buf.c_str();
     }
-    char *szDest = szBuf;
+    // Same UTF8** out-parameter pun as icUtf16ToUtf8 above, on both arms of
+    // the WCHAR_MAX branch.
+    UTF8 *szDest = (UTF8*)szBuf;
 #if WCHAR_MAX > 65535
-    const UTF32 *szPtr = (const UTF32 *)szSrc;
-    icConvertUTF32toUTF8(&szPtr, &szPtr[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    // #2526: a 32-bit wchar_t string is not always UTF-32 here.  The dictType
+    // names and values this function converts for IccTagXml.cpp and
+    // IccTagJson.cpp hold UTF-16 code units, one per wchar_t --
+    // CIccTagDict::Read and CIccUTF16String::ToWString store them that way,
+    // and CIccTagDict::Write narrows each wchar_t back to 16 bits.  Read as
+    // UTF-32, a character above U+FFFF arrived as two surrogates and came out
+    // as six bytes of CESU-8, which libxml2 refuses.
+    //
+    // So this arm now ends in icConvertUTF16toUTF8 too, as the Windows arm
+    // does.  A wchar_t above U+FFFF, which only real UTF-32 holds, is split
+    // into its surrogate pair first, and the UTF-16 converter joins a pair in
+    // whichever form it arrived.  Valid UTF-32 gives the same bytes as
+    // before.  Only surrogate values change, and UTF-32 cannot contain them:
+    // a pair is joined, and a lone one becomes U+FFFD -- or, if it is a high
+    // surrogate that ends the string, is dropped -- as on Windows (#2511).
+    // Every wchar_t yields at most 4 bytes, so n is still enough.
+    icUtf16Vector units;
+    units.reserve(sizeSrc);
+    for (size_t i = 0; i < sizeSrc; i++) {
+      UTF32 ch = (UTF32)szSrc[i];
+      if (ch <= 0xFFFF) {
+        units.push_back((UTF16)ch);
+      } else if (ch <= 0x10FFFF) {
+        ch -= 0x10000;
+        units.push_back((UTF16)(0xD800 + (ch >> 10)));
+        units.push_back((UTF16)(0xDC00 + (ch & 0x3FF)));
+      } else {
+        units.push_back(0xFFFD);  // past U+10FFFF, as icConvertUTF32toUTF8 did
+      }
+    }
+    const UTF16 *szPtr = units.data();
+    icConvertUTF16toUTF8(&szPtr, szPtr + units.size(), &szDest, (UTF8*)&szBuf[n], lenientConversion);
 #else
     const UTF16 *szPtr = (const UTF16 *)szSrc;
-    icConvertUTF16toUTF8(&szPtr, &szPtr[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    icConvertUTF16toUTF8(&szPtr, &szPtr[sizeSrc], &szDest, (UTF8*)&szBuf[n], lenientConversion);
 #endif
     *szDest = '\0';
-    buf.assign(szBuf, (size_t)(szDest - szBuf));
+    buf.assign(szBuf, (size_t)(szDest - (UTF8*)szBuf));
     free(szBuf);
   } else {
     buf.clear();

@@ -5,8 +5,34 @@
 # target for local and CI use.
 
 include(CheckCCompilerFlag)
+include(ProcessorCount)
 
 find_program(BASH_EXECUTABLE bash)
+
+# LeakSanitizer is unavailable in MSVC ASan and in Darwin ASan (including
+# AppleClang). Leak-only regressions must not register there, and mixed
+# correctness/leak tests must retain their correctness assertions without
+# forcing the unsupported detect_leaks=1 option.
+set(ICCDEV_HAS_LEAK_SANITIZER TRUE)
+if(MSVC OR APPLE)
+  set(ICCDEV_HAS_LEAK_SANITIZER FALSE)
+endif()
+
+ProcessorCount(_iccdev_detected_ctest_jobs)
+if(NOT _iccdev_detected_ctest_jobs)
+  set(_iccdev_detected_ctest_jobs 1)
+endif()
+set(ICCDEV_CTEST_PARALLEL_LEVEL "${_iccdev_detected_ctest_jobs}" CACHE STRING
+  "Maximum number of CTests run concurrently by the check targets")
+if(NOT ICCDEV_CTEST_PARALLEL_LEVEL MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+    "ICCDEV_CTEST_PARALLEL_LEVEL must be a positive integer, got "
+    "'${ICCDEV_CTEST_PARALLEL_LEVEL}'")
+endif()
+set(_iccdev_aggregate_ctest_processors "${ICCDEV_CTEST_PARALLEL_LEVEL}")
+if(_iccdev_aggregate_ctest_processors GREATER 4)
+  set(_iccdev_aggregate_ctest_processors 4)
+endif()
 
 get_filename_component(ICCDEV_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 set(ICCDEV_TOOLS_DIR "${CMAKE_BINARY_DIR}/Tools")
@@ -31,6 +57,7 @@ endif()
 add_custom_target(check
   COMMAND "${CMAKE_CTEST_COMMAND}"
           ${ICCDEV_CTEST_CONFIG_ARGS}
+          --parallel "${ICCDEV_CTEST_PARALLEL_LEVEL}"
           --label-exclude known-red
           --output-on-failure
           --no-tests=error
@@ -48,6 +75,9 @@ if(TARGET iccdev-stage-windows-runtime)
 endif()
 
 function(iccdev_add_regression_executable TARGET_NAME)
+  # Keep regression helpers out of the default product build.  On Windows,
+  # their vcpkg z-applocal hooks write the same runtime DLL concurrently;
+  # build-test-binaries is built serially by the CI test gate instead.
   add_executable("${TARGET_NAME}" EXCLUDE_FROM_ALL ${ARGN})
   add_dependencies(build-test-binaries "${TARGET_NAME}")
 endfunction()
@@ -65,6 +95,7 @@ endfunction()
 add_custom_target(check-fast
   COMMAND "${CMAKE_CTEST_COMMAND}"
           ${ICCDEV_CTEST_CONFIG_ARGS}
+          --parallel "${ICCDEV_CTEST_PARALLEL_LEVEL}"
           --label-exclude "slow|known-red"
           --output-on-failure
           --no-tests=error
@@ -109,6 +140,59 @@ endfunction()
 iccdev_add_check_dependencies()
 if(TARGET iccDescribeSinkTest)
   add_dependencies(build-test-binaries iccDescribeSinkTest)
+endif()
+
+find_program(ICCDEV_NINJA_EXECUTABLE ninja)
+if(ICCDEV_NINJA_EXECUTABLE)
+  set(ICCDEV_TAINT_TRACE_TEST_GENERATOR Ninja)
+  set(ICCDEV_TAINT_TRACE_TEST_MAKE_PROGRAM "${ICCDEV_NINJA_EXECUTABLE}")
+elseif(CMAKE_GENERATOR MATCHES "Makefiles$")
+  set(ICCDEV_TAINT_TRACE_TEST_GENERATOR "${CMAKE_GENERATOR}")
+  set(ICCDEV_TAINT_TRACE_TEST_MAKE_PROGRAM "${CMAKE_MAKE_PROGRAM}")
+endif()
+if(ICCDEV_TAINT_TRACE_TEST_GENERATOR)
+  add_test(
+    NAME iccdev.taint-trace-build-configuration
+    COMMAND "${CMAKE_COMMAND}"
+      "-DICCDEV_SOURCE_DIR=${ICCDEV_REPO_ROOT}"
+      "-DICCDEV_TEST_BINARY_DIR=${ICCDEV_TEST_OUTDIR}/taint-trace-config"
+      "-DICCDEV_TEST_GENERATOR=${ICCDEV_TAINT_TRACE_TEST_GENERATOR}"
+      "-DICCDEV_TEST_MAKE_PROGRAM=${ICCDEV_TAINT_TRACE_TEST_MAKE_PROGRAM}"
+      "-DICCDEV_PARENT_CMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+      "-DICCDEV_PARENT_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DICCDEV_PARENT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunTaintTraceBuildConfigurationTest.cmake"
+  )
+  set_tests_properties(iccdev.taint-trace-build-configuration PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;build;cmake;taint-trace;regression"
+  )
+else()
+  message(STATUS
+    "No supported nested generator found - skipping iccdev.taint-trace-build-configuration")
+endif()
+
+find_program(ICCDEV_GPROF_EXECUTABLE gprof)
+if(ENABLE_PROFILING AND TARGET iccDumpProfile AND ICCDEV_GPROF_EXECUTABLE AND
+   UNIX AND NOT APPLE)
+  add_test(
+    NAME iccdev.profiling-smoke
+    COMMAND "${CMAKE_COMMAND}"
+      "-DICCDEV_DUMP_PROFILE=$<TARGET_FILE:iccDumpProfile>"
+      "-DICCDEV_PROFILE=${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+      "-DICCDEV_GPROF=${ICCDEV_GPROF_EXECUTABLE}"
+      "-DICCDEV_PROFILE_OUTPUT_DIR=${ICCDEV_TEST_OUTDIR}/profiling-smoke"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunProfilingSmokeTest.cmake"
+  )
+  set_tests_properties(iccdev.profiling-smoke PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;build;profiling;smoke;pr-2606"
+  )
+elseif(ENABLE_PROFILING)
+  message(STATUS
+    "gprof profiling smoke prerequisites unavailable - test not registered")
 endif()
 
 # Issue #2276: this compiles a C-only consumer against IccCValidation.h and
@@ -231,6 +315,24 @@ function(iccdev_add_iccconnect_thread_test)
   endif()
 endfunction()
 
+# Positive control for the ICC_TAINT_TRACE memory-state query. It is not a CTest:
+# its verdict needs Valgrind Memcheck or MemorySanitizer around it, so
+# iccdev-taint-trace-qa.sh and iccdev-msan-taint-qa.sh run it instead. It is
+# header-only and built only where tracing was requested.
+function(iccdev_add_taint_trace_memory_state_probe)
+  if(NOT ICCDEV_ENABLE_TAINT_TRACE OR WIN32)
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccTaintTraceMemoryStateProbe
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/taint-trace-memory-state.cpp"
+  )
+  target_compile_features(iccTaintTraceMemoryStateProbe PRIVATE cxx_std_17)
+  target_include_directories(iccTaintTraceMemoryStateProbe PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+endfunction()
+
 function(iccdev_add_clut_avx512_sixteen_output_test)
   if(NOT ICCDEV_AVX512_EFFECTIVE)
     return()
@@ -308,6 +410,119 @@ function(iccdev_add_iccconnect_config_parser_test)
     endforeach()
     set_tests_properties(iccdev.iccconnect-config-parser PROPERTIES
       ENVIRONMENT_MODIFICATION "${_iccconnect_config_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_createsearch_embedded_profile_test)
+  if(NOT DEFINED TARGET_LIB_ICCCONNECT OR NOT TARGET "${TARGET_LIB_ICCCONNECT}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCreateSearchEmbeddedProfileTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/createsearch-embedded-profile.cpp"
+  )
+  target_compile_features(iccCreateSearchEmbeddedProfileTest PRIVATE cxx_std_17)
+  target_link_libraries(iccCreateSearchEmbeddedProfileTest PRIVATE ${TARGET_LIB_ICCCONNECT})
+
+  add_dependencies(check iccCreateSearchEmbeddedProfileTest)
+
+  # sRGB_D65_MAT.icc is a tracked v5 matrix/TRC profile, so a profile->itself
+  # search converges quickly and the run stays well inside the timeout below.
+  set(_createsearch_embedded_profile
+    "${ICCDEV_TESTING_DIR}/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.createsearch-embedded-profile
+      COMMAND "$<TARGET_FILE:iccCreateSearchEmbeddedProfileTest>"
+        "${_createsearch_embedded_profile}"
+    )
+  else()
+    add_test(
+      NAME iccdev.createsearch-embedded-profile
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCreateSearchEmbeddedProfileTest>"
+        "${_createsearch_embedded_profile}"
+    )
+  endif()
+  # A Nelder-Mead search runs per sample and the helper drives five chains
+  # (scalar, embedded, threaded, embedded-threaded, and a rejection), so this
+  # needs the longer budget its CIccCmmSearch siblings use rather than the 60
+  # the parser-only IccConnect test gets.
+  set_tests_properties(iccdev.createsearch-embedded-profile PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 300
+    LABELS "iccdev;iccconnect;cmmsearch;embedded;regression"
+  )
+  if(WIN32)
+    set(_createsearch_embedded_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCreateSearchEmbeddedProfileTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCCONNECT}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _createsearch_embedded_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.createsearch-embedded-profile PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_createsearch_embedded_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_mru_apply_ownership_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMruApplyOwnershipTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/mru-cmm-apply-ownership.cpp"
+  )
+  target_compile_features(iccMruApplyOwnershipTest PRIVATE cxx_std_17)
+  target_link_libraries(iccMruApplyOwnershipTest PRIVATE ${TARGET_LIB_ICCPROFLIB}
+    ${CMAKE_THREAD_LIBS_INIT})
+
+  add_dependencies(check iccMruApplyOwnershipTest)
+
+  # sRGB_v4_ICC_preference.icc is a tracked v4 LUT profile: a real xform chain
+  # on both sides of the cache, so a hit that returned stale or untransformed
+  # data is separable from one that returned the right colour.
+  set(_mru_apply_profile "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.mru-cmm-apply-ownership
+      COMMAND "$<TARGET_FILE:iccMruApplyOwnershipTest>" "${_mru_apply_profile}"
+    )
+  else()
+    add_test(
+      NAME iccdev.mru-cmm-apply-ownership
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccMruApplyOwnershipTest>"
+        "${_mru_apply_profile}"
+    )
+  endif()
+  set_tests_properties(iccdev.mru-cmm-apply-ownership PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;mru;cache;threading;regression"
+  )
+  if(WIN32)
+    set(_mru_apply_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMruApplyOwnershipTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _mru_apply_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.mru-cmm-apply-ownership PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_mru_apply_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -540,10 +755,10 @@ function(iccdev_add_cmmsearch_rebegin_test)
   # both the CI tool-test job and ICCDEV_TEST_ENV export
   # ASAN_OPTIONS=...detect_leaks=0, so run the same binary once more with
   # detect_leaks=1 forced for this process alone -- the same approach
-  # iccdev.cmmsearch-namedcolor-ownership uses, including its MSVC carve-out.
-  if(MSVC)
+  # iccdev.cmmsearch-namedcolor-ownership uses, including its platform carve-out.
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     message(STATUS
-      "Skipping iccdev.cmmsearch-rebegin-leak: MSVC AddressSanitizer "
+      "Skipping iccdev.cmmsearch-rebegin-leak: this platform's AddressSanitizer "
       "does not support LeakSanitizer detect_leaks=1")
     return()
   endif()
@@ -640,6 +855,10 @@ function(iccdev_add_embedded_profile_onelevel_load_test)
     TIMEOUT 60
     LABELS "iccdev;iccprofLib;embedded-profile;wxProfileDump;regression"
     SKIP_RETURN_CODE 77
+    # Checks 1-3 load Testing/hybrid/ICC/CMYK_Hybrid_Profile.icc, which
+    # iccdev.hybrid-pipeline truncates and rewrites in place. Share its lock so
+    # a present-but-partial fixture is never read as a failure.
+    RESOURCE_LOCK iccdev_testing_hybrid_icc
   )
   if(WIN32)
     set(_embedded_profile_onelevel_load_windows_env_mods
@@ -1246,9 +1465,9 @@ function(iccdev_add_cmmsearch_namedcolor_ownership_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
   endif()
-  if(MSVC)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     message(STATUS
-      "Skipping iccdev.cmmsearch-namedcolor-ownership: MSVC AddressSanitizer "
+      "Skipping iccdev.cmmsearch-namedcolor-ownership: this platform's AddressSanitizer "
       "does not support LeakSanitizer detect_leaks=1")
     return()
   endif()
@@ -1294,6 +1513,57 @@ function(iccdev_add_cmmsearch_namedcolor_ownership_test)
   endif()
 endfunction()
 
+# Guards CIccTagNamedColor2::FindColor against the #2534 out-of-bounds read: the
+# suffix fast-reject starts its compare j = strlen(m_szSufix) bytes from the end
+# of the queried name, so a name shorter than the suffix points strncmp before
+# the buffer (IccTagBasic.cpp:3762, unchanged since 2015).  A 31-byte suffix --
+# the longest icChar[32] can hold -- against a one-byte name reaches 30 bytes
+# back; iccApplyNamedCmm reaches it from a profile and a name file.
+#
+# The helper queries names it allocated on the heap at their exact length, so the
+# underflow crosses an allocator redzone: the pass/fail signal for the memory
+# safety is the ASan legs, where the pre-fix code aborts and the guarded code
+# exits 0.  Measured on a plain Release build the same helper exits 0 either way,
+# so on non-sanitizer legs cases 1 and 2 are a smoke test.  Cases 3, 4 and 6 are
+# deterministic everywhere: the name the tag really spells is still found, a
+# non-matching equal-length name is still compared, and -- case 6, the boundary
+# discriminator -- a name whose length is exactly strlen(m_szSufix) is a legal
+# colour that must still be found, which is what fails an off-by-one "i <= j".
+function(iccdev_add_namedcolor_findcolor_suffix_underflow_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccNamedColorFindColorSuffixUnderflowTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/namedcolor-findcolor-suffix-underflow.cpp"
+  )
+  target_link_libraries(iccNamedColorFindColorSuffixUnderflowTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccNamedColorFindColorSuffixUnderflowTest)
+
+  add_test(
+    NAME iccdev.namedcolor-findcolor-suffix-underflow
+    COMMAND "$<TARGET_FILE:iccNamedColorFindColorSuffixUnderflowTest>"
+  )
+  set_tests_properties(iccdev.namedcolor-findcolor-suffix-underflow PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 25
+    LABELS "iccdev;iccprofLib;namedcolor;oob;issue-2534;regression"
+  )
+  if(WIN32)
+    set(_namedcolor_findcolor_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccNamedColorFindColorSuffixUnderflowTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _namedcolor_findcolor_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.namedcolor-findcolor-suffix-underflow PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_namedcolor_findcolor_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # Guards CIccXform::Create(CIccProfile*, CIccTag*) profile ownership (#1308):
 # AddXform hands its owned profile to the tag-based Create overload, which must
 # free it when no xform can be built.  The helper feeds a valid profile plus a
@@ -1303,9 +1573,9 @@ function(iccdev_add_xform_create_tag_ownership_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
   endif()
-  if(MSVC)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     message(STATUS
-      "Skipping iccdev.xform-create-tag-ownership: MSVC AddressSanitizer "
+      "Skipping iccdev.xform-create-tag-ownership: this platform's AddressSanitizer "
       "does not support LeakSanitizer detect_leaks=1")
     return()
   endif()
@@ -1354,6 +1624,48 @@ function(iccdev_add_xform_create_tag_ownership_test)
   endif()
 endfunction()
 
+# CIccApplyBPC rebuilds its own cmm objects to find the black point, and used to
+# choose the tag family by profile version instead of asking the xform it is
+# adjusting.  A v4 profile carrying both BToA0 and BToD0 therefore had black
+# measured through the MPE tag even when the caller passed
+# bUseD2BxB2DxTags=false, so the scale and offset came from a pipeline the
+# transform never applies.  Only the B-side is affected -- Create()'s input
+# branch gates DToBx on spectralPCS or v5.  Header + IccProfLib only.
+function(iccdev_add_bpc_d2b_tag_family_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccBpcD2bTagFamilyTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/bpc-d2b-tag-family.cpp"
+  )
+  target_link_libraries(iccBpcD2bTagFamilyTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccBpcD2bTagFamilyTest)
+
+  add_test(
+    NAME iccdev.bpc-d2b-tag-family
+    COMMAND "$<TARGET_FILE:iccBpcD2bTagFamilyTest>"
+  )
+  set_tests_properties(iccdev.bpc-d2b-tag-family PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;xform;bpc;regression"
+  )
+  if(WIN32)
+    set(_bpc_d2b_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccBpcD2bTagFamilyTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _bpc_d2b_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.bpc-d2b-tag-family PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_bpc_d2b_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 function(iccdev_add_xform_abstorel_adjust_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -1385,6 +1697,95 @@ function(iccdev_add_xform_abstorel_adjust_test)
     endforeach()
     set_tests_properties(iccdev.xform-abstorel-adjust PROPERTIES
       ENVIRONMENT_MODIFICATION "${_xform_abstorel_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_parametric_curve_negative_domain_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccParametricCurveNegativeDomainTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/parametric-curve-negative-domain.cpp"
+  )
+  target_link_libraries(iccParametricCurveNegativeDomainTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccParametricCurveNegativeDomainTest)
+
+  add_test(
+    NAME iccdev.parametric-curve-negative-domain
+    COMMAND "$<TARGET_FILE:iccParametricCurveNegativeDomainTest>"
+  )
+  set_tests_properties(iccdev.parametric-curve-negative-domain PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;curve;regression"
+  )
+  if(WIN32)
+    set(_parametric_negative_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccParametricCurveNegativeDomainTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _parametric_negative_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.parametric-curve-negative-domain PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_parametric_negative_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2547: CIccFormulaCurveSegment::Apply() returned NaN for a negative base under a
+# fractional exponent in formula types 0, 1 and 4-7.  The helper pins #2544's rule
+# for every one of those powers, and applies the two tracked transforms that reach
+# one: argbRef's B2D3 and LaserProjector's B2A1.
+#
+# Both profiles are generated, into the source tree by iccdev.create-profiles and
+# into ${ICCDEV_TEST_OUTDIR}/windows-testing by iccdev.windows-create-profiles, so
+# the path follows the platform.  Registered only with iccFromXml, which both
+# fixtures need.  The helper fails when a profile does not open, so a wrong root is
+# a red leg rather than a pass that measured nothing.
+function(iccdev_add_formula_segment_negative_domain_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET iccFromXml)
+    return()
+  endif()
+
+  if(WIN32)
+    set(_formula_profile_root "${ICCDEV_TEST_OUTDIR}/windows-testing")
+  else()
+    set(_formula_profile_root "${ICCDEV_TESTING_DIR}")
+  endif()
+
+  iccdev_add_regression_executable(iccFormulaSegmentNegativeDomainTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/formula-segment-negative-domain.cpp"
+  )
+  target_link_libraries(iccFormulaSegmentNegativeDomainTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccFormulaSegmentNegativeDomainTest)
+
+  add_test(
+    NAME iccdev.formula-segment-negative-domain
+    COMMAND "$<TARGET_FILE:iccFormulaSegmentNegativeDomainTest>"
+      "${_formula_profile_root}/SpecRef/argbRef.icc"
+      "${_formula_profile_root}/Display/LaserProjector.icc"
+  )
+  set_tests_properties(iccdev.formula-segment-negative-domain PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;curve;issue-2547;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+  if(WIN32)
+    set(_formula_negative_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccFormulaSegmentNegativeDomainTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _formula_negative_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.formula-segment-negative-domain PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_formula_negative_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -1422,6 +1823,359 @@ function(iccdev_add_reflectance_observer_illum_range_test)
     endforeach()
     set_tests_properties(iccdev.reflectance-observer-illum-range PROPERTIES
       ENVIRONMENT_MODIFICATION "${_reflectance_illum_range_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2547: a formulaCurveSegment with a NaN or infinite parameter gives a
+# non-finite output wherever the formula reads it.  Validate() must report it
+# as a critical error and Begin() must refuse it, for every function type and
+# parameter position, with finite controls; one case goes through Write() and
+# Read().
+function(iccdev_add_formula_segment_nonfinite_parameter_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccFormulaSegmentNonFiniteParameterTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/formula-segment-nonfinite-parameter.cpp"
+  )
+  target_link_libraries(iccFormulaSegmentNonFiniteParameterTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccFormulaSegmentNonFiniteParameterTest)
+
+  add_test(
+    NAME iccdev.formula-segment-nonfinite-parameter
+    COMMAND "$<TARGET_FILE:iccFormulaSegmentNonFiniteParameterTest>"
+  )
+  set_tests_properties(iccdev.formula-segment-nonfinite-parameter PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;mpe;curve;validate;issue-2547;regression"
+  )
+  if(WIN32)
+    set(_formula_nonfinite_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccFormulaSegmentNonFiniteParameterTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _formula_nonfinite_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.formula-segment-nonfinite-parameter PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_formula_nonfinite_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2609 and #2612: the XML reader accepted a toneMapElement with no
+# ToneMapFunctions container and reported nothing for a short parameter list,
+# and a ToneMapFunction following a DuplicateFunction landed in the duplicate's
+# channel and left the last one NULL.  Element level, no fixture.
+function(iccdev_add_tonemap_functions_xml_test)
+  if(NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccToneMapFunctionsXmlTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/tonemap-functions-xml.cpp"
+  )
+  target_compile_features(iccToneMapFunctionsXmlTest PRIVATE cxx_std_17)
+  target_include_directories(iccToneMapFunctionsXmlTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccToneMapFunctionsXmlTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccToneMapFunctionsXmlTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.tonemap-functions-xml
+      COMMAND "$<TARGET_FILE:iccToneMapFunctionsXmlTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.tonemap-functions-xml
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccToneMapFunctionsXmlTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.tonemap-functions-xml PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;mpe;tonemap;xml;issue-2609;regression"
+  )
+  if(WIN32)
+    set(_tonemap_xml_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccToneMapFunctionsXmlTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _tonemap_xml_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.tonemap-functions-xml PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_tonemap_xml_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2612 and #2609: the JSON reader zero-filled a missing or short tone
+# function parameter array and returned false without a diagnostic when the
+# array held fewer functions than the element has output channels.  Its own
+# executable because IccMpeXml.h and IccMpeJson.h cannot share a translation
+# unit.
+#
+# Also guards #2633, two further defects in the same source file:
+# CIccToneMapFunc's = default copy constructor shallow-copied an owning
+# m_params, which CIccJsonToneMapFunc::NewCopy() reached by copy constructing
+# and so double freed; and icJsonSegPosFromStr() matched a trailing "inf"
+# before reading the sign, so "-inf" returned the positive maximum while
+# "+infinity" and "inf" fell through to atof() and were written back as null.
+# On an unfixed build the NewCopy case ABORTS on the double free and the
+# segment cases FAIL with the round-tripped document in the message.
+function(iccdev_add_tonemap_functions_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCJSON}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccToneMapFunctionsJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/tonemap-functions-json.cpp"
+  )
+  target_compile_features(iccToneMapFunctionsJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccToneMapFunctionsJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccToneMapFunctionsJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccToneMapFunctionsJsonTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.tonemap-functions-json
+      COMMAND "$<TARGET_FILE:iccToneMapFunctionsJsonTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.tonemap-functions-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccToneMapFunctionsJsonTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.tonemap-functions-json PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;mpe;tonemap;json;issue-2612;issue-2609;issue-2633;regression"
+  )
+  if(WIN32)
+    set(_tonemap_json_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccToneMapFunctionsJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _tonemap_json_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.tonemap-functions-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_tonemap_json_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2608: CIccMpeToneMap::Write() kept its tone function positions in a
+# 16-entry stack array, while Read() and the XML and JSON readers accept any
+# uInt16Number output count, so writing a toneMapElement with 17 or more outputs
+# wrote past the array.  Builds the element in memory, checks the position table
+# Write() produces, and reads and applies it; the assertions need no sanitizer.
+function(iccdev_add_tonemap_write_many_outputs_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccToneMapWriteManyOutputsTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/tonemap-write-many-outputs.cpp"
+  )
+  target_link_libraries(iccToneMapWriteManyOutputsTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccToneMapWriteManyOutputsTest)
+
+  add_test(
+    NAME iccdev.tonemap-write-many-outputs
+    COMMAND "$<TARGET_FILE:iccToneMapWriteManyOutputsTest>"
+  )
+  set_tests_properties(iccdev.tonemap-write-many-outputs PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;mpe;tonemap;write;issue-2608;regression"
+  )
+  if(WIN32)
+    set(_tonemap_write_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccToneMapWriteManyOutputsTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _tonemap_write_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.tonemap-write-many-outputs PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_tonemap_write_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2610: both hex decoders skipped whatever they could not read as a
+# pair of hex digits, so a dataType payload of "0g11" loaded as the single byte
+# 0x11 with no diagnostic.  Pins the rule, drives it through the tag parser, and
+# pins the header ProfileID exclusion the corpus depends on.
+function(iccdev_add_hex_data_malformed_xml_test)
+  if(NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccHexDataMalformedXmlTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/hex-data-malformed-xml.cpp"
+  )
+  target_compile_features(iccHexDataMalformedXmlTest PRIVATE cxx_std_17)
+  target_include_directories(iccHexDataMalformedXmlTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccHexDataMalformedXmlTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccHexDataMalformedXmlTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.hex-data-malformed-xml
+      COMMAND "$<TARGET_FILE:iccHexDataMalformedXmlTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.hex-data-malformed-xml
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccHexDataMalformedXmlTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.hex-data-malformed-xml PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;xml;hex;parse;issue-2610;regression"
+  )
+  if(WIN32)
+    set(_icchexdatamalformedxmltest_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccHexDataMalformedXmlTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _icchexdatamalformedxmltest_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.hex-data-malformed-xml PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_icchexdatamalformedxmltest_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2610 on the JSON side, in its own executable because IccMpeXml.h and
+# IccMpeJson.h cannot share a translation unit.
+function(iccdev_add_hex_data_malformed_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCJSON}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccHexDataMalformedJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/hex-data-malformed-json.cpp"
+  )
+  target_compile_features(iccHexDataMalformedJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccHexDataMalformedJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccHexDataMalformedJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccHexDataMalformedJsonTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.hex-data-malformed-json
+      COMMAND "$<TARGET_FILE:iccHexDataMalformedJsonTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.hex-data-malformed-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccHexDataMalformedJsonTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.hex-data-malformed-json PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;json;hex;parse;issue-2610;regression"
+  )
+  if(WIN32)
+    set(_icchexdatamalformedjsontest_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccHexDataMalformedJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _icchexdatamalformedjsontest_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.hex-data-malformed-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_icchexdatamalformedjsontest_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Guards #2520: the reflectance CLUT and reflectance observer elements must honour
+# their Absolute flag (ICC.2:2023 11.2.12 and 11.2.13), which was tested against
+# icRelativeSpectralData (0) and so never read, and the emission observer must not
+# scale Y and Z by m_xyzscale entries its Begin() never set.
+function(iccdev_add_spectral_absolute_flag_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSpectralAbsoluteFlagTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/spectral-absolute-flag.cpp"
+  )
+  target_link_libraries(iccSpectralAbsoluteFlagTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccSpectralAbsoluteFlagTest)
+
+  add_test(
+    NAME iccdev.spectral-absolute-flag
+    COMMAND "$<TARGET_FILE:iccSpectralAbsoluteFlagTest>"
+  )
+  set_tests_properties(iccdev.spectral-absolute-flag PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;mpe;spectral;pcc;issue-2520;regression;asan"
+  )
+  if(WIN32)
+    set(_spectral_absolute_flag_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSpectralAbsoluteFlagTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _spectral_absolute_flag_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.spectral-absolute-flag PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_spectral_absolute_flag_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -1568,6 +2322,114 @@ function(iccdev_add_chromaticity_validate_test)
   endif()
 endfunction()
 
+# #2435: isLegalUTF8() omitted the second-byte LOWER bound for the 0xED and
+# 0xF4 leads. case 2 applies only the UPPER bound and the generic lower bound
+# lives in the switch's default: arm, which every named arm bypasses -- E0 and F0
+# tighten the lower bound so they imply a >= 0x80 by accident, ED and F4 did not.
+# 532,480 malformed sequences passed strictConversion and were silently
+# re-encoded as different characters: ED 01 80 as U+B040, and F4 01 80 80 as
+# U+81000, which is above U+10FFFF and came out of icConvertUTF8toUTF16 as a
+# surrogate pair, so the OUTPUT was not well-formed UTF-16 either. Bisected by
+# xsscx to 1f0a9dd (2015-09-29) -- wrong for the function's entire life.
+#
+# The test walks every sequence the function can be asked about (84,994,816)
+# against an RFC 3629 reference and asserts BOTH directions: nothing malformed
+# accepted, and nothing well-formed rejected. The second direction is what
+# catches a fix that over-tightens -- blanket-rejecting the ED and F4 leads
+# passes every hand-written malformed case and breaks U+D7FF and U+10FFFF, the
+# two codepoints those arms exist to bound.
+#
+# Every probe hands the whole buffer over as the window so the function derives
+# its own length and reaches the validator. Sizing the window to the RFC length
+# instead skipped isLegalUTF8() entirely for the 77 leads that have no RFC length,
+# leaving `*source > 0xF4` and the 0xC0/0xC1 overlong guard with no coverage at
+# all: deleting the former kept the arm green while F5 80 80 80 became legal,
+# which is the call shape isLegalUTF8String() makes on real profile text.
+#
+# 120s rather than the usual 60s: the exhaustive arm is ~85M calls, about a
+# second optimised, but it is measured on Debug and sanitizer legs too.
+# Header + IccProfLib only.
+function(iccdev_add_islegalutf8_bound_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccIsLegalUtf8BoundTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/islegalutf8-second-byte-bound.cpp"
+  )
+  target_link_libraries(iccIsLegalUtf8BoundTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccIsLegalUtf8BoundTest)
+
+  add_test(
+    NAME iccdev.islegalutf8-second-byte-bound
+    COMMAND "$<TARGET_FILE:iccIsLegalUtf8BoundTest>"
+  )
+  set_tests_properties(iccdev.islegalutf8-second-byte-bound PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;utf8;unicode;validation;security;issue-2435;regression"
+  )
+  if(WIN32)
+    set(_islegalutf8_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccIsLegalUtf8BoundTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _islegalutf8_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.islegalutf8-second-byte-bound PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_islegalutf8_windows_env_mods}")
+  endif()
+
+endfunction()
+
+# #2454: icJsonEscape() appended well-formed UTF-8 unchanged, so --json and
+# --evidence-json emitted live U+202E and the C1 controls while the text sink
+# escaped the same string.  Twelve hand-written cases, not an exhaustive walk:
+# six that fail against master and six controls that pass on both builds so a
+# blunter fix cannot satisfy the suite.  Header + IccProfLib only.
+function(iccdev_add_json_escape_codepoint_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccJsonEscapeCodepointTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/json-escape-codepoint.cpp"
+  )
+  # icJsonEscape() lives in Tools/CmdLine/IccCmdLineUtil.h, which is header-only
+  # and pulls in IccProfLib's IccFileUtil.h for the icDecodeUtf8() this fix
+  # reuses (#2437).  Linking the library keeps this consistent with its sibling
+  # regression executables rather than relying on the helper staying inline.
+  target_include_directories(iccJsonEscapeCodepointTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/Tools/CmdLine")
+  target_link_libraries(iccJsonEscapeCodepointTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccJsonEscapeCodepointTest)
+
+  add_test(
+    NAME iccdev.json-escape-codepoint
+    COMMAND "$<TARGET_FILE:iccJsonEscapeCodepointTest>"
+  )
+  set_tests_properties(iccdev.json-escape-codepoint PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;json;utf8;unicode;cli;security;issue-2454;regression")
+  if(WIN32)
+    set(_json_escape_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccJsonEscapeCodepointTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _json_escape_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.json-escape-codepoint PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_json_escape_windows_env_mods}")
+  endif()
+
+endfunction()
+
+
 # #2000: CIccTagCicp's copy constructor had an empty body and a commented-out
 # parameter (/* ITXYZ */, copy-paste residue from CIccTagXYZ), so the four
 # icUInt8Number members -- which have no in-class initialiser -- were left
@@ -1613,6 +2475,90 @@ function(iccdev_add_cicp_copy_ctor_test)
   endif()
 endfunction()
 
+# #2181: two defects in the ACS multi-process elements.
+#
+# CIccMpeAcs::Describe() picked its label with "if (GetBAcsSig())", which returns
+# m_signature on a bACS element and the base class's icSigAcsZero on everything
+# else -- so it conflated the element TYPE with whether the ACS data signature
+# happened to be non-zero. Those agree for every bACS element except one carrying
+# icSigAcsZero, a legitimate value CIccMpeXmlBAcs::ToXml deliberately preserves
+# (#1843), which therefore reported itself as ELEM_eACS. GetType() is fixed per
+# class and cannot be confused. Describe() was the ONLY reader of GetBAcsSig() in
+# the tree -- everything else discriminates on IsAcs(), which was always
+# type-based -- so the blast radius is the dump, not the CMM.
+#
+# And CIccMpeAcs::AllocData() left m_nDataSize at the previous allocation's value
+# when malloc failed, so the element carried a NULL pointer beside a non-zero
+# size. All four copy paths guard their memcpy on the destination pointer and the
+# SOURCE size, so copying such an element reads from NULL -- and NewCopy() is one
+# of them. Case 4 of the test forces the failure with SIZE_MAX/2, which every
+# malloc refuses outright, so the red/green is deterministic rather than
+# OOM-dependent, and then performs that copy.
+#
+# Drives Describe() directly rather than chaining iccFromXml into iccDumpProfile:
+# the bytes iccFromXml writes were verified correct, so the tool chain would test
+# two innocent tools to reach one defective function -- and unlike a script test,
+# this is registered on Windows. Requires IccXML because the helper derives
+# test elements from the XML MPE classes.
+function(iccdev_add_mpe_acs_zero_signature_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMpeAcsZeroSigTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/mpe-acs-zero-signature.cpp"
+  )
+  target_compile_features(iccMpeAcsZeroSigTest PRIVATE cxx_std_17)
+  target_include_directories(iccMpeAcsZeroSigTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccMpeAcsZeroSigTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccMpeAcsZeroSigTest)
+
+  # Launched through `cmake -E env` because case 4 deliberately asks for
+  # SIZE_MAX/2 to force a malloc failure, and ASan does NOT return NULL for an
+  # oversize request: with the default allocator_may_return_null=0 it reports
+  # allocation-size-too-big and ABORTS the process.  Measured under the sanitizer
+  # lane's own options (ci-docker-pr.yml exports
+  # ASAN_OPTIONS="halt_on_error=0,detect_leaks=0"): exit 1, so this test would
+  # have gone red there while passing everywhere else.  halt_on_error does not
+  # cover allocator errors.  allocator_may_return_null=1 restores the NULL return
+  # the test is written against, and downgrades the message to a WARNING line
+  # that matches none of the in-tree "ERROR: AddressSanitizer" screens.  The same
+  # option is used for the same reason by the issue-1846, issue-1909 and AFL
+  # scripts.  detect_leaks=0 mirrors what the lanes already set, since setting
+  # ASAN_OPTIONS here replaces the inherited value rather than adding to it; a
+  # CTest ENVIRONMENT property is not reliable for ASAN_OPTIONS (see
+  # iccdev.xform-create-tag-ownership above).
+  add_test(
+    NAME iccdev.mpe-acs-zero-signature
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "ASAN_OPTIONS=detect_leaks=0:allocator_may_return_null=1"
+      "$<TARGET_FILE:iccMpeAcsZeroSigTest>"
+  )
+  set_tests_properties(iccdev.mpe-acs-zero-signature PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;mpe;acs;issue-2181;regression"
+  )
+  if(WIN32)
+    set(_mpe_acs_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMpeAcsZeroSigTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _mpe_acs_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.mpe-acs-zero-signature PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_mpe_acs_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # #2001: iccPawgReport check C5 warned on every profile carrying a cicpTag,
 # because icSigCicpTag was missing from kCommonOptional. The tag is recognised by
 # IsSpecTag() (CIccTagCreator resolves 'cicp' to "cicpTag"), so it is never
@@ -1635,6 +2581,7 @@ function(iccdev_add_pawg_c5_cicp_test)
   )
   target_compile_features(iccPawgC5CicpTest PRIVATE cxx_std_17)
   target_include_directories(iccPawgC5CicpTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/Tools/CmdLine"
     "${ICCDEV_REPO_ROOT}/Tools/CmdLine/IccPawgReport"
   )
   target_link_libraries(iccPawgC5CicpTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
@@ -1797,6 +2744,184 @@ function(iccdev_add_pcs_birefl_illuminant_range_test)
   endif()
 endfunction()
 
+# CIccSparseMatrix::Union() is a near-verbatim copy of CIccSparseMatrix::Interp() and
+# carried the same five defects: Init() without bSetData (so the result has no row/column
+# header), each row's start overwritten with its end, the second matrix's per-row count
+# measured from the first matrix's row offset, neither single-sided merge tail advancing
+# i/j or the write cursor (an INFINITE LOOP, CWE-835), and both whole-row memcpy() calls
+# passing an entry count where bytes are required.
+#
+# Union()'s only caller is CIccTagSparseMatrixArray::Validate(), which unions each
+# consecutive pair in any sparseMatrixArrayType tag holding two or more.  Validation is
+# reached from iccDumpProfile and the public validation API on untrusted input, so a
+# profile with a two-matrix sparse tag whose matrices have different sparsity patterns --
+# the ordinary case, not a malformed one -- wedged the process instead of reporting
+# anything.  Every sparse tag in Testing/ held exactly one matrix, and with one matrix the
+# loop is never entered, so none of it had coverage.
+#
+# The TIMEOUT is the assertion for the hang: against unfixed sources the test does not
+# return.  In-memory fixtures only.
+function(iccdev_add_sparsematrix_union_validate_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSparseMatrixUnionValidateTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/sparsematrix-union-validate.cpp"
+  )
+  target_link_libraries(iccSparseMatrixUnionValidateTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccSparseMatrixUnionValidateTest)
+
+  add_test(
+    NAME iccdev.sparsematrix-union-validate
+    COMMAND "$<TARGET_FILE:iccSparseMatrixUnionValidateTest>"
+  )
+  set_tests_properties(iccdev.sparsematrix-union-validate PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;security;sparsematrix;cwe-835;regression"
+  )
+  if(WIN32)
+    set(_sparse_union_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSparseMatrixUnionValidateTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _sparse_union_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.sparsematrix-union-validate PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_sparse_union_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# A v5 NamedColor entry whose spectral member is a sparseMatrixArrayType could not be
+# applied at all, and CIccPcsStepSrcSparseMatrix::Apply() had therefore never executed.
+#
+# CIccTagSparseMatrixArray implements CIccTagNumArray in a different dialect than every
+# other subclass -- GetNumValues() counts matrices rather than floats, and
+# GetValues()/Interpolate() take nVectorSize in bytes.  CIccArrayNamedColor::Validate()
+# branches on IsMatrixArray() for exactly that reason; CIccStructNamedColor::GetTint()
+# never got the matching branch and divided a matrix count by a sample count, returning
+# false before reading any data, so CIccXformNamedColor::Apply() reported
+# icCmmStatBadTintXform for every colour.  Three further defects sat behind it in
+# CIccSparseMatrix::Interp(), which the tint path is the only caller of: the destination
+# was initialised without stamping its row/column header, each row's stored start was
+# overwritten with its end, the per-row count for the second matrix was measured from the
+# first matrix's row offset, both single-sided merge tails failed to advance and spun
+# forever, and the whole-row copies passed an entry count to memcpy() as a byte count.
+#
+# In-memory fixtures only, so a corpus change cannot disable it.  The real profile is
+# covered by iccdev_add_namedcolor_sparse_matrix_xml_test() below.
+function(iccdev_add_namedcolor_sparse_matrix_apply_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccNamedColorSparseMatrixApplyTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/namedcolor-sparse-matrix-apply.cpp"
+  )
+  target_link_libraries(iccNamedColorSparseMatrixApplyTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccNamedColorSparseMatrixApplyTest)
+
+  add_test(
+    NAME iccdev.namedcolor-sparse-matrix-apply
+    COMMAND "$<TARGET_FILE:iccNamedColorSparseMatrixApplyTest>"
+  )
+  set_tests_properties(iccdev.namedcolor-sparse-matrix-apply PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;spectral;namedcolor;sparsematrix;regression"
+  )
+  if(WIN32)
+    set(_nmcl_sparse_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccNamedColorSparseMatrixApplyTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _nmcl_sparse_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.namedcolor-sparse-matrix-apply PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_nmcl_sparse_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# The same defects, on the profile they were found in.  Testing/**/*.icc is gitignored --
+# CreateAllProfiles.sh generates it -- so all three inputs are the tracked XML documents,
+# parsed through the CIccProfileXml::LoadXml path iccFromXml uses, as
+# iccdev.v2-xml-fixtures does.  The chain is the one Testing/RunTests.sh already runs for
+# the dense bi-spectral FluorescentNamedColor; building the whole chain is what makes the
+# sparse PCS step run at all, since a lone named profile has no PCS connection.
+function(iccdev_add_namedcolor_sparse_matrix_xml_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccNamedColorSparseMatrixXmlTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/namedcolor-sparse-matrix-xml.cpp"
+  )
+  target_compile_features(iccNamedColorSparseMatrixXmlTest PRIVATE cxx_std_17)
+  target_include_directories(iccNamedColorSparseMatrixXmlTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccNamedColorSparseMatrixXmlTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccNamedColorSparseMatrixXmlTest)
+
+  # The second fixture is the first plus one extra matrix per colour, authored at the
+  # midpoint of that colour's tint-zero and full-tint matrices, plus a single 1e-4
+  # off-diagonal probe entry.  The midpoint is what lets the test assert the two profiles
+  # produce the same tint axis; the probe entry is what makes their sparsity patterns
+  # differ, without which CIccSparseMatrix::Union() -- reached from this profile's own
+  # Validate() -- is never wrong and stays unreached.  The test checks both properties
+  # hold, so neither can quietly lapse.
+  set(_nmcl_sparse_xml_args
+    "${ICCDEV_TESTING_DIR}/Named/SparseMatrixNamedColor.xml"
+    "${ICCDEV_TESTING_DIR}/Named/SparseMatrixNamedColorTint.xml"
+    "${ICCDEV_TESTING_DIR}/PCC/Spec400_10_700-D50_2deg-Abs.xml"
+    "${ICCDEV_TESTING_DIR}/SpecRef/SixChanCameraRef.xml"
+  )
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.namedcolor-sparse-matrix-xml
+      COMMAND "$<TARGET_FILE:iccNamedColorSparseMatrixXmlTest>" ${_nmcl_sparse_xml_args}
+    )
+  else()
+    add_test(
+      NAME iccdev.namedcolor-sparse-matrix-xml
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccNamedColorSparseMatrixXmlTest>" ${_nmcl_sparse_xml_args}
+    )
+  endif()
+  set_tests_properties(iccdev.namedcolor-sparse-matrix-xml PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;xml;spectral;namedcolor;sparsematrix;regression"
+  )
+  if(WIN32)
+    set(_nmcl_sparse_xml_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccNamedColorSparseMatrixXmlTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _nmcl_sparse_xml_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.namedcolor-sparse-matrix-xml PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_nmcl_sparse_xml_env_mods}"
+    )
+  endif()
+endfunction()
+
 # #1853 (ci-qa-flags bucket 4): the PCS step chain could be left disagreeing with itself,
 # and the temporaries it runs through were sized assuming it never is.
 #
@@ -1848,9 +2973,9 @@ function(iccdev_add_pcs_applyillum_chain_sizing_test)
   endif()
 endfunction()
 
-# #1932: CIccPcsXform::Connect() sized the spectral PCS steps it pushes from the header's
-# spectralRange while the pixel buffers those steps run in are sized from the channel
-# count in the spectralPCS signature, and never checked that the two agreed. A header
+# #1932 and #2579: CIccPcsXform::Connect() sized the spectral PCS steps it pushes from the header's
+# spectralRange while the pixel buffers those steps run in are sized from the effective
+# PCS port, and never checked that the two agreed. A header
 # declaring "rs" + 36 channels alongside spectralRange.steps == 184 produced a 3x184
 # observer matrix reading a 36-float pixel (CWE-125 heap over-read in
 # CIccSparseMatrix::MultiplyVector). CIccProfile::Validate() already calls that a critical
@@ -1878,7 +3003,7 @@ function(iccdev_add_spectral_pcs_range_consistency_test)
   set_tests_properties(iccdev.spectral-pcs-range-consistency PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
     TIMEOUT 60
-    LABELS "iccdev;security;spectral;issue-1932;regression"
+    LABELS "iccdev;security;spectral;issue-1932;issue-2579;regression"
   )
   if(WIN32)
     set(_spectral_pcs_range_windows_env_mods
@@ -2262,6 +3387,52 @@ function(iccdev_add_unsupported_profile_class_test)
   endif()
 endfunction()
 
+# #2176: CIccXform::Begin() reported every failure of its IIccAdjustPCSXform hint as
+# icCmmStatIncorrectApply -- "Incorrect Apply object" -- which is false on all 26 of
+# CalcFactors()' failure paths: the apply object is well formed in every one and it is
+# the PCS adjustment that failed. The other 33 icCmmStatIncorrectApply returns in
+# IccCmm.cpp all concern a missing apply object or an unusable apply interface, so this
+# site was the lone outlier. It now returns icCmmStatCantAdjustPcs. The test drives two
+# failures with unrelated causes (an intent CalcFactors() refuses outright, and a
+# genuinely degenerate black-point estimate) plus a control that must still begin
+# cleanly, so the change cannot be satisfied by failing more often. Fixtures are built
+# in code -- case 2 needs a degenerate BToA0 no generated corpus profile carries.
+# Header + IccProfLib only.
+function(iccdev_add_pcs_adjust_status_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccPcsAdjustStatusTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/pcs-adjust-status.cpp"
+  )
+  target_link_libraries(iccPcsAdjustStatusTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccPcsAdjustStatusTest)
+
+  add_test(
+    NAME iccdev.pcs-adjust-status
+    COMMAND "$<TARGET_FILE:iccPcsAdjustStatusTest>"
+  )
+  set_tests_properties(iccdev.pcs-adjust-status PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;cmm;status;issue-2176;regression"
+  )
+  if(WIN32)
+    set(_pcsadjstat_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccPcsAdjustStatusTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _pcsadjstat_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.pcs-adjust-status PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_pcsadjstat_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 function(iccdev_add_pcs_xyzconvert_matrix_channels_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -2520,7 +3691,10 @@ function(iccdev_add_iccviz_writer_serialization_test)
   # path, and the other copy has no Serialize declaration -- so if the engine's
   # include dir ever moved, the headers and the sources could silently come from
   # different copies.
-  target_include_directories(iccVizWriterSerializationTest PRIVATE "${_viz_writer_dir}")
+  target_include_directories(iccVizWriterSerializationTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/Tools/CmdLine"
+    "${_viz_writer_dir}"
+  )
   target_link_libraries(iccVizWriterSerializationTest PRIVATE
     ${TARGET_LIB_ICCPROFLIB} IccVizEngine)
   add_dependencies(check iccVizWriterSerializationTest)
@@ -2611,9 +3785,9 @@ function(iccdev_add_iccprofileplot_pdf_leak_test)
   if(NOT TARGET iccProfileVisualizePlot)
     return()
   endif()
-  if(MSVC)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     message(STATUS
-      "Skipping iccdev.iccprofileplot-pdf-leak: MSVC AddressSanitizer "
+      "Skipping iccdev.iccprofileplot-pdf-leak: this platform's AddressSanitizer "
       "does not support LeakSanitizer detect_leaks=1")
     return()
   endif()
@@ -2624,13 +3798,15 @@ function(iccdev_add_iccprofileplot_pdf_leak_test)
   # tool leaks.  Inheriting that would make this a false pass, so launch through
   # `cmake -E env ASAN_OPTIONS=detect_leaks=1` to force leak detection on for this
   # process only (same mechanism as the cmmsearch/xform ownership tests).  The
-  # tool writes its PDF/TIFF beside the CWD, so run inside the ctest output dir.
+  # tool writes its PDF/TIFF beside its input profile, so use a build-tree copy
+  # rather than passing the tracked source-tree fixture directly.
   add_test(
     NAME iccdev.iccprofileplot-pdf-leak
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "ASAN_OPTIONS=detect_leaks=1"
-      "$<TARGET_FILE:iccProfileVisualizePlot>"
-      "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DVIZ_TOOL=$<TARGET_FILE:iccProfileVisualizePlot>"
+      "-DPROFILE=${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+      "-DWORKDIR=${ICCDEV_TEST_OUTDIR}/iccprofileplot-pdf-leak"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunIccProfilePlotPdfLeakTest.cmake"
   )
   set_tests_properties(iccdev.iccprofileplot-pdf-leak PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
@@ -2885,6 +4061,87 @@ function(iccdev_add_applytolink_negative_intent_tests)
   endif()
 endfunction()
 
+# #2270: iccApplyToLink's transform-type range check could never fire.
+#
+# nType is "abs(code % 100) / 10", so it spans 0..9; the check tested it against
+# icXformLutMinimum (0) and icXformLutMaximum (0xD). Sweeping all 1000 codes on
+# master, "decoded transform type is out of range" printed zero times. The check
+# was removed rather than widened, per the ruling on the issue.
+#
+# BOTH TESTS BELOW ARE GREEN ON THE UNFIXED TREE, and that is not a defect in
+# them: removing unreachable code cannot change behaviour, so there is no red
+# probe to write. What they pin is the ruling itself -- the two column widths a
+# future change could plausibly get wrong -- and each goes red under the
+# alternative that was rejected.
+#
+# "90" is the largest tens digit the column can hold (icXformLutColorimetric).
+# "140" is the case that separates this decode from CIccCfgProfileSequence::
+# fromArgs(): that one strips "% 1000", so its hundreds column feeds nType and
+# "140" is refused there as type 14 -- measured, alongside "130" resolving to
+# icXformLutNamedDevice. This tool spends the same column on nLuminance, so 140
+# is a luminance-matched BPC request and succeeds. Widening the tens column here
+# to 0..13 -- option (b) on the issue, the one not taken -- would silently
+# redefine every code from 100 up and turn this test red.
+function(iccdev_add_applytolink_transform_type_tests)
+  if(NOT TARGET iccApplyToLink)
+    return()
+  endif()
+
+  add_dependencies(check iccApplyToLink)
+  add_dependencies(check-fast iccApplyToLink)
+
+  set(_applytolink_type_tests "")
+
+  add_test(
+    NAME iccdev.applytolink-max-transform-type-digit
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccApplyToLink>"
+      "-DLABEL=applytolink-cli"
+      "-DTOOL_ARGS=${ICCDEV_TEST_OUTDIR}/applytolink-max-transform-type-digit.icc;0;2;1;MaxTypeDigit;0;1;0;0;${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc;90"
+      "-DEXPECT_EXIT=zero"
+      "-DEXPECT_MATCH=LUT successfully written"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+  list(APPEND _applytolink_type_tests iccdev.applytolink-max-transform-type-digit)
+
+  add_test(
+    NAME iccdev.applytolink-hundreds-column-is-not-a-type
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccApplyToLink>"
+      "-DLABEL=applytolink-cli"
+      "-DTOOL_ARGS=${ICCDEV_TEST_OUTDIR}/applytolink-hundreds-column-is-not-a-type.icc;0;2;1;HundredsIsLuminance;0;1;0;0;${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc;140"
+      "-DEXPECT_EXIT=zero"
+      "-DEXPECT_MATCH=LUT successfully written"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+  list(APPEND _applytolink_type_tests iccdev.applytolink-hundreds-column-is-not-a-type)
+
+  set_tests_properties(${_applytolink_type_tests} PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;tools;applytolink;cli;exitcode;issue-2270;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+
+  if(WIN32)
+    # Same reason as the sibling above: the tool is reached through cmake -P and
+    # the child inherits this process's PATH, so without these a missing
+    # IccProfLib2.dll would exit nonzero and fail these positive tests for a
+    # reason that has nothing to do with the decode.
+    set(_applytolink_type_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccApplyToLink>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _applytolink_type_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(${_applytolink_type_tests} PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_applytolink_type_env_mods}"
+    )
+  endif()
+endfunction()
+
 function(iccdev_add_applytolink_v4_missing_desc_test)
   if(NOT TARGET iccApplyToLink)
     return()
@@ -2919,6 +4176,159 @@ function(iccdev_add_applytolink_v4_missing_desc_test)
     endforeach()
     set_tests_properties(iccdev.applytolink-v4-missing-device-descriptions PROPERTIES
       ENVIRONMENT_MODIFICATION "${_applytolink_v4_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2341: CDevLinkWriter::begin() wrote curve-set slot 1 nSrcSamples-1 times.
+#
+# The V5 branch attaches a CIccMpeCurveSet when the input range is not the default
+# [0,1], sharing one CIccSingleSampledCurve across every input channel -- which the
+# class supports: SetCurve() only deletes an outgoing pointer no other slot still
+# aliases, and Write() emits a shared curve once with every position-table entry
+# pointing at it. The loop that filled slots 1..n-1 ignored its own counter and
+# wrote index 1 each pass, so slots 2..n-1 stayed NULL. Write() skips a NULL slot
+# instead of failing, leaving those channels the calloc'd {offset 0, size 0}
+# position entry, and the writer reported success.
+#
+# Which is why these assert the READ-BACK file, not the writer. On the unfixed
+# tool every case below exits 0 and prints "LUT successfully written": an
+# exit-status or message assertion, the shape every other iccApplyToLink test in
+# this file uses, passes against the defect.
+#
+# The verdict alone is not enough either, and that is measured rather than
+# assumed. An earlier version of this block asserted only "Profile is valid", and
+# replacing the curve-set condition in CDevLinkWriter::begin() with if(false) --
+# dropping the input-domain curves from every V5 link -- left every test green,
+# because a link with no curve set is perfectly valid. So the cases also assert
+# the structure: EXPECT_DUMP_COUNT pins one per-channel curve carrying the
+# requested domain for every input channel, and the default-range case asserts
+# the curve set is ABSENT.
+#
+# The defect needs a source space with at least THREE channels: a 1-channel
+# source never enters the loop, and for a 2-channel source the loop's single
+# iteration (i=1) writes slot 1, which is the slot it should write. Both are
+# therefore correct on the unfixed tool, which is how this survived from
+# 889db62b (2023-11-03) until now.
+#
+# The pair below is what pins it, and the two are jointly sufficient -- each of
+# the four mutations that matter turns at least one of them red, measured:
+#   RGB at 0.001..0.999  -- red for the original bug, for dropping the curve set,
+#                           and for filling the extra channels with the wrong
+#                           domain. EXPECT_DUMP_COUNT=3 is what carries the
+#                           general claim "one curve per input channel", which is
+#                           why a wider source is not needed to state it.
+#   RGB at 0 1           -- valid on BOTH trees; takes the branch that attaches
+#                           no curve set, so REJECT_DUMP asserts the absence the
+#                           other asserts the presence of. Red if the range
+#                           condition is widened to attach one unconditionally.
+# The second is a control and is not optional: without it a "fix" that attached a
+# curve set to every link would satisfy the first.
+#
+# Deliberately NOT registered: CMYK (4 channels) and Gray (1 channel) cases,
+# which ran green locally and turned all three Windows legs red -- MSVC, ClangCL
+# and MinGW alike -- with
+#   Error - Unable to add '...' to transform chain (status 3: Invalid profile)
+# for Testing/CMYK-3DLUTs/CMYK-3DLUTs.icc and Testing/Display/GrayGSDF.icc. Both
+# validate clean here and both are written by CreateAllProfiles.bat reporting
+# "Profile parsed and saved correctly", so the divergence is in reading them back,
+# not in generating them, and it is not understood. It is also invisible today:
+# no other CTest in this file uses either profile, and the manifest check that
+# would validate them is a script test, which is not registered on Windows at all.
+# That is a separate defect from #2341 and is reported separately; gating those
+# two cases to non-Windows here would have buried it. Every fixture used above is
+# tracked in git rather than generated, which is what makes the pair portable.
+function(iccdev_add_applytolink_curveset_channels_tests)
+  if(NOT TARGET iccApplyToLink OR NOT TARGET iccDumpProfile)
+    return()
+  endif()
+
+  add_dependencies(check iccApplyToLink iccDumpProfile)
+  add_dependencies(check-fast iccApplyToLink iccDumpProfile)
+
+  set(_applytolink_curveset_tests "")
+
+  # Spelled out rather than looped: foreach() flattens a "name;profile;range"
+  # element into separate iterations, so the grouping would not survive it -- the
+  # same reason the negative-intent pairs above are written out.
+  #
+  # The EXPECT_DUMP regex has two deliberate properties, both established by
+  # measurement rather than by reading.
+  #
+  # It must run through the closing bracket. string(REGEX MATCHALL) returns only
+  # ONE match for a pattern that stops mid-line -- "Single Sampled Curve
+  # \\[0\\.00100000" counts 1 against a dump holding three identical lines, while
+  # the same pattern extended to "\\]" counts 3. A truncated pattern would
+  # therefore fail every count here for a reason that has nothing to do with the
+  # profile, so the pattern is anchored to the end of the printed value.
+  #
+  # The trailing digits are matched as [0-9]* rather than spelled out.
+  # CIccSingleSampledCurve::Describe() renders the domain with %.8f
+  # (IccMpeBasic.cpp:1576) and icFloatNumber is unconditionally float
+  # (IccDefs.h:88), so "0.99900001" is deterministic -- but the Windows legs
+  # cannot be exercised locally, and this drops a printf last-digit-rounding
+  # assumption at no cost: the domain is still pinned to 0.999x, and the wrong
+  # domain a mis-fix produces renders "0.00000000, 1.00000000", which fails.
+  add_test(
+    NAME iccdev.applytolink-curveset-rgb-channels
+    COMMAND "${CMAKE_COMMAND}"
+      "-DWRITER=$<TARGET_FILE:iccApplyToLink>"
+      "-DREADER=$<TARGET_FILE:iccDumpProfile>"
+      "-DLABEL=applytolink-curveset"
+      "-DWRITER_ARGS=${ICCDEV_TEST_OUTDIR}/applytolink-curveset-rgb.icc;0;3;1;CurveSetRGB;0.001;0.999;1;0;${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc;0"
+      "-DEXPECT_VERDICT=Profile is valid"
+      "-DREJECT_VERDICT=Critical Error|Unable to parse"
+      "-DEXPECT_DUMP=Single Sampled Curve \\[0\\.00100000, 0\\.999[0-9]*\\]"
+      "-DEXPECT_DUMP_COUNT=3"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunDeviceLinkRoundTripTest.cmake"
+  )
+  list(APPEND _applytolink_curveset_tests iccdev.applytolink-curveset-rgb-channels)
+
+
+
+  # Control: the same RGB chain at the default range, which takes the branch that
+  # attaches no curve set. This is the case that fixes the range condition in
+  # place: REJECT_DUMP asserts the absence the other three assert the presence of,
+  # so widening the condition to attach a curve set unconditionally is red here
+  # while narrowing it to attach one never is red in the three above.
+  add_test(
+    NAME iccdev.applytolink-curveset-default-range
+    COMMAND "${CMAKE_COMMAND}"
+      "-DWRITER=$<TARGET_FILE:iccApplyToLink>"
+      "-DREADER=$<TARGET_FILE:iccDumpProfile>"
+      "-DLABEL=applytolink-curveset"
+      "-DWRITER_ARGS=${ICCDEV_TEST_OUTDIR}/applytolink-curveset-default-range.icc;0;3;1;CurveSetDefault;0;1;1;0;${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc;0"
+      "-DEXPECT_VERDICT=Profile is valid"
+      "-DREJECT_VERDICT=Critical Error|Unable to parse"
+      "-DREJECT_DUMP=BEGIN_CURVE_SET"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunDeviceLinkRoundTripTest.cmake"
+  )
+  list(APPEND _applytolink_curveset_tests iccdev.applytolink-curveset-default-range)
+
+  set_tests_properties(${_applytolink_curveset_tests} PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;tools;applytolink;mpe;curveset;issue-2341;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+
+  if(WIN32)
+    # Both tools are reached through cmake -P and inherit this test process's
+    # PATH, so both need the runtime paths -- the reader as much as the writer.
+    # A missing IccProfLib2.dll makes iccDumpProfile print nothing, and an empty
+    # report matches no EXPECT_VERDICT, so this presents as a verdict mismatch
+    # rather than as a load failure.
+    set(_applytolink_curveset_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccApplyToLink>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccDumpProfile>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _applytolink_curveset_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(${_applytolink_curveset_tests} PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_applytolink_curveset_env_mods}"
     )
   endif()
 endfunction()
@@ -3384,6 +4794,7 @@ function(iccdev_add_pawg_compression_paths_test)
   )
   target_compile_features(iccPawgCompressionPathsTest PRIVATE cxx_std_17)
   target_include_directories(iccPawgCompressionPathsTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/Tools/CmdLine"
     "${ICCDEV_REPO_ROOT}/Tools/CmdLine/IccPawgReport"
   )
   target_link_libraries(iccPawgCompressionPathsTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
@@ -3559,10 +4970,10 @@ function(iccdev_add_xml_relaxng_validation_leak_test)
   #
   # The three existing leak regressions (cmmsearch-namedcolor-ownership,
   # xform-create-tag-ownership, iccprofileplot-pdf-leak) skip themselves entirely
-  # on MSVC, whose AddressSanitizer has no LeakSanitizer and would be handed an
-  # option it does not implement. This test is not skipped there, because its
+  # where AddressSanitizer has no LeakSanitizer and would be handed an option it
+  # does not implement. This test is not skipped there, because its
   # LoadXml return-value assertions pin the accept/reject behaviour at each of the
-  # four RelaxNG exits and are worth running on Windows even with no leak check;
+  # four RelaxNG exits and are worth running on those platforms even with no leak check;
   # only the detect_leaks=1 wrapper is dropped.
   set(_relaxng_leak_args
     "${ICCDEV_TESTING_DIR}/Display/sRGB_D65_MAT.xml"
@@ -3571,7 +4982,7 @@ function(iccdev_add_xml_relaxng_validation_leak_test)
     "${ICCDEV_REPO_ROOT}/.github/ci/test-data/relaxng-malformed.rng"
     "relaxng-calc-import-badroot-main.xml"
   )
-  if(MSVC)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     add_test(
       NAME iccdev.xml-relaxng-validation-leak
       COMMAND "$<TARGET_FILE:iccXmlRelaxNGValidationLeakTest>" ${_relaxng_leak_args}
@@ -3641,7 +5052,7 @@ function(iccdev_add_xml_curve_oversize_file_test)
   # written into the source tree the way the hybrid pipeline does.
   set(_curve_oversize_scratch "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/xml-curve-oversize-file")
 
-  if(WIN32)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     add_test(
       NAME iccdev.xml-curve-oversize-file
       COMMAND "$<TARGET_FILE:iccXmlCurveOversizeFileTest>" "${_curve_oversize_scratch}"
@@ -3671,6 +5082,1011 @@ function(iccdev_add_xml_curve_oversize_file_test)
     endforeach()
     set_tests_properties(iccdev.xml-curve-oversize-file PROPERTIES
       ENVIRONMENT_MODIFICATION "${_curve_oversize_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2323: CIccMpeXmlCalculator::Flatten() scanned an in{}/out{} channel-reference
+# index for its closing bracket and then did "select = ptr + 1" unconditionally.
+# With no closing bracket the scan stops on the NUL terminator, so that assignment
+# ran strlen() one past it. Which diagnostic appears depends only on the selector
+# length, because that decides where the string keeps its bytes: <= 14 chars stays
+# inside libstdc++'s inline SSO buffer and is not caught at all (the malformed
+# reference is simply accepted), exactly 15 fills it and the read leaves the stack
+# frame (the reported 1-byte-read-stack-buffer-overflow, scariness 27), and >= 16
+# has moved to the heap. The helper covers all three. It also carries the
+# follow-up deferred from #2365 -- Flatten()'s entry test read select[1] where it
+# meant select[0], so a parenthesised index selected the wrong channel -- and
+# pins each of the five input families that correction moves, together with the
+# well-formed spellings the corpus uses, so that the guard cannot be satisfied by
+# refusing every indexed reference.
+function(iccdev_add_calc_channel_ref_unterminated_index_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCalcChannelRefUnterminatedIndexTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/calc-channel-ref-unterminated-index.cpp"
+  )
+  target_compile_features(iccCalcChannelRefUnterminatedIndexTest PRIVATE cxx_std_17)
+  target_include_directories(iccCalcChannelRefUnterminatedIndexTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccCalcChannelRefUnterminatedIndexTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccCalcChannelRefUnterminatedIndexTest)
+
+  # The helper writes its generated documents into this directory and chdir()s
+  # there, so nothing lands in the source tree.
+  set(_calc_unterminated_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/calc-channel-ref-unterminated-index")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.calc-channel-ref-unterminated-index
+      COMMAND "$<TARGET_FILE:iccCalcChannelRefUnterminatedIndexTest>"
+              "${_calc_unterminated_scratch}"
+    )
+  else()
+    add_test(
+      NAME iccdev.calc-channel-ref-unterminated-index
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCalcChannelRefUnterminatedIndexTest>"
+        "${_calc_unterminated_scratch}"
+    )
+  endif()
+  set_tests_properties(iccdev.calc-channel-ref-unterminated-index PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;xml;mpe;calculator;issue-2323;regression"
+  )
+  if(WIN32)
+    set(_calc_unterminated_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCalcChannelRefUnterminatedIndexTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _calc_unterminated_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.calc-channel-ref-unterminated-index PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_calc_unterminated_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2323 (JSON twin): CIccMpeJsonCalculator::Flatten() carries a byte-for-byte copy
+# of the XML defect -- "select = p + 1" after a scan that stops on the NUL when the
+# index is unterminated. It is a separate reachable entry point (iccFromJson on a
+# hand-authored document). It also asserts the flattened function, not merely
+# that the document loads, because the parity the XML helper claims -- both
+# parsers select the same channel for a parenthesised index -- is only measured
+# if both sides name the channel. Registered separately from the XML helper so
+# neither masks the other: this one is skipped where IccJSON is not built, and
+# the XML coverage does not disappear with it.
+function(iccdev_add_calc_channel_ref_unterminated_index_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCalcChannelRefUnterminatedIndexJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/calc-channel-ref-unterminated-index-json.cpp"
+  )
+  target_compile_features(iccCalcChannelRefUnterminatedIndexJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccCalcChannelRefUnterminatedIndexJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccCalcChannelRefUnterminatedIndexJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccCalcChannelRefUnterminatedIndexJsonTest)
+
+  set(_calc_unterminated_json_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/calc-channel-ref-unterminated-index-json")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.calc-channel-ref-unterminated-index-json
+      COMMAND "$<TARGET_FILE:iccCalcChannelRefUnterminatedIndexJsonTest>"
+              "${_calc_unterminated_json_scratch}"
+    )
+  else()
+    add_test(
+      NAME iccdev.calc-channel-ref-unterminated-index-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCalcChannelRefUnterminatedIndexJsonTest>"
+        "${_calc_unterminated_json_scratch}"
+    )
+  endif()
+  set_tests_properties(iccdev.calc-channel-ref-unterminated-index-json PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;json;mpe;calculator;issue-2323;regression"
+  )
+  if(WIN32)
+    set(_calc_unterminated_json_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCalcChannelRefUnterminatedIndexJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _calc_unterminated_json_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.calc-channel-ref-unterminated-index-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_calc_unterminated_json_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2550 / #2541: IIccObject::GetParentProfile() compared GetObjectType() against
+# the literal "CIccProfile" -- which every subclass overrides -- and then C-cast
+# an incomplete type, so the JSON/XML profile classes were never recognised and
+# even the matching case returned a pointer off by the IIccObject subobject
+# offset. colorantTableType ToJson therefore always wrote "16bit". The same
+# helper pins the fail-open JSON readers for colorantTableType and
+# chromaticityType, which returned true after substituting zeros or defaults
+# where the XML readers refuse. Needs IccJSON + IccProfLib; skipped where IccJSON
+# is not built.
+function(iccdev_add_json_colorant_parent_profile_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccJsonColorantParentProfileTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/json-colorant-parent-profile.cpp"
+  )
+  target_compile_features(iccJsonColorantParentProfileTest PRIVATE cxx_std_17)
+  target_include_directories(iccJsonColorantParentProfileTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccJsonColorantParentProfileTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccJsonColorantParentProfileTest)
+
+  add_test(
+    NAME iccdev.json-colorant-parent-profile
+    COMMAND "$<TARGET_FILE:iccJsonColorantParentProfileTest>"
+  )
+  # Case 4 round-trips every 16-bit value through JSON text; ~30 s under a local
+  # ASan Debug build and past 60 s on the GCC ASAN+UBSAN CI leg, so it takes the
+  # same 300 s allowance as iccdev.colorant-count-narrowing-json.
+  set_tests_properties(iccdev.json-colorant-parent-profile PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 300
+    LABELS "iccdev;json;colorant;issue-2550;issue-2541;regression"
+  )
+  if(WIN32)
+    set(_json_colorant_parent_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccJsonColorantParentProfileTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _json_colorant_parent_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.json-colorant-parent-profile PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_json_colorant_parent_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: ICC.2 Table 60 adds standard illuminant encodings 9h-16h to measurementType,
+# and Table 56 adds an optional measurement condition (M0-M3) in bytes 36-39.
+# Validate() accepted 0h-8h only, and the binary, XML and JSON paths all dropped
+# the condition.  The helper pins the verdict per encoding at v4 and v5, the
+# 36/40-byte binary layout, and the XML and JSON round trips.
+function(iccdev_add_measurement_type_icc2_test)
+  if(NOT TARGET "${TARGET_LIB_ICCJSON}" OR NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMeasurementTypeIcc2Test
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/measurement-type-icc2.cpp"
+  )
+  target_compile_features(iccMeasurementTypeIcc2Test PRIVATE cxx_std_17)
+  target_include_directories(iccMeasurementTypeIcc2Test PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccMeasurementTypeIcc2Test PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccMeasurementTypeIcc2Test)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.measurement-type-icc2
+      COMMAND "$<TARGET_FILE:iccMeasurementTypeIcc2Test>"
+    )
+  else()
+    add_test(
+      NAME iccdev.measurement-type-icc2
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccMeasurementTypeIcc2Test>"
+    )
+  endif()
+  set_tests_properties(iccdev.measurement-type-icc2 PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;validate;xml;json;tagtype;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_meas_icc2_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMeasurementTypeIcc2Test>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _meas_icc2_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.measurement-type-icc2 PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_meas_icc2_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: in the four CLUT processing elements, byte 7 of the reserved word is an
+# ICC.2 interpolationHintType (0-2), and CIccMultiProcessElement::Validate()
+# required the whole word to be zero.  The helper pins hints 0-3 and the bits
+# around them per element type, with a matrix element as the control, and the
+# verdict of the tracked avx2 profile with the hint set.
+function(iccdev_add_clut_interpolation_hint_test)
+  if(NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccClutInterpolationHintTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/clut-interpolation-hint.cpp"
+  )
+  target_compile_features(iccClutInterpolationHintTest PRIVATE cxx_std_17)
+  target_include_directories(iccClutInterpolationHintTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccClutInterpolationHintTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccClutInterpolationHintTest)
+
+  set(_clut_hint_args
+    "${ICCDEV_TESTING_DIR}/CLUT/avx2-3d-8-output.xml"
+  )
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.clut-interpolation-hint
+      COMMAND "$<TARGET_FILE:iccClutInterpolationHintTest>" ${_clut_hint_args}
+    )
+  else()
+    add_test(
+      NAME iccdev.clut-interpolation-hint
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccClutInterpolationHintTest>" ${_clut_hint_args}
+    )
+  endif()
+  set_tests_properties(iccdev.clut-interpolation-hint PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;validate;mpe;clut;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_clut_hint_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccClutInterpolationHintTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _clut_hint_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.clut-interpolation-hint PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_clut_hint_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2561: ICC.2:2023 gives 5.0.0.0 as its profile version, but Validate() accepted
+# flag bit 3, cicpTag, zero-step spectral viewing conditions, the 'not ' and 'neq '
+# operators and the 'clcf' segment only from 5.1.0.0.  The last two never ran, because
+# CIccTagMultiProcessElement::Validate() did not pass the profile to its elements
+# (#2603).  The helper pins each gate at 4.40, 5.00 and 5.10 on two tracked
+# profiles.
+function(iccdev_add_icc2_version_gate_test)
+  if(NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccIcc2VersionGateTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/icc2-version-gate.cpp"
+  )
+  target_compile_features(iccIcc2VersionGateTest PRIVATE cxx_std_17)
+  target_include_directories(iccIcc2VersionGateTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccIcc2VersionGateTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccIcc2VersionGateTest)
+
+  set(_v5_gate_args
+    "${ICCDEV_TESTING_DIR}/Calc/srgbCalcTest.xml"
+    "${ICCDEV_TESTING_DIR}/Display/Rec2100HlgFullCC.xml"
+  )
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.icc2-version-gate
+      COMMAND "$<TARGET_FILE:iccIcc2VersionGateTest>" ${_v5_gate_args}
+    )
+  else()
+    add_test(
+      NAME iccdev.icc2-version-gate
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccIcc2VersionGateTest>" ${_v5_gate_args}
+    )
+  endif()
+  set_tests_properties(iccdev.icc2-version-gate PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;validate;version;issue-2561;issue-2603;regression"
+  )
+  if(WIN32)
+    set(_v5_gate_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccIcc2VersionGateTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _v5_gate_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.icc2-version-gate PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_v5_gate_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2583: CIccProfileJson::ParseTag() attached lut and named colour tags without
+# giving them the header colour spaces the binary and XML readers both hand over,
+# so CIccArrayNamedColor::Validate() compared each colour against a zero sample
+# count and iccFromJson exited 1 on a profile it had reproduced byte for byte.
+# The inputs are the tracked XML documents -- Testing/**/*.icc is gitignored -- and
+# the helper drives the whole iccFromXml | iccToJson | iccFromJson chain, since the
+# defect is in the reader rather than in any one tag.  v2RgbLut8 is the fourth
+# fixture because the sparse named colour profiles carry no lut tag, and the
+# AToB/BToA/HToS arms of the dispatch reach Describe() only: an A/B of the tracked
+# corpus through the tools cannot see them, so without a fixture that reads a lut
+# back out of JSON those arms would ship untested.
+function(iccdev_add_json_namedcolor_colorspaces_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}"
+     OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccJsonNamedColorColorSpacesTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/json-namedcolor-colorspaces.cpp"
+  )
+  target_compile_features(iccJsonNamedColorColorSpacesTest PRIVATE cxx_std_17)
+  target_include_directories(iccJsonNamedColorColorSpacesTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccJsonNamedColorColorSpacesTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccJsonNamedColorColorSpacesTest)
+
+  set(_json_nmcl_cs_args
+    "${ICCDEV_TESTING_DIR}/Named/SparseMatrixNamedColor.xml"
+    "${ICCDEV_TESTING_DIR}/Named/SparseMatrixNamedColorTint.xml"
+    "${ICCDEV_TEST_OUTDIR}/json-namedcolor-colorspaces-scratch"
+    "${ICCDEV_TESTING_DIR}/V2/v2RgbLut8.xml"
+  )
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.json-namedcolor-colorspaces
+      COMMAND "$<TARGET_FILE:iccJsonNamedColorColorSpacesTest>" ${_json_nmcl_cs_args}
+    )
+  else()
+    add_test(
+      NAME iccdev.json-namedcolor-colorspaces
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccJsonNamedColorColorSpacesTest>" ${_json_nmcl_cs_args}
+    )
+  endif()
+  set_tests_properties(iccdev.json-namedcolor-colorspaces PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;json;xml;namedcolor;sparsematrix;issue-2583;regression"
+  )
+  if(WIN32)
+    set(_json_nmcl_cs_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccJsonNamedColorColorSpacesTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _json_nmcl_cs_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.json-namedcolor-colorspaces PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_json_nmcl_cs_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: a calculatorElement may carry an ICC.2 calculatorLimits ('clmt') block after
+# its sub-element positions (Table 85b).  Read() followed the positions and stepped
+# over it, so the limits were never checked and Write() dropped them.  The helper
+# pins the binary layout, Validate() at each limit's boundary (sub-calculators
+# included), and the XML form.
+function(iccdev_add_calculator_limits_test)
+  if(NOT TARGET "${TARGET_LIB_ICCXML}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCalculatorLimitsTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/calculator-limits.cpp"
+  )
+  target_compile_features(iccCalculatorLimitsTest PRIVATE cxx_std_17)
+  target_include_directories(iccCalculatorLimitsTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccCalculatorLimitsTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccCalculatorLimitsTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.calculator-limits
+      COMMAND "$<TARGET_FILE:iccCalculatorLimitsTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.calculator-limits
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCalculatorLimitsTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.calculator-limits PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;validate;mpe;calc;xml;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_calc_limits_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCalculatorLimitsTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _calc_limits_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.calculator-limits PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_calc_limits_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: the JSON form of calculatorLimits, in its own executable because IccMpeXml.h
+# and IccMpeJson.h cannot share a translation unit.
+function(iccdev_add_calculator_limits_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCJSON}" OR NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCalculatorLimitsJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/calculator-limits-json.cpp"
+  )
+  target_compile_features(iccCalculatorLimitsJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccCalculatorLimitsJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccCalculatorLimitsJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccCalculatorLimitsJsonTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.calculator-limits-json
+      COMMAND "$<TARGET_FILE:iccCalculatorLimitsJsonTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.calculator-limits-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCalculatorLimitsJsonTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.calculator-limits-json PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;mpe;calc;json;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_calc_limits_json_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCalculatorLimitsJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _calc_limits_json_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.calculator-limits-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_calc_limits_json_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2535/#2536: CIccTagJsonColorantOrder::ParseJson() and
+# CIccTagJsonColorantTable::ParseJson() sized their allocation from a count that
+# was narrowed a second time at the SetSize() call -- both tags' SetSize() takes
+# an icUInt16Number -- while the loop that fills the table still ran the
+# untruncated count of times. 65537 became a one-entry allocation written 65537
+# times: a 1-byte write past a 1-byte region for colorantOrder, and a 31-byte
+# strncpy past a 38-byte entry for colorantTable. The helper drives both readers
+# directly, since ParseJson() is the function under fix and the profile wrapper
+# adds nothing to the assertion. Its boundary cases are the discriminators: a
+# count of 65535 is the widest the tag stores and is accepted in full, so a guard
+# spelled ">= 0xFFFF" fails them and passes everything else. That is a storage
+# bound, not a conforming count (#2541; see iccdev.colorant-count-validate).
+function(iccdev_add_colorant_count_narrowing_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccColorantCountNarrowingJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/colorant-count-narrowing-json.cpp"
+  )
+  target_compile_features(iccColorantCountNarrowingJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccColorantCountNarrowingJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccColorantCountNarrowingJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccColorantCountNarrowingJsonTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.colorant-count-narrowing-json
+      COMMAND "$<TARGET_FILE:iccColorantCountNarrowingJsonTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.colorant-count-narrowing-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccColorantCountNarrowingJsonTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.colorant-count-narrowing-json PROPERTIES
+    TIMEOUT 300
+    LABELS "iccdev;json;colorant;issue-2535;issue-2536;regression"
+  )
+  if(WIN32)
+    set(_colorant_narrowing_json_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccColorantCountNarrowingJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _colorant_narrowing_json_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.colorant-count-narrowing-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_colorant_narrowing_json_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2538: CIccTagJsonParametricCurve::ParseJson() accepted a parametricCurveType
+# with fewer parameters than its function type requires -- or none, or a
+# non-array "params" -- and returned true with the rest of the tag's parameter
+# array uninitialised, which Write() then encoded into the profile. A
+# functionType outside 16 bits (65540, -65532) reached the same state by
+# narrowing to type 4 after the parameter count had already been taken as 0.
+# The helper drives the reader directly and asserts the return value and every
+# parameter's value, so the unfixed reader fails it on a plain build, not only
+# where a sanitizer fills the heap. Its accepted cases cover all five known
+# function types at their exact counts, so a count table off by one for any type
+# fails that type's case.
+function(iccdev_add_parametric_curve_params_json_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccParametricCurveParamsJsonTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/parametric-curve-params-json.cpp"
+  )
+  target_compile_features(iccParametricCurveParamsJsonTest PRIVATE cxx_std_17)
+  target_include_directories(iccParametricCurveParamsJsonTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccParametricCurveParamsJsonTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccParametricCurveParamsJsonTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.parametric-curve-params-json
+      COMMAND "$<TARGET_FILE:iccParametricCurveParamsJsonTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.parametric-curve-params-json
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccParametricCurveParamsJsonTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.parametric-curve-params-json PROPERTIES
+    TIMEOUT 300
+    LABELS "iccdev;json;parametriccurve;issue-2538;regression"
+  )
+  if(WIN32)
+    set(_parametric_params_json_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccParametricCurveParamsJsonTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _parametric_params_json_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.parametric-curve-params-json PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_parametric_params_json_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# The XML twin of #2536, found while fixing it and fixed in the same commit:
+# CIccTagXmlColorantOrder::ParseXml() narrowed the same way at SetSize() and then
+# handed the UNNARROWED count to CIccUInt8Array::ParseArray() as its buffer size,
+# so that function's own "n > nBufSize" test could not catch it -- the size it is
+# given is the element count, not the allocation. iccFromXml reaches it with no
+# JSON involved, so it is registered separately from the JSON helper rather than
+# folded into it: this one is skipped where IccXML is not built, and the JSON
+# coverage does not disappear with it. Its last case pins the sibling
+# colorantTable reader, measured NOT to overrun -- it casts explicitly and bounds
+# its own loop, so it truncates -- so that this fix is not read as licence to
+# change behaviour there.
+function(iccdev_add_colorant_count_narrowing_xml_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccColorantCountNarrowingXmlTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/colorant-count-narrowing-xml.cpp"
+  )
+  target_compile_features(iccColorantCountNarrowingXmlTest PRIVATE cxx_std_17)
+  target_include_directories(iccColorantCountNarrowingXmlTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccColorantCountNarrowingXmlTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccColorantCountNarrowingXmlTest)
+
+  # The helper writes its generated documents into this directory, so nothing
+  # lands in the source tree.
+  set(_colorant_narrowing_xml_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/colorant-count-narrowing-xml")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.colorant-count-narrowing-xml
+      COMMAND "$<TARGET_FILE:iccColorantCountNarrowingXmlTest>"
+              "${_colorant_narrowing_xml_scratch}"
+    )
+  else()
+    add_test(
+      NAME iccdev.colorant-count-narrowing-xml
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccColorantCountNarrowingXmlTest>"
+        "${_colorant_narrowing_xml_scratch}"
+    )
+  endif()
+  set_tests_properties(iccdev.colorant-count-narrowing-xml PROPERTIES
+    TIMEOUT 300
+    LABELS "iccdev;xml;colorant;issue-2536;issue-2548;regression"
+  )
+  if(WIN32)
+    set(_colorant_narrowing_xml_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccColorantCountNarrowingXmlTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _colorant_narrowing_xml_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.colorant-count-narrowing-xml PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_colorant_narrowing_xml_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2548, the class behind the colorantTable fix above: the XML readers converted
+# numbers with bare atof()/atoi()/atol(), so "50abc" loaded as 50 and
+# "not-a-number" as 0 with no diagnostic. The helper appends text to one value in
+# a tracked corpus document (or a small generated one, for readers no tracked
+# document reaches) and asserts the reader's own refusal message, with the
+# unmodified document as the control. It reads the corpus from the source tree
+# and writes only into its scratch directory.
+function(iccdev_add_xml_numeric_values_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccXmlNumericValuesTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/xml-numeric-values.cpp"
+  )
+  target_compile_features(iccXmlNumericValuesTest PRIVATE cxx_std_17)
+  target_include_directories(iccXmlNumericValuesTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccXmlNumericValuesTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccXmlNumericValuesTest)
+
+  set(_xml_numeric_values_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/xml-numeric-values")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.xml-numeric-values
+      COMMAND "$<TARGET_FILE:iccXmlNumericValuesTest>"
+              "${_xml_numeric_values_scratch}" "${ICCDEV_REPO_ROOT}"
+    )
+  else()
+    add_test(
+      NAME iccdev.xml-numeric-values
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccXmlNumericValuesTest>"
+        "${_xml_numeric_values_scratch}" "${ICCDEV_REPO_ROOT}"
+    )
+  endif()
+  set_tests_properties(iccdev.xml-numeric-values PROPERTIES
+    TIMEOUT 300
+    LABELS "iccdev;xml;issue-2548;regression"
+  )
+  if(WIN32)
+    set(_xml_numeric_values_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccXmlNumericValuesTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _xml_numeric_values_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.xml-numeric-values PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_xml_numeric_values_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# iccToXml wrote an unclosed <SampledCalculatorCurve> for
+# Testing/Display/Rec2100HlgFullCC.xml and exited 0: CIccMpeXmlCalculator had no
+# NewCopy(), so the copy the curve writer works from was not the XML class and
+# was refused after its opening element, and the MPE tag and calculator writers
+# ignored that failure. The helper round-trips the corpus profile through the
+# XML factories as iccToXml does, and pins each defect with an in-memory case.
+# It reads the corpus from the source tree and writes only into its scratch
+# directory.
+function(iccdev_add_xml_calculator_curve_writer_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccXmlCalculatorCurveWriterTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/xml-calculator-curve-writer.cpp"
+  )
+  target_compile_features(iccXmlCalculatorCurveWriterTest PRIVATE cxx_std_17)
+  target_include_directories(iccXmlCalculatorCurveWriterTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccXmlCalculatorCurveWriterTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccXmlCalculatorCurveWriterTest)
+
+  set(_xml_calc_curve_writer_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/xml-calculator-curve-writer")
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.xml-calculator-curve-writer
+      COMMAND "$<TARGET_FILE:iccXmlCalculatorCurveWriterTest>"
+              "${_xml_calc_curve_writer_scratch}" "${ICCDEV_REPO_ROOT}"
+    )
+  else()
+    add_test(
+      NAME iccdev.xml-calculator-curve-writer
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccXmlCalculatorCurveWriterTest>"
+        "${_xml_calc_curve_writer_scratch}" "${ICCDEV_REPO_ROOT}"
+    )
+  endif()
+  set_tests_properties(iccdev.xml-calculator-curve-writer PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;xml;mpe;calculator;regression"
+  )
+  if(WIN32)
+    set(_xml_calc_curve_writer_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccXmlCalculatorCurveWriterTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _xml_calc_curve_writer_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.xml-calculator-curve-writer PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_xml_calc_curve_writer_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Follow-up to #2535/#2536: CIccTagColorantOrder::Read() cast its declared count
+# straight to SetSize()'s icUInt16Number and then read the narrowed m_nCount
+# bytes, so a tag declaring 65537 positions loaded as one -- silently, while
+# CIccTagColorantTable::Read() next to it has always refused "nCount > 0xffff"
+# and every JSON and XML reader now does too. Pure library test -- the elements
+# are built in memory and read through CIccMemIO, no fixtures on disk and no
+# tool invocation -- so it needs only IccProfLib and no scratch directory. The
+# colorantTable cases are controls that pass before and after, pinning the two
+# binary readers' contracts side by side.
+function(iccdev_add_colorant_count_narrowing_binary_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccColorantCountNarrowingBinaryTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/colorant-count-narrowing-binary.cpp"
+  )
+  target_compile_features(iccColorantCountNarrowingBinaryTest PRIVATE cxx_std_17)
+  target_include_directories(iccColorantCountNarrowingBinaryTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccColorantCountNarrowingBinaryTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccColorantCountNarrowingBinaryTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.colorant-count-narrowing-binary
+      COMMAND "$<TARGET_FILE:iccColorantCountNarrowingBinaryTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.colorant-count-narrowing-binary
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccColorantCountNarrowingBinaryTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.colorant-count-narrowing-binary PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;colorant;regression"
+  )
+  if(WIN32)
+    set(_colorant_narrowing_binary_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccColorantCountNarrowingBinaryTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _colorant_narrowing_binary_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.colorant-count-narrowing-binary PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_colorant_narrowing_binary_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2541: the narrowing helpers above pin 65535 as the widest count the readers
+# store, not as a conforming count. ICC.1:2022 10.4 and 10.5 require a colorant
+# count to agree with the header's data colour space, and the library checks
+# that in CIccTagColorantOrder::Validate() and CIccTagColorantTable::Validate(),
+# not in the readers. This helper validates in-memory profiles whose data colour
+# space and PCS have different channel counts: a matching tag must leave the
+# report and status unchanged, and a mismatched one (65535 included) must add
+# "Incorrect number of colorants." for that tag. Pure library test, no fixtures.
+function(iccdev_add_colorant_count_validate_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccColorantCountValidateTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/colorant-count-validate.cpp"
+  )
+  target_compile_features(iccColorantCountValidateTest PRIVATE cxx_std_17)
+  target_include_directories(iccColorantCountValidateTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccColorantCountValidateTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccColorantCountValidateTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.colorant-count-validate
+      COMMAND "$<TARGET_FILE:iccColorantCountValidateTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.colorant-count-validate
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccColorantCountValidateTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.colorant-count-validate PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;colorant;issue-2541;regression"
+  )
+  if(WIN32)
+    set(_colorant_validate_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccColorantCountValidateTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _colorant_validate_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.colorant-count-validate PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_colorant_validate_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -3730,6 +6146,181 @@ function(iccdev_add_curve_setsize_contract_test)
     endforeach()
     set_tests_properties(iccdev.curve-setsize-contract PROPERTIES
       ENVIRONMENT_MODIFICATION "${_curve_contract_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2607: CIccMpeCurveSet::SetCurve() accepted an index equal to the channel
+# count, reading and writing one pointer beyond m_curve.  It also deleted a
+# unique curve before assigning the same pointer back to its slot.  The library
+# test pins the exported API contract; the tool test pins that serialized XML
+# with a fourth curve for three channels is rejected before reaching the setter.
+function(iccdev_add_mpe_curveset_setcurve_contract_tests)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMpeCurveSetSetCurveContractTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/mpe-curveset-setcurve-contract.cpp"
+  )
+  target_compile_features(iccMpeCurveSetSetCurveContractTest PRIVATE cxx_std_17)
+  target_include_directories(iccMpeCurveSetSetCurveContractTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccMpeCurveSetSetCurveContractTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccMpeCurveSetSetCurveContractTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.mpe-curveset-setcurve-contract
+      COMMAND "$<TARGET_FILE:iccMpeCurveSetSetCurveContractTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.mpe-curveset-setcurve-contract
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccMpeCurveSetSetCurveContractTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.mpe-curveset-setcurve-contract PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;mpe;curveset;issue-2607;regression"
+  )
+
+  if(WIN32)
+    set(_curveset_contract_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMpeCurveSetSetCurveContractTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _curveset_contract_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.mpe-curveset-setcurve-contract PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_curveset_contract_windows_env_mods}"
+    )
+  endif()
+
+  if(NOT TARGET iccFromXml)
+    return()
+  endif()
+
+  add_dependencies(check iccFromXml)
+  if(WIN32)
+    add_test(
+      NAME iccdev.issue-2607-curveset-extra-xml
+      COMMAND "${CMAKE_COMMAND}"
+        "-DTOOL=$<TARGET_FILE:iccFromXml>"
+        "-DLABEL=issue-2607-curveset-extra-xml"
+        "-DTOOL_ARGS=${ICCDEV_REPO_ROOT}/.github/ci/regression/issue-2607-curveset-too-many-curves.xml;${ICCDEV_TEST_OUTDIR}/issue-2607-curveset-too-many-curves.icc"
+        "-DEXPECT_EXIT=nonzero"
+        "-DEXPECT_MATCH=Too many curves in CurveSetElement"
+        -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+    )
+  else()
+    add_test(
+      NAME iccdev.issue-2607-curveset-extra-xml
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "${CMAKE_COMMAND}"
+        "-DTOOL=$<TARGET_FILE:iccFromXml>"
+        "-DLABEL=issue-2607-curveset-extra-xml"
+        "-DTOOL_ARGS=${ICCDEV_REPO_ROOT}/.github/ci/regression/issue-2607-curveset-too-many-curves.xml;${ICCDEV_TEST_OUTDIR}/issue-2607-curveset-too-many-curves.icc"
+        "-DEXPECT_EXIT=nonzero"
+        "-DEXPECT_MATCH=Too many curves in CurveSetElement"
+        -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+    )
+  endif()
+  set_tests_properties(iccdev.issue-2607-curveset-extra-xml PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;xml;mpe;curveset;issue-2607;regression"
+  )
+
+  if(WIN32)
+    set(_curveset_xml_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccFromXml>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _curveset_xml_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.issue-2607-curveset-extra-xml PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_curveset_xml_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2630: CIccTagSegmentedCurve::SetCurve, CIccMpeCLUT::SetCLUT,
+# CIccMpeCAM::SetCAM, CIccMpeSpectralCLUT::SetData and CIccMBB::SetCLUT each
+# released the object they held before storing the pointer handed in, so
+# SetX(GetX()) -- reachable because every one of those members has a public
+# getter -- freed the object and kept the dangling pointer.  CIccMBB::SetCLUT
+# is also reached as SetCLUT(NewCLUT(grid)), which carries no visible alias.
+# No serialized profile reaches these setters, so this is a library test only.
+# On an unfixed build the counted cases FAIL and the CAM and white-point cases
+# abort on a double free.
+#
+# #2637 extends it to the three CIccMpeSpectral* copyData() implementations,
+# which are the whole body of nine operator= overloads and release their
+# buffers before copying out of the source.  The CLUT one is a use-after-free
+# and is counted; the matrix and observer ones silently lose their contents
+# instead, so they are checked by value from index 0.  Those two go red on
+# glibc as well -- free() writes its tcache bookkeeping over the head of the
+# block it hands straight back -- but that is an allocator detail, so their
+# dependable red is the ASAN+UBSAN lanes.
+# #2638 adds the apply table SetData() releases after installing the table it
+# was handed, which is counted.
+function(iccdev_add_owning_setter_self_alias_contract_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccOwningSetterSelfAliasContractTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/owning-setter-self-alias-contract.cpp"
+  )
+  target_compile_features(iccOwningSetterSelfAliasContractTest PRIVATE cxx_std_17)
+  target_include_directories(iccOwningSetterSelfAliasContractTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccOwningSetterSelfAliasContractTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccOwningSetterSelfAliasContractTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.owning-setter-self-alias-contract
+      COMMAND "$<TARGET_FILE:iccOwningSetterSelfAliasContractTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.owning-setter-self-alias-contract
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccOwningSetterSelfAliasContractTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.owning-setter-self-alias-contract PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;mpe;tag;issue-2630;issue-2637;issue-2638;regression"
+  )
+
+  if(WIN32)
+    set(_owning_setter_contract_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccOwningSetterSelfAliasContractTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _owning_setter_contract_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.owning-setter-self-alias-contract PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_owning_setter_contract_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -3909,6 +6500,188 @@ function(iccdev_add_tag_name_spelling_test)
     endforeach()
     set_tests_properties(iccdev.tag-name-spelling PROPERTIES
       ENVIRONMENT_MODIFICATION "${_tag_name_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: CheckHeader() tested the 64-bit device attributes field with 32-bit masks,
+# so it refused the ICC.2 bits 4-7 (non-paper, textured, non-isotropic,
+# self-luminous) at every version, warned about reserved bits 16-31 as if they
+# were the vendor's bits 32-63, and never looked at bits 32-63.  The helper pins
+# the verdict per edition at each boundary, and the XML and JSON names for bits
+# 4-7.  It calls the IccXML and IccJSON attribute helpers directly, which both the
+# header and the profileSequenceDesc readers use.
+function(iccdev_add_device_attributes_icc2_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}"
+     OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccDeviceAttributesIcc2Test
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/device-attributes-icc2.cpp"
+  )
+  target_compile_features(iccDeviceAttributesIcc2Test PRIVATE cxx_std_17)
+  target_include_directories(iccDeviceAttributesIcc2Test PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccDeviceAttributesIcc2Test PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB}
+    ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccDeviceAttributesIcc2Test)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.device-attributes-icc2
+      COMMAND "$<TARGET_FILE:iccDeviceAttributesIcc2Test>"
+    )
+  else()
+    add_test(
+      NAME iccdev.device-attributes-icc2
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccDeviceAttributesIcc2Test>"
+    )
+  endif()
+  set_tests_properties(iccdev.device-attributes-icc2 PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;header;validate;xml;json;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_device_attr_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccDeviceAttributesIcc2Test>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _device_attr_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.device-attributes-icc2 PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_device_attr_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: ICC.2 Table 15 lists 'LMS ' (4C4D5320h) as a data colour space; ICC.1
+# does not.  iccDEV had no signature for it, so it counted as zero channels, a v5
+# profile carrying it was refused as an unknown colour space with a channel-count
+# error from every tag, and a lut-based tag on it fell to the N-dimensional
+# transform, which refuses three inputs.  The helper pins the utilities, the
+# header verdict at v4 and v5 (data space and DeviceLink PCS), the verdict of a
+# tracked profile with 'RGB ' swapped for 'LMS ', and a CMM apply against the same
+# profile as 'RGB '.
+function(iccdev_add_lms_colour_space_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccLmsColourSpaceTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/lms-colour-space.cpp"
+  )
+  target_compile_features(iccLmsColourSpaceTest PRIVATE cxx_std_17)
+  target_include_directories(iccLmsColourSpaceTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccLmsColourSpaceTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccLmsColourSpaceTest)
+
+  set(_lms_args
+    "${ICCDEV_TESTING_DIR}/Calc/srgbCalcTest.xml"
+    "${ICCDEV_TESTING_DIR}/V2/v2RgbLut8.xml"
+  )
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.lms-colour-space
+      COMMAND "$<TARGET_FILE:iccLmsColourSpaceTest>" ${_lms_args}
+    )
+  else()
+    add_test(
+      NAME iccdev.lms-colour-space
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccLmsColourSpaceTest>" ${_lms_args}
+    )
+  endif()
+  set_tests_properties(iccdev.lms-colour-space PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;header;validate;cmm;xml;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_lms_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccLmsColourSpaceTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _lms_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.lms-colour-space PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_lms_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2565: ICC.2 9.2.56 permits multiLocalizedUnicodeType, textType and utf8Type for
+# the copyrightTag, and IsTypeValid() applied the v4 mluc-only rule to v5 too: a
+# utf8Type copyright was NonCompliant, and a textType one drew the warning meant
+# for a mislabelled v2 profile.  The helper pins each type at v2, v4 and v5.
+# Links IccProfLib only -- the rule is in CIccProfile::IsTypeValid().
+function(iccdev_add_copyright_tag_icc2_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccCopyrightTagIcc2Test
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/copyright-tag-icc2.cpp"
+  )
+  target_compile_features(iccCopyrightTagIcc2Test PRIVATE cxx_std_17)
+  target_include_directories(iccCopyrightTagIcc2Test PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccCopyrightTagIcc2Test PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccCopyrightTagIcc2Test)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.copyright-tag-icc2
+      COMMAND "$<TARGET_FILE:iccCopyrightTagIcc2Test>"
+    )
+  else()
+    add_test(
+      NAME iccdev.copyright-tag-icc2
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccCopyrightTagIcc2Test>"
+    )
+  endif()
+  set_tests_properties(iccdev.copyright-tag-icc2 PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;validate;tagtype;issue-2565;regression"
+  )
+  if(WIN32)
+    set(_cprt_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCopyrightTagIcc2Test>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _cprt_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.copyright-tag-icc2 PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_cprt_env_mods}"
     )
   endif()
 endfunction()
@@ -4135,6 +6908,52 @@ function(iccdev_add_tiff_separated_strips_test)
   endif()
 endfunction()
 
+function(iccdev_add_console_sanitize_codepoint_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccConsoleSanitizeCodepointTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/console-sanitize-codepoint.cpp"
+  )
+  target_compile_features(iccConsoleSanitizeCodepointTest PRIVATE cxx_std_17)
+
+  target_include_directories(iccConsoleSanitizeCodepointTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  # IccFileUtil.h is header-only, so this target links nothing and needs no runtime
+  # search path -- hence no ENVIRONMENT_MODIFICATION block on Windows, unlike the
+  # neighbouring regression tests.  It also makes the test the header's only standalone
+  # consumer: the four iccApply* tools reach it through IccProfLib, so without this the
+  # header is never compiled on its own and an include it forgot to make would surface
+  # as a tool build break instead of here.
+  add_dependencies(check iccConsoleSanitizeCodepointTest)
+
+  # Needing no library path is not a reason to drop ICCDEV_TEST_ENV: it also carries
+  # ASAN_OPTIONS/UBSAN_OPTIONS and the empty DEBUGINFOD_URLS.  Without it this test
+  # would inherit the container's Ubuntu default for the last of those, and one
+  # symbolized sanitizer report would spend ~90s in llvm-symbolizer against the
+  # TIMEOUT below -- the #1928 stall documented further down this file.
+  if(WIN32)
+    add_test(
+      NAME iccdev.console-sanitize-codepoint
+      COMMAND "$<TARGET_FILE:iccConsoleSanitizeCodepointTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.console-sanitize-codepoint
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccConsoleSanitizeCodepointTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.console-sanitize-codepoint PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;security;console;sanitize;issue-2420;regression"
+  )
+endfunction()
+
 function(iccdev_add_signature_utils_contract_test)
   if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
     return()
@@ -4144,6 +6963,16 @@ function(iccdev_add_signature_utils_contract_test)
     "${ICCDEV_REPO_ROOT}/.github/ci/regression/signature-utils-contract.cpp"
   )
   target_compile_features(iccSignatureUtilsContractTest PRIVATE cxx_std_17)
+
+  # expectedTechnologyName() is an exhaustive switch with no default label, so a new
+  # icTechnologySignature member makes it incomplete. -Wswitch alone only warns; promote
+  # it so this guard fails the normal build rather than relying on warning-log inspection.
+  # MSVC's nearest equivalent (C4062) is off by default and is not promoted; GCC and clang
+  # carry this guard.
+  if(NOT MSVC)
+    target_compile_options(iccSignatureUtilsContractTest PRIVATE -Werror=switch)
+  endif()
+
   target_include_directories(iccSignatureUtilsContractTest PRIVATE
     "${ICCDEV_REPO_ROOT}/IccProfLib"
   )
@@ -4180,6 +7009,58 @@ function(iccdev_add_signature_utils_contract_test)
     endforeach()
     set_tests_properties(iccdev.signature-utils-contract PROPERTIES
       ENVIRONMENT_MODIFICATION "${_sigutils_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_utf8_converter_cursor_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccUtf8ConverterCursorTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/utf8-converter-cursor-contract.cpp"
+  )
+  target_compile_features(iccUtf8ConverterCursorTest PRIVATE cxx_std_17)
+
+  target_include_directories(iccUtf8ConverterCursorTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccUtf8ConverterCursorTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccUtf8ConverterCursorTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.utf8-converter-cursor-contract
+      COMMAND "$<TARGET_FILE:iccUtf8ConverterCursorTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.utf8-converter-cursor-contract
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccUtf8ConverterCursorTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.utf8-converter-cursor-contract PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;utf8;utf16;aliasing;issue-2504;issue-2511;issue-2526;regression"
+  )
+  if(WIN32)
+    # icWCharToUtf8 takes the UTF-16 arm of its WCHAR_MAX branch here, which no
+    # other test compiles or runs; the runtime paths must resolve for it to run.
+    set(_utf8cursor_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccUtf8ConverterCursorTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _utf8cursor_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.utf8-converter-cursor-contract PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_utf8cursor_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -4282,6 +7163,276 @@ function(iccdev_add_mpexml_unknown_reserved_test)
     endforeach()
     set_tests_properties(iccdev.mpexml-unknown-reserved PROPERTIES
       ENVIRONMENT_MODIFICATION "${_mpexml_reserved_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2560 item 2: CIccTagXmlSpectralViewingConditions::ToXml writes the ObserverFuncs
+# and IlluminantSPD reserved fields as Reserved="...", but ParseXml looked only for
+# "reserved". icXmlStrCmp is strcmp, so the two spellings never met and a non-zero
+# value was lost on every XML round trip, leaving no trace: the reloaded tag had
+# both fields zero, and the writer omits the attribute when it is zero. No tracked
+# document in Testing/ sets either field in either spelling, so the helper builds
+# its own documents -- nothing in the corpus reaches this code. Needs IccXML
+# (CIccTagXmlSpectralViewingConditions) + IccProfLib; skipped where IccXML is not
+# built.
+function(iccdev_add_svcn_xml_reserved_roundtrip_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSvcnXmlReservedRoundtripTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/svcn-xml-reserved-roundtrip.cpp"
+  )
+  target_compile_features(iccSvcnXmlReservedRoundtripTest PRIVATE cxx_std_17)
+  target_include_directories(iccSvcnXmlReservedRoundtripTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccSvcnXmlReservedRoundtripTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccSvcnXmlReservedRoundtripTest)
+
+  add_test(
+    NAME iccdev.svcn-xml-reserved-roundtrip
+    COMMAND "$<TARGET_FILE:iccSvcnXmlReservedRoundtripTest>"
+  )
+  set_tests_properties(iccdev.svcn-xml-reserved-roundtrip PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;spectral;issue-2560;regression"
+  )
+  if(WIN32)
+    set(_svcn_reserved_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSvcnXmlReservedRoundtripTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _svcn_reserved_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.svcn-xml-reserved-roundtrip PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_svcn_reserved_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# chromaticityType colorant encodings 0005h (P3) and 0006h (ITU-R BT.2020), from
+# ICC.1:2022 Table 31. Before they were defined, Validate() reported both as an
+# invalid encoding and the XML writer named both "Customized Encoding", which the
+# reader takes as 0000h. The BT.2020 red primary follows Recommendation ITU-R
+# BT.2020-2 (x 0.708) rather than Table 31 as printed (0,780); the helper pins
+# both. No tracked document carries a chromaticityTag, so the helper builds its
+# own tags. Needs IccXML (CIccTagXmlChromaticity, icGetColorantValue) +
+# IccProfLib; skipped where IccXML is not built.
+function(iccdev_add_chromaticity_colorant_encodings_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccChromaticityColorantEncodingsTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/chromaticity-colorant-encodings.cpp"
+  )
+  target_compile_features(iccChromaticityColorantEncodingsTest PRIVATE cxx_std_17)
+  target_include_directories(iccChromaticityColorantEncodingsTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccChromaticityColorantEncodingsTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccChromaticityColorantEncodingsTest)
+
+  add_test(
+    NAME iccdev.chromaticity-colorant-encodings
+    COMMAND "$<TARGET_FILE:iccChromaticityColorantEncodingsTest>"
+  )
+  set_tests_properties(iccdev.chromaticity-colorant-encodings PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;tag;chromaticity;regression"
+  )
+  if(WIN32)
+    set(_chromaticity_encodings_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccChromaticityColorantEncodingsTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _chromaticity_encodings_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.chromaticity-colorant-encodings PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_chromaticity_encodings_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2570: a zero-byte embedded height or normal image. Both binary Read() methods
+# need at least one image byte, but the XML readers took an <Image> holding only
+# whitespace, or a File= naming an empty file, as a zero-byte image, so iccFromXml
+# saved a profile it could not open again; and the XML writers wrote a zero-byte
+# image as a self-closing element that the readers refuse. The helper builds its
+# own documents and image files -- the one tracked HeightImage document embeds a
+# real image and no tracked document has a NormalImage. It chdir()s into the
+# scratch directory because File= resolves relative to the working directory and
+# IccXmlIsPathSafe rejects absolute paths. Needs IccXML + IccProfLib; skipped
+# where IccXML is not built.
+function(iccdev_add_xml_embedded_image_empty_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccXmlEmbeddedImageEmptyTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/xml-embedded-image-empty.cpp"
+  )
+  target_compile_features(iccXmlEmbeddedImageEmptyTest PRIVATE cxx_std_17)
+  target_include_directories(iccXmlEmbeddedImageEmptyTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccXmlEmbeddedImageEmptyTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccXmlEmbeddedImageEmptyTest)
+
+  set(_embedded_image_empty_scratch
+    "${CMAKE_CURRENT_BINARY_DIR}/ctest-output/xml-embedded-image-empty")
+
+  add_test(
+    NAME iccdev.xml-embedded-image-empty
+    COMMAND "$<TARGET_FILE:iccXmlEmbeddedImageEmptyTest>"
+            "${_embedded_image_empty_scratch}"
+  )
+  set_tests_properties(iccdev.xml-embedded-image-empty PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;xml;writer;issue-2570;regression"
+  )
+  if(WIN32)
+    set(_embedded_image_empty_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccXmlEmbeddedImageEmptyTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _embedded_image_empty_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.xml-embedded-image-empty PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_embedded_image_empty_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2572, from the #2571 post-merge report: the JSON and binary sides of the
+# zero-byte embedded image that #2571 fixed in XML. The JSON reader took
+# "ImageData" with no hex digits as "no data" and kept the constructor's one
+# zero byte, so iccFromJson saved an image the document never held; ToJson
+# omitted "ImageData" for a zero-byte image, which ParseJson refuses; Write()
+# saved a tag Read() refuses. The dataType and embedded image constructors
+# allocated nSize bytes under a size clamped to 1 (tested on the unsigned
+# member), so Write() read past a zero-byte allocation for nSize 0 (visible
+# under valgrind, not ASan) and the tag was left empty for nSize -1. Needs
+# IccJSON + IccProfLib; skipped where IccJSON is not built.
+function(iccdev_add_embedded_image_zero_byte_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCJSON}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccEmbeddedImageZeroByteTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/embedded-image-zero-byte.cpp"
+  )
+  target_compile_features(iccEmbeddedImageZeroByteTest PRIVATE cxx_std_17)
+  target_include_directories(iccEmbeddedImageZeroByteTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccJSON/IccLibJSON"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccEmbeddedImageZeroByteTest PRIVATE
+    ${TARGET_LIB_ICCJSON} ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccEmbeddedImageZeroByteTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.embedded-image-zero-byte
+      COMMAND "$<TARGET_FILE:iccEmbeddedImageZeroByteTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.embedded-image-zero-byte
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccEmbeddedImageZeroByteTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.embedded-image-zero-byte PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;json;writer;issue-2572;regression"
+  )
+  if(WIN32)
+    set(_embedded_image_zero_byte_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccEmbeddedImageZeroByteTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCJSON}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _embedded_image_zero_byte_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.embedded-image-zero-byte PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_embedded_image_zero_byte_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2560: CIccMpeXmlReflectanceCLUT::ToXml named the element "ReflectanceCLutElem"
+# while the element factory only accepts "ReflectanceCLutElement", and never wrote
+# StorageType. The first tracked document holding a reflectance CLUT
+# (Testing/Display/SpectralObserverElements.xml) made the CI XML round trip over
+# the generated corpus fail. The helper re-parses the writer's output with the
+# real reader, with the emission element as a control. Needs IccXML + IccProfLib;
+# skipped where IccXML is not built.
+function(iccdev_add_mpexml_reflectance_clut_writer_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccMpeXmlReflectanceClutWriterTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/mpexml-reflectance-clut-writer.cpp"
+  )
+  target_compile_features(iccMpeXmlReflectanceClutWriterTest PRIVATE cxx_std_17)
+  target_include_directories(iccMpeXmlReflectanceClutWriterTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccMpeXmlReflectanceClutWriterTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccMpeXmlReflectanceClutWriterTest)
+
+  add_test(
+    NAME iccdev.mpexml-reflectance-clut-writer
+    COMMAND "$<TARGET_FILE:iccMpeXmlReflectanceClutWriterTest>"
+  )
+  set_tests_properties(iccdev.mpexml-reflectance-clut-writer PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;writer;spectral;issue-2560;regression"
+  )
+  if(WIN32)
+    set(_mpexml_reflectance_clut_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccMpeXmlReflectanceClutWriterTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _mpexml_reflectance_clut_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.mpexml-reflectance-clut-writer PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_mpexml_reflectance_clut_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -4496,10 +7647,10 @@ function(iccdev_add_installed_package_consumer_test)
     set(_have_connect TRUE)
   endif()
 
-  # Everything the "dev" and "runtime" component installs read, so that
-  # `cmake --build . --target check` produces a stageable tree. The static
-  # archives are in the dev component, so they are needed even though the
-  # consumers link the shared libraries.
+  # Everything the "dev" and "runtime" component installs read, so that both
+  # `build-test-binaries` and its dependent `check` target produce a stageable
+  # tree. The static archives are in the dev component, so they are needed even
+  # though the consumers link the shared libraries.
   foreach(_dep IccProfLib2 IccProfLib2-static IccXML2 IccXML2-static
                 IccJSON2 IccJSON2-static IccConnect2 IccConnect2-static)
     if(TARGET ${_dep})
@@ -4508,9 +7659,9 @@ function(iccdev_add_installed_package_consumer_test)
       # through the alias rather than trusting the name.
       get_target_property(_dep_alias ${_dep} ALIASED_TARGET)
       if(_dep_alias)
-        add_dependencies(check ${_dep_alias})
+        add_dependencies(build-test-binaries ${_dep_alias})
       else()
-        add_dependencies(check ${_dep})
+        add_dependencies(build-test-binaries ${_dep})
       endif()
     endif()
   endforeach()
@@ -4532,6 +7683,7 @@ function(iccdev_add_installed_package_consumer_test)
       "-DICCDEV_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
       "-DICCDEV_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY}"
       "-DICCDEV_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+      "-DICCDEV_VCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}"
       "-DICCDEV_VCPKG_TRIPLET=${VCPKG_TARGET_TRIPLET}"
       "-DICCDEV_LIB_SUBDIRS=${_lib_subdirs}"
       "-DICCDEV_HAVE_SHARED=${ENABLE_SHARED_LIBS}"
@@ -4547,7 +7699,7 @@ function(iccdev_add_installed_package_consumer_test)
     # Four nested configure+build cycles; running them against a runner already
     # saturated by ctest -j is the likeliest way to spend that timeout.
     RUN_SERIAL TRUE
-    LABELS "iccdev;install;package;find-package;consumer;issue-2154;regression"
+    LABELS "iccdev;install;package;find-package;consumer;issue-2154;issue-2394;regression"
   )
 endfunction()
 
@@ -4625,6 +7777,63 @@ function(iccdev_add_json_bcd_version_test)
     )
   endif()
 endfunction()
+
+# #2387 findings 1 and 2: CIccProfileXml::ParseBasic walked a multi-component version
+# one component at a time, but 889db62b repaired only the first two loops from
+# "ver = *szVer" (assign, keeping the last digit) to "ver += *szVer" (accumulate).
+# The third and fourth loops, and both loops of the separate <ProfileSubClassVersion>
+# element, kept the assigning form, so "5.10.12.34" reached header bytes 8..11 as
+# 05 10 02 04 while iccFromXml reported a correct save. The sub-class block also
+# never stepped over its separator (its minor loop ran zero times) and used atoi()
+# where the header holds BCD -- so accumulating the digits alone would have written
+# 0x0C22, which GetSubClassVersionName rejects as "Invalid BCD subclass version".
+# Both components now use parseVersion, matching icJsonParseBCDVersionStr on the
+# JSON side (see iccdev.json-bcd-version-parse, the twin of this test). Drives the
+# public CIccProfileXml::ParseXml, so it needs IccXML + IccProfLib + libxml2 and is
+# skipped where IccXML is not built.
+function(iccdev_add_xml_version_parse_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccXmlVersionParseTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/xml-version-parse.cpp"
+  )
+  target_compile_features(iccXmlVersionParseTest PRIVATE cxx_std_17)
+  target_include_directories(iccXmlVersionParseTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccXmlVersionParseTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccXmlVersionParseTest)
+
+  add_test(
+    NAME iccdev.xml-version-parse
+    COMMAND "$<TARGET_FILE:iccXmlVersionParseTest>"
+  )
+  set_tests_properties(iccdev.xml-version-parse PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;header;issue-2387;regression"
+  )
+  if(WIN32)
+    set(_xml_version_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccXmlVersionParseTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _xml_version_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.xml-version-parse PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_xml_version_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 
 # #1911: the JSON writers handed every payload up to the document root by value, so a
 # CLUT-bearing tag's samples were deep-copied and destroyed once per level of the
@@ -4833,6 +8042,58 @@ function(iccdev_add_v2_legacy_pcs_test)
     endforeach()
     set_tests_properties(iccdev.v2-legacy-pcs PROPERTIES
       ENVIRONMENT_MODIFICATION "${_v2_legacy_pcs_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Characterization tests for PCS adjustment placement. Builds its own v2/v4
+# CMYK fixtures in memory -- Testing/**/*.icc is gitignored and generated, so a
+# tracked profile is not available on a fresh clone. Links IccProfLib alone.
+function(iccdev_add_pcs_adjust_placement_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccPcsAdjustPlacementTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/pcs-adjust-placement.cpp"
+  )
+  target_compile_features(iccPcsAdjustPlacementTest PRIVATE cxx_std_17)
+  target_include_directories(iccPcsAdjustPlacementTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccPcsAdjustPlacementTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccPcsAdjustPlacementTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.pcs-adjust-placement
+      COMMAND "$<TARGET_FILE:iccPcsAdjustPlacementTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.pcs-adjust-placement
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccPcsAdjustPlacementTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.pcs-adjust-placement PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofLib;pcs;cmm;regression"
+  )
+  if(WIN32)
+    set(_pcs_adjust_placement_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccPcsAdjustPlacementTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _pcs_adjust_placement_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.pcs-adjust-placement PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_pcs_adjust_placement_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -5393,7 +8654,7 @@ if(TARGET iccBenchApply)
   # non-sanitizer build this degrades to a smoke test that the -PCC path still
   # runs. Measured on 2f329b79 with the ASan preset: pre-fix 123684 bytes in 129
   # allocations and exit 1, post-fix a clean exit 0.
-  if(WIN32)
+  if(NOT ICCDEV_HAS_LEAK_SANITIZER)
     add_test(
       NAME iccdev.apply-throughput-pcc
       COMMAND "$<TARGET_FILE:iccBenchApply>"
@@ -5631,6 +8892,139 @@ if(TARGET iccBenchApply)
     FIXTURES_REQUIRED iccdev_profiles
   )
 
+  # Metrics describe the benchmark buffers and scheduled calls, while
+  # architecture-specific instruction, stack, and FLOP counts stay with the
+  # platform profiler. Keep this a tiny direct chain so it imports neither a
+  # timing threshold nor the suite's slow profile fixture.
+  add_test(
+    NAME iccdev.bench-apply-metrics
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-metrics;-pixels;4;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;0"
+      "-DEXPECT_EXIT=zero"
+      "-DEXPECT_MATCHES=benchmark_metrics case=chain;resolved_transform_count=1;pixels_per_apply=4;thread_count_settings=1;timed_applies_per_thread_setting=1;scheduled_applies_per_thread_setting=2;total_timed_applies=1;total_scheduled_applies=2;input_buffer_bytes=48;output_buffer_bytes=48;benchmark_buffer_bytes=96;benchmark_bytes_per_apply=96"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+  set_tests_properties(iccdev.bench-apply-metrics PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;benchmark;metrics;regression"
+  )
+
+  # #2271: two columns of DecodeIntent() disagreed with the iccApplyToLink decode
+  # its own comment claimed to reproduce.
+  #
+  # A tens digit of 4 asks for black-point compensation. iccApplyToLink maps it to
+  # lookup type 0 plus a CIccApplyBPCHint; DecodeIntent() special-cased only
+  # nType == 1, so 4 reached AddXform() as the lookup type icXformLutBPC
+  # (IccCmm.h:136 is 0x4) and the whole chain failed. Measured on master: the same
+  # "40" wrote a device link through one tool and printed "Invalid Look-Up Table
+  # type" through the other. This is the red probe -- it fails to even exit 0
+  # before the fix.
+  add_test(
+    NAME iccdev.bench-apply-bpc-intent-code
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;40"
+      "-DEXPECT_EXIT=zero"
+      "-DEXPECT_MATCH=chain: 1 profile"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+
+  # Accepting "40" is not the same as honouring it, and the difference is exactly
+  # the defect: a fix that mapped the digit to type 0 and forgot the hint would
+  # pass the test above and change nothing. So this one pins the RESULT. The two
+  # runs differ only in the tens digit, and the checksum is over the applied
+  # pixels, so a hint that never reached the xform leaves them equal.
+  #
+  # Compared rather than pinned to a literal because the checksum is FNV-1a over
+  # raw float bytes -- portable across runs of one binary, not across compilers.
+  add_test(
+    NAME iccdev.bench-apply-bpc-changes-result
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;40"
+      "-DEXPECT_EXIT=zero"
+      "-DCOMPARE_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;0"
+      "-DCOMPARE_EXTRACT=0x([0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])"
+      "-DCOMPARE_MODE=differ"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+
+  # The hundreds column is a luminance-matching request. DecodeIntent() stripped
+  # it with "nIntent % 100" and never assigned it, so codes 0, 100 and 200 built
+  # the identical chain -- measured on master, all three gave 0x927c370d.
+  #
+  # TWO profiles, and first_transform=1, are both load-bearing. The hint sets
+  # m_bLuminanceMatching, which is read only by CIccPcsXform::pushXYZConvert()
+  # when connecting one profile's xform to the next -- a single-profile chain has
+  # no such connection and shows nothing. That is why the issue as filed reported
+  # the divergence from code inspection alone: the probe behind it used one
+  # profile and first_transform=0.
+  add_test(
+    NAME iccdev.bench-apply-luminance-column
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;100;Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc;0"
+      "-DEXPECT_EXIT=zero"
+      "-DCOMPARE_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;0;Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc;0"
+      "-DCOMPARE_EXTRACT=0x([0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])"
+      "-DCOMPARE_MODE=differ"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+
+  # The column is a flag, not a magnitude: iccApplyToLink tests "if (nLuminance)",
+  # so 100 and 200 request the same thing. Green before the fix as well as after
+  # -- both codes used to be dropped, and dropping two codes also makes them
+  # agree -- so it is a semantic pin rather than a red probe, and it is the
+  # partner the test above needs: on its own, "differ" is satisfied by any change
+  # that makes the hundreds column matter in any way at all, including reading it
+  # as a transform type. It is also the only caller exercising COMPARE_MODE=same,
+  # which would otherwise be an untested branch of the driver.
+  add_test(
+    NAME iccdev.bench-apply-luminance-column-is-a-flag
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;100;Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc;0"
+      "-DEXPECT_EXIT=zero"
+      "-DCOMPARE_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;200;Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc;0"
+      "-DCOMPARE_EXTRACT=0x([0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])"
+      "-DCOMPARE_MODE=same"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+
+  # The rejection path that now runs AFTER a hint has been constructed. "45" has
+  # tens digit 4, so DecodeIntent() adds the BPC hint, and then refuses the code
+  # on the units digit. Moving hint construction ahead of the range test is new in
+  # this change, and this is the case that proves the refusal survived it: an
+  # early "return true" bolted on next to the AddHint() calls would pass every
+  # other test in this block.
+  add_test(
+    NAME iccdev.bench-apply-hinted-then-rejected
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTOOL=$<TARGET_FILE:iccBenchApply>"
+      "-DTOOL_ARGS=-pixels;4096;-repeats;1;1;Testing/sRGB_v4_ICC_preference.icc;45"
+      "-DEXPECT_EXIT=nonzero"
+      "-DEXPECT_MATCH=decoded intent out of range"
+      -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplyCliTest.cmake"
+  )
+
+  # Both profiles these five name are tracked in the repository, not generated, so
+  # the fixture is a scheduling dependency rather than a source of them -- which
+  # is why a Windows leg cannot satisfy it while the file sits somewhere else.
+  set_tests_properties(
+    iccdev.bench-apply-bpc-intent-code
+    iccdev.bench-apply-bpc-changes-result
+    iccdev.bench-apply-luminance-column
+    iccdev.bench-apply-luminance-column-is-a-flag
+    iccdev.bench-apply-hinted-then-rejected
+    PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;benchmark;cli;issue-2271;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+
   if(WIN32)
     set(_bench_windows_env_mods
       "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccBenchApply>"
@@ -5651,7 +9045,13 @@ if(TARGET iccBenchApply)
       iccdev.bench-apply-empty-suite
       iccdev.bench-apply-negative-intent-code
       iccdev.bench-apply-valid-intent-code
-      iccdev.bench-apply-valid-intent-code-typed)
+      iccdev.bench-apply-valid-intent-code-typed
+      iccdev.bench-apply-metrics
+      iccdev.bench-apply-bpc-intent-code
+      iccdev.bench-apply-bpc-changes-result
+      iccdev.bench-apply-luminance-column
+      iccdev.bench-apply-luminance-column-is-a-flag
+      iccdev.bench-apply-hinted-then-rejected)
     if(TARGET iccFromXml)
       list(APPEND _bench_env_mod_tests
         iccdev.apply-throughput
@@ -5813,16 +9213,202 @@ if(TARGET iccDumpProfile)
   endif()
 endif()
 
+function(iccdev_add_spectral_clut_channel_count_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSpectralClutChannelCountTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/spectral-clut-channel-count-bound.cpp"
+  )
+  target_link_libraries(iccSpectralClutChannelCountTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+
+  add_dependencies(check iccSpectralClutChannelCountTest)
+
+  # No fixture argument: the test builds the MPE element bodies in memory. The
+  # channel counts that matter (257, 259, 260, 272) are single 16-bit fields, so a
+  # tracked profile would carry nothing the buffers here do not say more directly.
+  if(WIN32)
+    add_test(
+      NAME iccdev.spectral-clut-channel-count-bound
+      COMMAND "$<TARGET_FILE:iccSpectralClutChannelCountTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.spectral-clut-channel-count-bound
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccSpectralClutChannelCountTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.spectral-clut-channel-count-bound PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;mpe;spectral;clut;security;regression"
+  )
+  if(WIN32)
+    set(_spectral_clut_channel_count_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSpectralClutChannelCountTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _spectral_clut_channel_count_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.spectral-clut-channel-count-bound PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_spectral_clut_channel_count_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# The sampled-curve half of the same guard retirement clut-apply-guard-retirement
+# covers. Those three removals were not redundant: m_range is a difference of two
+# unvalidated wire floats, NaN == 0.0 is false, so Begin()'s zero-span test never
+# excluded a NaN span and Apply() cast a NaN to a sample index (#2324, #2347).
+# The two sampled curves now refuse a non-finite span in Begin(); the sampled
+# segment cannot, because its outer segments are legitimately sentinel-bounded,
+# so it keeps the per-pixel guard. This test links IccProfLib alone and calls
+# functions only, so it needs no corpus fixture and runs on every platform.
+function(iccdev_add_sampled_curve_nonfinite_range_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSampledCurveNonFiniteRangeTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/sampled-curve-nonfinite-range.cpp"
+  )
+  target_link_libraries(iccSampledCurveNonFiniteRangeTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccSampledCurveNonFiniteRangeTest)
+
+  add_test(
+    NAME iccdev.sampled-curve-nonfinite-range
+    COMMAND "$<TARGET_FILE:iccSampledCurveNonFiniteRangeTest>"
+  )
+  set_tests_properties(iccdev.sampled-curve-nonfinite-range PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofLib;mpe;curve;apply;security;regression"
+  )
+  if(WIN32)
+    set(_sampled_curve_nonfinite_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSampledCurveNonFiniteRangeTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _sampled_curve_nonfinite_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.sampled-curve-nonfinite-range PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_sampled_curve_nonfinite_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_clut_apply_guard_retirement_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccClutApplyGuardRetirementTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/clut-apply-guard-retirement.cpp"
+  )
+  target_link_libraries(iccClutApplyGuardRetirementTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+
+  add_dependencies(check iccClutApplyGuardRetirementTest)
+
+  # No fixture: every CLUT here is built in memory. The output counts that matter
+  # (17, 20) exceed what any tracked profile carries, which is why the defect in
+  # Interp3dTetra survived so long.
+  if(WIN32)
+    add_test(
+      NAME iccdev.clut-apply-guard-retirement
+      COMMAND "$<TARGET_FILE:iccClutApplyGuardRetirementTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.clut-apply-guard-retirement
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccClutApplyGuardRetirementTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.clut-apply-guard-retirement PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;clut;cmm;apply;regression"
+  )
+  if(WIN32)
+    set(_clut_apply_guard_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccClutApplyGuardRetirementTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _clut_apply_guard_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.clut-apply-guard-retirement PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_clut_apply_guard_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_spectral_clut_xml_channel_mismatch_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET "${TARGET_LIB_ICCXML}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSpectralClutXmlChannelMismatchTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/spectral-clut-xml-channel-mismatch.cpp"
+  )
+  target_compile_features(iccSpectralClutXmlChannelMismatchTest PRIVATE cxx_std_17)
+  target_include_directories(iccSpectralClutXmlChannelMismatchTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccXML/IccLibXML"
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+    ${LIBXML2_INCLUDE_DIR}
+  )
+  target_link_libraries(iccSpectralClutXmlChannelMismatchTest PRIVATE
+    ${TARGET_LIB_ICCXML} ${TARGET_LIB_ICCPROFLIB} ${LIBXML2_LIBRARIES})
+  add_dependencies(check iccSpectralClutXmlChannelMismatchTest)
+
+  add_test(
+    NAME iccdev.spectral-clut-xml-channel-mismatch
+    COMMAND "$<TARGET_FILE:iccSpectralClutXmlChannelMismatchTest>"
+  )
+  set_tests_properties(iccdev.spectral-clut-xml-channel-mismatch PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_TEST_OUTDIR}"
+    TIMEOUT 60
+    LABELS "iccdev;xml;mpe;spectral;clut;security;regression"
+  )
+  if(WIN32)
+    set(_spectral_clut_xml_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSpectralClutXmlChannelMismatchTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCXML}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _spectral_clut_xml_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.spectral-clut-xml-channel-mismatch PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_spectral_clut_xml_windows_env_mods}"
+    )
+  endif()
+endfunction()
 
 if(WIN32)
   function(iccdev_add_windows_batch_test NAME TIMEOUT LABELS SCRIPT)
+    set(_options
+      VERIFY_GENERATED_PROFILE_MANIFEST
+    )
     set(_one_value_args
       EXPECTED_PROFILE_PARSE_COUNT
       EXPECTED_GENERATED_PROFILE_COUNT
       EXPECTED_OUTPUT
       FORBIDDEN_REGEX
     )
-    cmake_parse_arguments(ICCDEV_WIN_TEST "" "${_one_value_args}" "" ${ARGN})
+    cmake_parse_arguments(ICCDEV_WIN_TEST "${_options}" "${_one_value_args}" "" ${ARGN})
 
     if(NOT EXISTS "${SCRIPT}")
       message(STATUS "Skipping ${NAME}: ${SCRIPT} not found")
@@ -5839,6 +9425,10 @@ if(WIN32)
       "-DICCDEV_WINDOWS_WORK_DIR=${ICCDEV_TEST_OUTDIR}/windows-testing"
       "-DICCDEV_CONFIG=$<CONFIG>"
     )
+    if(ICCDEV_WINDOWS_UNIFIED_RUNTIME)
+      list(APPEND _test_args
+        "-DICCDEV_UNIFIED_RUNTIME_DIR=$<TARGET_FILE_DIR:iccFromXml>")
+    endif()
 
     if(DEFINED ICCDEV_WIN_TEST_EXPECTED_PROFILE_PARSE_COUNT)
       list(APPEND _test_args
@@ -5848,6 +9438,11 @@ if(WIN32)
     if(DEFINED ICCDEV_WIN_TEST_EXPECTED_GENERATED_PROFILE_COUNT)
       list(APPEND _test_args
         "-DICCDEV_EXPECTED_GENERATED_PROFILE_COUNT=${ICCDEV_WIN_TEST_EXPECTED_GENERATED_PROFILE_COUNT}")
+    endif()
+
+    if(ICCDEV_WIN_TEST_VERIFY_GENERATED_PROFILE_MANIFEST)
+      list(APPEND _test_args
+        "-DICCDEV_VERIFY_GENERATED_PROFILE_MANIFEST=ON")
     endif()
 
     if(DEFINED ICCDEV_WIN_TEST_EXPECTED_OUTPUT)
@@ -5880,17 +9475,14 @@ if(WIN32)
       300
       "iccdev;windows;setup;profiles"
       "${ICCDEV_TESTING_DIR}/CreateAllProfiles.bat"
-      # Validate the disposable Windows Testing tree by artifact count. The
-      # batch file echoes commands through cmd.exe, and tool stdout can be lost
-      # in that layer even when profiles are generated successfully.
-      # 135 since Testing/V2/v2GrayTRC{,Lab}.xml were added: they are the only
-      # sources in the tree that produce a CIccXformMonochrome, one per PCS
-      # encoding. Bump this with any change to the number of profiles
-      # CreateAllProfiles.bat generates.
-      EXPECTED_GENERATED_PROFILE_COUNT 135
+      VERIFY_GENERATED_PROFILE_MANIFEST
     )
     set_tests_properties(iccdev.windows-create-profiles PROPERTIES
       FIXTURES_SETUP iccdev_profiles
+      # The batch wrapper snapshots the source Testing tree to detect escaped
+      # output. Other registered tests still write there, so this setup must
+      # run alone even though its generated profiles live in the build tree.
+      RUN_SERIAL TRUE
     )
   endif()
 
@@ -6045,6 +9637,8 @@ if(WIN32)
   iccdev_add_iccconnect_thread_test()
   iccdev_add_clut_avx512_sixteen_output_test()
   iccdev_add_iccconnect_config_parser_test()
+  iccdev_add_createsearch_embedded_profile_test()
+  iccdev_add_mru_apply_ownership_test()
   iccdev_add_cmmsearch_init_pcc_test()
   iccdev_add_cmmsearch_rebegin_test()
   iccdev_add_ndlut_input_channel_mismatch_test()
@@ -6067,26 +9661,47 @@ if(WIN32)
   iccdev_add_xml_writer_graceful_degrade_test()
   iccdev_add_xml_relaxng_validation_leak_test()
   iccdev_add_xml_curve_oversize_file_test()
+  iccdev_add_calc_channel_ref_unterminated_index_test()
+  iccdev_add_calc_channel_ref_unterminated_index_json_test()
   iccdev_add_curve_setsize_contract_test()
+  iccdev_add_mpe_curveset_setcurve_contract_tests()
+  iccdev_add_owning_setter_self_alias_contract_test()
   iccdev_add_curve_gamma_u8fixed8_test()
   iccdev_add_luminance_normalization_test()
   iccdev_add_tag_name_spelling_test()
+  iccdev_add_device_attributes_icc2_test()
+  iccdev_add_lms_colour_space_test()
+  iccdev_add_copyright_tag_icc2_test()
   iccdev_add_struct_name_spelling_test()
   iccdev_add_mcs_colorspace_name_test()
   iccdev_add_signature_utils_contract_test()
+  iccdev_add_utf8_converter_cursor_test()
+  iccdev_add_console_sanitize_codepoint_test()
   iccdev_add_tiff_create_overflow_test()
   iccdev_add_tiff_separated_strips_test()
   iccdev_add_mpexml_unknown_reserved_test()
+  iccdev_add_svcn_xml_reserved_roundtrip_test()
+  iccdev_add_chromaticity_colorant_encodings_test()
+  iccdev_add_json_colorant_parent_profile_test()
+  iccdev_add_json_namedcolor_colorspaces_test()
+  iccdev_add_measurement_type_icc2_test()
+  iccdev_add_clut_interpolation_hint_test()
+  iccdev_add_icc2_version_gate_test()
+  iccdev_add_mpexml_reflectance_clut_writer_test()
+  iccdev_add_xml_embedded_image_empty_test()
+  iccdev_add_embedded_image_zero_byte_test()
   iccdev_add_calc_envsig_sign_extension_test()
   iccdev_add_proflib_exported_data_linkage_test()
   iccdev_add_proflib_exported_global_definitions_test()
   iccdev_add_installed_package_consumer_test()
   iccdev_add_windows_runtime_paths_test()
   iccdev_add_json_bcd_version_test()
+  iccdev_add_xml_version_parse_test()
   iccdev_add_json_writer_move_test()
   iccdev_add_json_fixednum_size_cap_test()
   iccdev_add_json_srng_uf32_test()
   iccdev_add_v2_legacy_pcs_test()
+  iccdev_add_pcs_adjust_placement_test()
   iccdev_add_v2_xml_fixtures_test()
   iccdev_add_datetime_parse_test()
   iccdev_add_encoding_surround_test()
@@ -6105,17 +9720,36 @@ if(WIN32)
   iccdev_add_mpecalc_rotate_operand_test()
   iccdev_add_sparsematrix_set_roundtrip_test()
   iccdev_add_cmmsearch_namedcolor_ownership_test()
+  iccdev_add_namedcolor_findcolor_suffix_underflow_test()
+  iccdev_add_colorant_count_narrowing_json_test()
+  iccdev_add_calculator_limits_test()
+  iccdev_add_calculator_limits_json_test()
+  iccdev_add_colorant_count_narrowing_xml_test()
+  iccdev_add_xml_numeric_values_test()
+  iccdev_add_xml_calculator_curve_writer_test()
+  iccdev_add_parametric_curve_params_json_test()
+  iccdev_add_colorant_count_narrowing_binary_test()
+  iccdev_add_colorant_count_validate_test()
   iccdev_add_xform_create_tag_ownership_test()
   iccdev_add_xform_abstorel_adjust_test()
+  iccdev_add_parametric_curve_negative_domain_test()
+  iccdev_add_formula_segment_negative_domain_test()
+  iccdev_add_bpc_d2b_tag_family_test()
   iccdev_add_reflectance_observer_illum_range_test()
+  iccdev_add_spectral_absolute_flag_test()
   iccdev_add_colorimetry_methods_test()
+  iccdev_add_formula_segment_nonfinite_parameter_test()
   iccdev_add_getvalues_nstart_test()
   iccdev_add_chromaticity_validate_test()
   iccdev_add_cicp_copy_ctor_test()
+  iccdev_add_mpe_acs_zero_signature_test()
   iccdev_add_pawg_c5_cicp_test()
   iccdev_add_gamut_xform_semantics_test()
   iccdev_add_rangemap_uninitialized_test()
   iccdev_add_pcs_birefl_illuminant_range_test()
+  iccdev_add_namedcolor_sparse_matrix_apply_test()
+  iccdev_add_namedcolor_sparse_matrix_xml_test()
+  iccdev_add_sparsematrix_union_validate_test()
   iccdev_add_pcs_applyillum_chain_sizing_test()
   iccdev_add_spectral_pcs_range_consistency_test()
   iccdev_add_spectral_media_white_test()
@@ -6126,7 +9760,13 @@ if(WIN32)
   iccdev_add_xyz_negative_z_test()
   iccdev_add_utf8_textarray_test()
   iccdev_add_extended_device_colorspace_test()
+  iccdev_add_hex_data_malformed_xml_test()
+  iccdev_add_hex_data_malformed_json_test()
+  iccdev_add_tonemap_functions_xml_test()
+  iccdev_add_tonemap_functions_json_test()
+  iccdev_add_tonemap_write_many_outputs_test()
   iccdev_add_unsupported_profile_class_test()
+  iccdev_add_pcs_adjust_status_test()
   iccdev_add_dpcc_pcc_replacement_test()
   iccdev_add_pcs_xyzconvert_matrix_channels_test()
   iccdev_add_iccviz_metrics_test()
@@ -6138,11 +9778,17 @@ if(WIN32)
   iccdev_add_iccprofileplot_exitcode_test()
   iccdev_add_applytolink_invalid_arg_test()
   iccdev_add_applytolink_negative_intent_tests()
+  iccdev_add_applytolink_transform_type_tests()
   iccdev_add_applytolink_v4_missing_desc_test()
+  iccdev_add_applytolink_curveset_channels_tests()
   iccdev_add_prmg_hue_normalization_test()
   iccdev_add_qa_evidence_helpers_test()
   iccdev_add_windows_iccdevcmm_smoke_test()
   iccdev_add_zip_utf8_text_zlib_test()
+  iccdev_add_spectral_clut_channel_count_test()
+  iccdev_add_spectral_clut_xml_channel_mismatch_test()
+  iccdev_add_clut_apply_guard_retirement_test()
+  iccdev_add_sampled_curve_nonfinite_range_test()
 
   if(TARGET iccFromXml AND TARGET iccDumpProfile AND TARGET iccApplyNamedCmm)
     add_test(
@@ -6204,7 +9850,9 @@ endif()
 # been called from both places.
 iccdev_add_applytolink_invalid_arg_test()
 iccdev_add_applytolink_negative_intent_tests()
+iccdev_add_applytolink_transform_type_tests()
 iccdev_add_applytolink_v4_missing_desc_test()
+iccdev_add_applytolink_curveset_channels_tests()
 
 set(ICCDEV_TIMEOUT_COMPAT_DIR "")
 if(NOT WIN32)
@@ -6277,6 +9925,8 @@ exit "$status"
   endif()
 endif()
 
+include("${CMAKE_CURRENT_LIST_DIR}/UnixMultiConfigRuntime.cmake")
+
 set(ICCDEV_TOOL_PATHS
   "${ICCDEV_TOOLS_DIR}/IccApplyNamedCmm"
   "${ICCDEV_TOOLS_DIR}/IccApplyProfiles"
@@ -6303,7 +9953,7 @@ endif()
 
 list(JOIN ICCDEV_TOOL_PATHS ":" ICCDEV_TOOL_PATH)
 set(ICCDEV_SHARED_LIBRARY_PATH
-    "${CMAKE_BINARY_DIR}/IccProfLib:${CMAKE_BINARY_DIR}/IccXML:${CMAKE_BINARY_DIR}/IccJSON:${CMAKE_BINARY_DIR}/IccConnect")
+    "${ICCDEV_SCRIPT_BUILD_DIR}/IccProfLib:${ICCDEV_SCRIPT_BUILD_DIR}/IccXML:${ICCDEV_SCRIPT_BUILD_DIR}/IccJSON:${ICCDEV_SCRIPT_BUILD_DIR}/IccConnect")
 
 set(ICCDEV_REQUIRE_JSON_ROUNDTRIP 0)
 if(TARGET iccToJson AND TARGET iccFromJson)
@@ -6350,6 +10000,17 @@ if(ICCDEV_NLOHMANN_INCLUDE_DIR)
   set(ICCDEV_TEST_INCLUDE_ENV "CPATH=${ICCDEV_NLOHMANN_INCLUDE_DIR}:$ENV{CPATH}")
 endif()
 
+set(ICCDEV_UBSAN_OPTIONS "halt_on_error=0,print_stacktrace=1")
+if(NOT WIN32)
+  get_filename_component(ICCDEV_UBSAN_SUPPRESSIONS
+                         "${CMAKE_CURRENT_LIST_DIR}/../../../Testing/silence.txt"
+                         ABSOLUTE)
+  if(EXISTS "${ICCDEV_UBSAN_SUPPRESSIONS}")
+    string(APPEND ICCDEV_UBSAN_OPTIONS
+           ":suppressions=${ICCDEV_UBSAN_SUPPRESSIONS}")
+  endif()
+endif()
+
 set(ICCDEV_TEST_ENV
   "PATH=${ICCDEV_TOOL_PATH}:$ENV{PATH}"
   "LD_LIBRARY_PATH=${ICCDEV_SHARED_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}"
@@ -6359,7 +10020,7 @@ set(ICCDEV_TEST_ENV
   "CC=${CMAKE_C_COMPILER}"
   "CXX=${CMAKE_CXX_COMPILER}"
   "ASAN_OPTIONS=halt_on_error=0,detect_leaks=0"
-  "UBSAN_OPTIONS=halt_on_error=0,print_stacktrace=1"
+  "UBSAN_OPTIONS=${ICCDEV_UBSAN_OPTIONS}"
   # print_stacktrace=1 above makes every sanitizer report symbolize its stack.
   # llvm-symbolizer consults DEBUGINFOD_URLS while doing so, and the regression
   # container inherits Ubuntu's default (https://debuginfod.ubuntu.com) because
@@ -6377,7 +10038,7 @@ set(ICCDEV_TEST_ENV
   "LLVM_PROFILE_FILE=/dev/null"
   "ICCDEV_TOOLS_DIR=${ICCDEV_TOOLS_DIR}"
   "ICCDEV_TESTING_DIR=${ICCDEV_TESTING_DIR}"
-  "ICCDEV_BUILD_DIR=${CMAKE_BINARY_DIR}"
+  "ICCDEV_BUILD_DIR=${ICCDEV_SCRIPT_BUILD_DIR}"
   "ICCDEV_REQUIRE_JSON_ROUNDTRIP=${ICCDEV_REQUIRE_JSON_ROUNDTRIP}"
   # Issue #1856. The JSON size bound is configurable, so a test that asserts on
   # a document size has to know which limit the readers were actually built
@@ -6386,8 +10047,11 @@ set(ICCDEV_TEST_ENV
 )
 
 iccdev_add_iccconnect_thread_test()
+iccdev_add_taint_trace_memory_state_probe()
 iccdev_add_clut_avx512_sixteen_output_test()
 iccdev_add_iccconnect_config_parser_test()
+iccdev_add_createsearch_embedded_profile_test()
+iccdev_add_mru_apply_ownership_test()
 iccdev_add_cmmsearch_init_pcc_test()
 iccdev_add_cmmsearch_rebegin_test()
 iccdev_add_ndlut_input_channel_mismatch_test()
@@ -6410,25 +10074,46 @@ iccdev_add_json_sparsematrix_huaf_test()
 iccdev_add_xml_writer_graceful_degrade_test()
 iccdev_add_xml_relaxng_validation_leak_test()
 iccdev_add_xml_curve_oversize_file_test()
+iccdev_add_calc_channel_ref_unterminated_index_test()
+iccdev_add_calc_channel_ref_unterminated_index_json_test()
 iccdev_add_curve_setsize_contract_test()
+iccdev_add_mpe_curveset_setcurve_contract_tests()
+iccdev_add_owning_setter_self_alias_contract_test()
 iccdev_add_curve_gamma_u8fixed8_test()
 iccdev_add_luminance_normalization_test()
 iccdev_add_tag_name_spelling_test()
+iccdev_add_device_attributes_icc2_test()
+iccdev_add_lms_colour_space_test()
+iccdev_add_copyright_tag_icc2_test()
 iccdev_add_struct_name_spelling_test()
 iccdev_add_mcs_colorspace_name_test()
 iccdev_add_signature_utils_contract_test()
+iccdev_add_utf8_converter_cursor_test()
+iccdev_add_console_sanitize_codepoint_test()
 iccdev_add_tiff_create_overflow_test()
 iccdev_add_tiff_separated_strips_test()
 iccdev_add_mpexml_unknown_reserved_test()
+iccdev_add_svcn_xml_reserved_roundtrip_test()
+iccdev_add_chromaticity_colorant_encodings_test()
+iccdev_add_json_colorant_parent_profile_test()
+iccdev_add_json_namedcolor_colorspaces_test()
+iccdev_add_measurement_type_icc2_test()
+iccdev_add_clut_interpolation_hint_test()
+iccdev_add_icc2_version_gate_test()
+iccdev_add_mpexml_reflectance_clut_writer_test()
+iccdev_add_xml_embedded_image_empty_test()
+iccdev_add_embedded_image_zero_byte_test()
 iccdev_add_calc_envsig_sign_extension_test()
 iccdev_add_proflib_exported_data_linkage_test()
 iccdev_add_proflib_exported_global_definitions_test()
 iccdev_add_installed_package_consumer_test()
 iccdev_add_json_bcd_version_test()
+iccdev_add_xml_version_parse_test()
 iccdev_add_json_writer_move_test()
 iccdev_add_json_fixednum_size_cap_test()
 iccdev_add_json_srng_uf32_test()
 iccdev_add_v2_legacy_pcs_test()
+iccdev_add_pcs_adjust_placement_test()
 iccdev_add_v2_xml_fixtures_test()
 iccdev_add_datetime_parse_test()
 iccdev_add_encoding_surround_test()
@@ -6451,17 +10136,38 @@ iccdev_add_mpecalc_matrix_overflow_test()
 iccdev_add_mpecalc_rotate_operand_test()
 iccdev_add_sparsematrix_set_roundtrip_test()
 iccdev_add_cmmsearch_namedcolor_ownership_test()
+iccdev_add_namedcolor_findcolor_suffix_underflow_test()
+iccdev_add_colorant_count_narrowing_json_test()
+iccdev_add_calculator_limits_test()
+iccdev_add_calculator_limits_json_test()
+iccdev_add_colorant_count_narrowing_xml_test()
+iccdev_add_xml_numeric_values_test()
+iccdev_add_xml_calculator_curve_writer_test()
+iccdev_add_parametric_curve_params_json_test()
+iccdev_add_colorant_count_narrowing_binary_test()
+iccdev_add_colorant_count_validate_test()
 iccdev_add_xform_create_tag_ownership_test()
 iccdev_add_xform_abstorel_adjust_test()
+iccdev_add_parametric_curve_negative_domain_test()
+iccdev_add_formula_segment_negative_domain_test()
+iccdev_add_bpc_d2b_tag_family_test()
 iccdev_add_reflectance_observer_illum_range_test()
+iccdev_add_spectral_absolute_flag_test()
 iccdev_add_colorimetry_methods_test()
+iccdev_add_formula_segment_nonfinite_parameter_test()
 iccdev_add_getvalues_nstart_test()
 iccdev_add_chromaticity_validate_test()
 iccdev_add_cicp_copy_ctor_test()
+iccdev_add_islegalutf8_bound_test()
+iccdev_add_json_escape_codepoint_test()
+iccdev_add_mpe_acs_zero_signature_test()
 iccdev_add_pawg_c5_cicp_test()
 iccdev_add_gamut_xform_semantics_test()
 iccdev_add_rangemap_uninitialized_test()
 iccdev_add_pcs_birefl_illuminant_range_test()
+iccdev_add_namedcolor_sparse_matrix_apply_test()
+iccdev_add_namedcolor_sparse_matrix_xml_test()
+iccdev_add_sparsematrix_union_validate_test()
 iccdev_add_pcs_applyillum_chain_sizing_test()
 iccdev_add_spectral_pcs_range_consistency_test()
 iccdev_add_spectral_media_white_test()
@@ -6472,7 +10178,13 @@ iccdev_add_pcs_edge_metadata_test()
 iccdev_add_xyz_negative_z_test()
 iccdev_add_utf8_textarray_test()
 iccdev_add_extended_device_colorspace_test()
+iccdev_add_hex_data_malformed_xml_test()
+iccdev_add_hex_data_malformed_json_test()
+iccdev_add_tonemap_functions_xml_test()
+iccdev_add_tonemap_functions_json_test()
+iccdev_add_tonemap_write_many_outputs_test()
 iccdev_add_unsupported_profile_class_test()
+iccdev_add_pcs_adjust_status_test()
 iccdev_add_dpcc_pcc_replacement_test()
 iccdev_add_pcs_xyzconvert_matrix_channels_test()
 iccdev_add_iccviz_metrics_test()
@@ -6485,6 +10197,10 @@ iccdev_add_iccprofileplot_exitcode_test()
 iccdev_add_prmg_hue_normalization_test()
 iccdev_add_qa_evidence_helpers_test()
 iccdev_add_zip_utf8_text_zlib_test()
+iccdev_add_spectral_clut_channel_count_test()
+iccdev_add_spectral_clut_xml_channel_mismatch_test()
+iccdev_add_clut_apply_guard_retirement_test()
+iccdev_add_sampled_curve_nonfinite_range_test()
 
 function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
   if(NOT EXISTS "${SCRIPT}")
@@ -6527,6 +10243,9 @@ iccdev_add_script_test(
 )
 set_tests_properties(iccdev.create-profiles PROPERTIES
   FIXTURES_SETUP iccdev_profiles
+  # CreateAllProfiles.sh writes its corpus into the source Testing tree. Keep
+  # the setup exclusive; dependent consumers can fan out after it completes.
+  RUN_SERIAL TRUE
 )
 
 iccdev_add_script_test(
@@ -6576,6 +10295,14 @@ if(ICCDEV_HAS_JSON_RUNTIME_CONFIG_TOOLS AND ICCDEV_HAS_JSON_TOOLS)
   )
   set_tests_properties(iccdev.tool-coverage PROPERTIES
     FIXTURES_REQUIRED iccdev_profiles
+    # This aggregate launches more than 100 sanitizer-instrumented tools and
+    # gives each command a bounded timeout.  Reserve a hosted runner's four
+    # CTest slots so unrelated tests cannot starve those subprocesses.
+    PROCESSORS "${_iccdev_aggregate_ctest_processors}"
+    # The script copies every Testing/hybrid/ICC and hybrid/Results profile
+    # (--skip-hybrid skips only running BuildAndTest.sh), so share
+    # iccdev.hybrid-pipeline's lock rather than copy a partial profile.
+    RESOURCE_LOCK iccdev_testing_hybrid_icc
   )
 
   iccdev_add_script_test(
@@ -6587,6 +10314,16 @@ if(ICCDEV_HAS_JSON_RUNTIME_CONFIG_TOOLS AND ICCDEV_HAS_JSON_TOOLS)
   )
   set_tests_properties(iccdev.hybrid-pipeline PROPERTIES
     FIXTURES_REQUIRED iccdev_profiles
+    # The six-phase sanitizer pipeline is the dominant full-suite workload.
+    # Reserve the hosted runner's CTest budget (capped at four) instead of
+    # stretching runtime by competing with other CPU-intensive tests.
+    PROCESSORS "${_iccdev_aggregate_ctest_processors}"
+    # BuildAndTest.sh rebuilds Testing/hybrid/ICC and hybrid/Results in the
+    # source tree; iccFromXml truncates each profile before rewriting it.
+    # PROCESSORS reserves at most four slots, so a wider ctest -j still starts
+    # other tests beside this one; tests that create or read those profiles
+    # share this lock.
+    RESOURCE_LOCK iccdev_testing_hybrid_icc
   )
 endif()
 
@@ -6647,6 +10384,275 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-specsep-cli-args-regression-tests.sh"
 )
 
+# The iccFromXml half of the same CLI-contract family as
+# iccdev.specsep-usage-exit-code-regression above: a malformed invocation must not
+# report success, an unrecognised option must not be skipped in silence, -v must not
+# fail open, and -noid must leave no profile ID behind (#2387).  Deliberately NOT
+# labelled "slow": check-fast and the dispatch-only Unix and fast-lane
+# runs all exclude that label, so applying it would drop this suite from each.
+# Not a PR-path concern since #2201 (029dc30c) made ctest_mode default to full;
+# the iccdev.xml-parser-regressions block below carries the measured account.
+if(TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.fromxml-cli-contract-regression
+    120
+    "iccdev;xml;fromxml;cli;args;usage;exitcode;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2387-fromxml-cli-contract-regression.sh"
+  )
+  # The script exits 77 when iccFromXml is absent and when nothing was measured.
+  # Without this property CTest reports 77 as a FAILURE, so a lane that simply does
+  # not build the tool would go red rather than skipping -- and the "nothing was
+  # measured" guard, which exists so an empty run cannot report green, would itself
+  # turn every such run into a false failure.
+  set_tests_properties(iccdev.fromxml-cli-contract-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# #2401: the element (<n>) and text spellings of one XML array must agree.  Not
+# labelled "slow": check-fast and the dispatch-only Unix and fast-lane
+# runs all exclude that label, so applying it would drop this suite from each.
+# Not a PR-path concern since #2201 (029dc30c) made ctest_mode default to full.
+if(TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.xml-array-element-form-regression
+    300
+    "iccdev;xml;array;parser;issue-2401;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2401-xml-array-element-form-regression.sh"
+  )
+  # Exits 77 when iccFromXml or python3 is absent, or nothing was measured.
+  # Seven cases x one invocation x "timeout 25" is a 175s worst case, so the
+  # registered budget has to exceed it: if CTest kills the test first, the
+  # script's own per-case diagnostic and log tail are never produced.
+  set_tests_properties(iccdev.xml-array-element-form-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# #2406: profile and data-file paths must not carry terminal control sequences
+# into the tools' diagnostics (CWE-150/CWE-117).  Not labelled "slow":
+# check-fast and the dispatch-only Unix and fast-lane runs all exclude
+# that label.  Not a PR-path concern since #2201 (029dc30c) made ctest_mode
+# default to full.  Four cases x "timeout 60" is a 240s worst case.
+if(TARGET iccApplyProfiles AND TARGET iccApplySearch
+   AND TARGET iccApplyNamedCmm AND TARGET iccApplyToLink)
+  iccdev_add_script_test(
+    iccdev.apply-console-injection-regression
+    300
+    "iccdev;apply;security;console;injection;issue-2406;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2406-apply-console-injection-regression.sh"
+  )
+  # Exits 77 when no tool is built, the apply data files are missing, or nothing
+  # was measured.
+  set_tests_properties(iccdev.apply-console-injection-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# #2414: fopen() succeeds on a directory, so a directory argument reaches code
+# that believes it opened a file.  #2411 hit this in iccFromXml's schema lookup;
+# the same shape HANGS iccFromCube (isEOF() tested feof() alone, while a failed
+# read sets ferror() and leaves feof() false) and hangs iccFromXml on a FIFO
+# schema -- all CWE-835.  Three defect cases fail against ee14d031, two of them
+# with rc=124; the five controls pass on BOTH builds, which is what proves the
+# guard is not too eager.  One control is a FIFO into iccFromCube, guarding the
+# FIX rather than the defect: a path probe before open() takes a named pipe from
+# 254 to 124, which is why iccFromCube does not use the shared guard.
+#
+# Deliberately NOT labelled "slow": check-fast and the dispatch-only Unix
+# and fast-lane runs all exclude that label, so applying it would drop
+# this suite from each.  Not a PR-path concern since #2201 (029dc30c) made
+# ctest_mode default to full (#2412).
+#
+# 300s for a 220s worst case (7 spawns: 20+60+20+20+20+60+20), matching the two
+# registrations above.  240 would leave 20s for eight process spawns, and on a
+# sanitizer or loaded leg a run where two cases genuinely time out overshoots it
+# -- CTest then kills the script, so none of its per-case [FAIL] lines or log
+# tails are produced and the lane reports a bare "Timeout" for precisely the
+# regression this suite exists to diagnose.
+if(TARGET iccFromCube AND TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.directory-read-guard-regression
+    300
+    "iccdev;tools;cli;fromcube;fromxml;directory;issue-2414;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2414-directory-read-guard-tests.sh"
+  )
+  # Exits 77 when neither tool is built or no case was measured.
+  set_tests_properties(iccdev.directory-read-guard-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# #2442: the sibling of #2414 in the same tool, and the reason it is a separate
+# registration rather than another case in that script -- it is a different loop
+# with a different termination route.  #2414 repaired isEOF() so the three
+# `while (!isEOF())` loops end on a FAILED read; getNextLine()'s own fgetc loop
+# never consults isEOF(), so an endlessly readable stream that never emits a
+# newline spun inside one call and /dev/zero measured 124 both before and after
+# that fix (CWE-835).
+#
+# Guarded on iccFromCube alone: unlike the #2414 suite this measures one tool,
+# so a partial build has nothing to hide.
+#
+# Deliberately NOT labelled "slow": check-fast and the dispatch-only Unix
+# and fast-lane runs all exclude that label, so applying it would drop
+# this suite from each.  Not a PR-path concern since #2201 (029dc30c) made
+# ctest_mode default to full (#2412).
+#
+# 400s for a 290s worst case (10 spawns: 15+15+30+30+30+30+30+30+20+60).  As
+# with the registration above, the budget is set over the SUM of the per-case
+# timeouts rather than over the ~0.1s a healthy run takes: a tighter one risks
+# CTest killing the script instead of letting it fail, which would replace
+# eleven per-case verdicts and their log tails with a bare "Timeout" for exactly
+# the regression this suite exists to diagnose.
+if(TARGET iccFromCube)
+  iccdev_add_script_test(
+    iccdev.fromcube-endless-stream-regression
+    400
+    "iccdev;tools;cli;fromcube;endless;issue-2442;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2442-fromcube-endless-stream-tests.sh"
+  )
+  # Exits 77 when iccFromCube is not built or no endless-stream case was measured.
+  set_tests_properties(iccdev.fromcube-endless-stream-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# #2439: the legacy config writer handed its name tokens to the CONSOLE
+# sanitizer, so the only text fromLegacy() reads back was encoded for a terminal.
+# Two defects fell out: the round trip does not close for a non-ASCII colour
+# name, and the six-characters-per-codepoint expansion made ParseName()'s
+# unbounded strncpy into a char[256] reachable from the tool's OWN output -- a
+# 43-character name is 86 bytes in and 258 characters back out.  On a stock
+# Release build _FORTIFY_SOURCE turns that into SIGABRT, so the suite is red on
+# an uninstrumented lane too and needs no sanitizer to be worth running.
+#
+# Guarded on iccFromXml as well as the two apply tools: the script builds all
+# three of its named-colour profiles from tracked XML rather than from
+# Testing/*.icc, every one of which is generated.
+#
+# Deliberately NOT labelled "slow": check-fast and the dispatch-only Unix
+# and fast-lane runs all exclude that label, so applying it would drop
+# this suite from each.  Not a PR-path concern since #2201 (029dc30c) made
+# ctest_mode default to full (#2412).
+#
+# 300s for a ~200s worst case: 3 iccFromXml profile builds at 120s each is the
+# ceiling, but they complete in well under a second on every lane measured, and
+# the 10 tool spawns are 60s apiece.
+if(TARGET iccApplyNamedCmm AND TARGET iccApplySearch AND TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.config-name-roundtrip-regression
+    300
+    "iccdev;tools;cli;applynamedcmm;applysearch;config;named;issue-2439;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2439-config-name-roundtrip-tests.sh"
+  )
+  # Exits 77 when a tool or python3 is unavailable, when a fixture profile
+  # cannot be built, or when no defect case was measured.
+  set_tests_properties(iccdev.config-name-roundtrip-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# The ANSI-injection half of #2414's QA task -- the counterpart to the directory
+# guard above.  #2419 sanitized the four iccApply* tools and #2437 moved the
+# helper to per-codepoint escaping; this covers the eight further tools measured
+# to echo an operand verbatim on 764fc176, plus iccProfilePlot and
+# iccV5DspObsToV4Dsp, which a first pass wrongly cleared.
+#
+# Guarded on iccDumpProfile AND iccToXml rather than on all ten: the script
+# skips per-tool and reports what it could not measure, but iccToXml carries
+# BOTH controls, and a run with the controls skipped could pass while an
+# over-eager fix went unnoticed.
+#
+# The 300 s budget is the sibling's, and the per-case timeout was cut to 20 s to
+# stay inside it: 13 spawns at the sibling's 60 s would be a 780 s worst case,
+# and CTest killing the script means no [FAIL] line and a bare "Timeout" for
+# precisely the regression this suite exists to diagnose.
+#
+# Deliberately NOT labelled "slow", for the same reason as the apply-usage suite
+# below: check-fast and the dispatch-only Unix and fast-lane runs all
+# exclude that label, so applying it would drop this suite from each.  Not a
+# PR-path concern since #2201 (029dc30c) made ctest_mode default to full
+# (#2412).
+if(TARGET iccDumpProfile AND TARGET iccToXml)
+  iccdev_add_script_test(
+    iccdev.console-sanitize-sweep-regression
+    300
+    "iccdev;tools;cli;console;sanitize;issue-2414;issue-2406;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2414-console-sanitize-sweep-tests.sh"
+  )
+  # Exits 77 when no tool was found and no case ran.
+  set_tests_properties(iccdev.console-sanitize-sweep-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# The iccApply* half of the same CLI-contract family (#2405).  Guarded on all
+# four targets because the script measures all four and its "nothing measured"
+# guard would otherwise turn a partial build into a skip that hides real cases.
+# Deliberately NOT labelled "slow": check-fast and the dispatch-only Unix
+# and fast-lane runs all exclude that label, so applying it would drop
+# this suite from each.  Not a PR-path concern since #2201 (029dc30c) made
+# ctest_mode default to full (#2412).
+if(TARGET iccApplyProfiles AND TARGET iccApplySearch
+   AND TARGET iccApplyNamedCmm AND TARGET iccApplyToLink)
+  iccdev_add_script_test(
+    iccdev.apply-usage-exit-code-regression
+    120
+    "iccdev;apply;cli;args;usage;exitcode;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2405-apply-usage-exit-code-regression.sh"
+  )
+  # Exits 77 when no tool was found and no case ran, so a lane that does not
+  # build the Tools skips rather than going red.
+  set_tests_properties(iccdev.apply-usage-exit-code-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# The dump half of the same CLI-contract family (#2453): iccDumpProfile assigned
+# its return value only inside the "if (bDumpValidation)" block that -v opens, so
+# without -v it returned the initialiser 0 for a missing file, a directory and
+# random bytes alike.  Guarded on the target so a lane that does not build the
+# Tools skips rather than going red.
+#
+# Deliberately NOT labelled "slow", for the same reason as the siblings above:
+# check-fast and the dispatch-only Unix and fast-lane runs all exclude
+# that label.  Not a PR-path concern since #2201 (029dc30c) made ctest_mode
+# default to full (#2412).
+if(TARGET iccDumpProfile)
+  iccdev_add_script_test(
+    iccdev.dumpprofile-exit-code-regression
+    120
+    "iccdev;dumpprofile;cli;validate;exitcode;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2453-dumpprofile-exit-code-regression.sh"
+  )
+  set_tests_properties(iccdev.dumpprofile-exit-code-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+# The converter half of the same CLI-contract family (#2384): iccFromXml and
+# iccFromJson reported success for a profile they had just declared invalid.
+# Guarded on both targets because the suite measures both and its "nothing
+# measured" guard would otherwise turn a partial build into a skip that hides
+# the half that did build.
+#
+# Deliberately NOT labelled "slow", for the same reason as the sibling above:
+# check-fast and the dispatch-only Unix and fast-lane runs all exclude
+# that label.  Not a PR-path concern since #2201 (029dc30c) made ctest_mode
+# default to full (#2412).
+if(TARGET iccFromXml AND TARGET iccFromJson)
+  iccdev_add_script_test(
+    iccdev.invalid-profile-exit-code-regression
+    120
+    "iccdev;fromxml;fromjson;cli;validate;exitcode;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2384-invalid-profile-exit-code-regression.sh"
+  )
+  set_tests_properties(iccdev.invalid-profile-exit-code-regression PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
 # Guarded on the target, like iccdev.tiff-resolution-unit-regression below.
 # Both scripts exit 2 when iccSpecSepToTiff is missing rather than skipping the
 # way the older sibling suites do, so an unguarded registration turns a
@@ -6687,6 +10693,26 @@ if(TARGET iccSpecSepToTiff)
   )
 endif()
 
+# "sameAsSource" asks iccApplyProfiles to copy the source image's compression and
+# planar configuration, but the two tests converted a libtiff enum to bool, and
+# COMPRESSION_NONE and PLANARCONFIG_CONTIG are both 1 -- so both were constant
+# true and the request came out inverted (#2379).  Only iccApplyProfiles is
+# needed: the assertions read tags 259 and 284 out of the output IFD rather than
+# through iccTiffDump, and both fixtures are tracked, so no generated profile is
+# required.
+if(TARGET iccApplyProfiles)
+  iccdev_add_script_test(
+    iccdev.issue-2379-tiff-sameassource-regression
+    180
+    "iccdev;tools;tiff;json;cfg;applyprofiles;issue-2379;regression;asan"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2379-tiff-sameassource-regression.sh"
+  )
+  set_tests_properties(iccdev.issue-2379-tiff-sameassource-regression PROPERTIES
+    SKIP_RETURN_CODE 77
+  )
+endif()
+
 # TIFFTAG_RESOLUTIONUNIT lives in shared CTiffImg code, so it is covered per caller:
 # iccSpecSepToTiff and iccApplyProfiles both write through the same Create(), and
 # iccTiffDump reads the same member back (#2220).  Guarded on all three targets
@@ -6694,10 +10720,30 @@ endif()
 if(TARGET iccSpecSepToTiff AND TARGET iccApplyProfiles AND TARGET iccTiffDump)
   iccdev_add_script_test(
     iccdev.tiff-resolution-unit-regression
-    120
+    300
     "iccdev;tools;tiff;resolution;regression;asan"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-tiff-resolution-unit-regression-tests.sh"
+  )
+endif()
+
+# CTiffImg::Open() discarded the TIFFGetField(TIFFTAG_EXTRASAMPLES) return, so no
+# caller could tell an absent tag 338 from a stored one, and iccTiffDump reported
+# nothing at all for a directory libtiff had silently repaired (#2386).  Only
+# iccTiffDump is exercised -- the fix deliberately leaves the count colour
+# management reads alone -- so it is the only target guarded on.  Three of the
+# four fixtures are written by the script; the fourth is the tracked
+# Testing/hybrid/Data/smCows380_5_780.tif, which needs no generated profile.
+if(TARGET iccTiffDump)
+  iccdev_add_script_test(
+    iccdev.tiff-extrasamples-diagnostics
+    120
+    "iccdev;tools;tiff;tiffdump;extrasamples;regression;asan"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-tiff-extrasamples-diagnostics-tests.sh"
+  )
+  set_tests_properties(iccdev.tiff-extrasamples-diagnostics PROPERTIES
+    SKIP_RETURN_CODE 77
   )
 endif()
 
@@ -6990,11 +11036,19 @@ set_tests_properties(iccdev.pcc-zero-illuminant-regressions PROPERTIES
 # true. Where that matters is ci-iccdev-tool-tests.yml run with ctest_mode=full
 # and the local check target; both exclude known-red and neither excludes slow.
 #
-# It does NOT put this test on the pull_request path: ci-pr-action.yml pins
-# ctest_mode=fast, which drops it on the slow label, and the Windows legs never
-# register it at all because the if(WIN32) branch above returns before the bash
-# script tests. Measured on dispatched run 31852372579 -- the case does not
-# execute on any PR leg. Widening that is a separate question from this fix.
+# That paragraph used to end by saying this test runs on no PR leg, because
+# ci-pr-action.yml pinned ctest_mode=fast and the slow label dropped it
+# (measured on dispatched run 31852372579). That stopped being true six days
+# later: #2201 (029dc30c) made ctest_mode default to full, and full excludes
+# only known-red. Measured on PR run 34291518125 (job 102279464003, an ordinary
+# source PR): "Test #200: iccdev.xml-parser-regressions .. Passed 18.51 sec".
+# The Windows legs still never register it, because the if(WIN32) branch above
+# returns before the bash script tests.
+#
+# What the PR legs cannot cover is the sed dialect: they are Linux and Windows
+# only, and #2477 was a GNU-only "sed -i" spelling inside the script that is a
+# failing no-op under BSD sed. It went red on a maintainer's local macOS run
+# while every PR leg stayed green.
 if(TARGET iccFromXml AND TARGET iccToXml AND TARGET iccApplyToLink)
   iccdev_add_script_test(
     iccdev.xml-parser-regressions
@@ -7018,6 +11072,10 @@ if(ICCDEV_HAS_ICCCONNECT)
   )
   set_tests_properties(iccdev.iccconnect-search-cost-regressions PROPERTIES
     FIXTURES_REQUIRED iccdev_profiles
+    # The script creates Testing/hybrid/ICC/Lab_float-D50_2deg.icc when it is
+    # missing and loads it as the PCC. iccdev.hybrid-pipeline rewrites that
+    # same file in place, so share its lock rather than read a partial profile.
+    RESOURCE_LOCK iccdev_testing_hybrid_icc
   )
 endif()
 
@@ -7222,11 +11280,11 @@ set_tests_properties(iccdev.namedcolor-apply-regressions PROPERTIES
   FIXTURES_REQUIRED iccdev_profiles
 )
 
-if(TARGET iccApplyNamedCmm AND TARGET iccRoundTrip)
+if(TARGET iccApplyNamedCmm AND TARGET iccRoundTrip AND TARGET iccFromXml)
   iccdev_add_script_test(
     iccdev.v5-namedcmm-regressions
     300
-    "iccdev;v5;namedcmm;regression;asan"
+    "iccdev;v5;namedcmm;spectral;issue-2579;regression;asan"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-v5-namedcmm-regression-tests.sh"
   )
@@ -7571,6 +11629,27 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2097-nul-signature-roundtrip-regression.sh"
 )
 
+# #2512: until this test, no tracked XML carried a DictEntry, so the dictType
+# writers in IccTagXml.cpp and IccTagJson.cpp, and the XML reader, ran under no
+# test at all.  Corrupting icWCharToUtf8's output length by one byte left the
+# whole suite green.  The fixture lives in .github/ci/test-data rather than
+# Testing/, so the generated corpus is unchanged.  It has one entry per binary
+# record shape, including a value that is set but empty, which the round trip
+# must keep apart from an entry with no value.  Each direction is checked on
+# its own: the text each writer emits, and the bytes each reader rebuilds.
+# #2526 added an entry above U+FFFF, which the writers encoded as CESU-8
+# where wchar_t is 32 bits.  Not registered on Windows (see the WIN32 branch
+# above), which is the one platform where wchar_t is 16 bits; the icWCharToUtf8
+# cases in iccdev.utf8-converter-cursor-contract cover both widths.
+# Plain functional test -- skips cleanly if the tools/fixtures are absent.
+iccdev_add_script_test(
+  iccdev.issue-2512-dict-roundtrip
+  90
+  "iccdev;xml;json;dict;roundtrip;issue-2512;issue-2526;regression"
+  "${ICCDEV_REPO_ROOT}"
+  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2512-dict-roundtrip-regression.sh"
+)
+
 # #1355 - matrix/TRC (PCSXYZ) profiles must round-trip near-exactly. Guards the
 # two CMM/eval fixes (ConnectFirst actual->internal XYZ rescale; native-PCS
 # round-trip connection): iccRoundTrip RT1 mean dE was ~20 before, ~0 after.
@@ -7772,6 +11851,11 @@ if(TARGET iccApplySearch)
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applysearch-cli-args-regression.sh"
    )
+  set_tests_properties(iccdev.applysearch-cli-args PROPERTIES
+    # The regression compares results from internal thread counts through 8.
+    # Keep that bounded workload from competing with another aggregate test.
+    PROCESSORS "${_iccdev_aggregate_ctest_processors}"
+  )
 endif()
 
 # The iccApplyProfiles third of the same family (#2126). Both of its usages
@@ -7789,6 +11873,40 @@ if(TARGET iccApplyProfiles)
     "iccdev;cmm;config;cli;security;issue-1674;issue-2126;regression"
     "${ICCDEV_REPO_ROOT}"
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applyprofiles-cli-args-regression.sh"
+   )
+endif()
+
+# #2262 - the same three tools publish the same decimal rendering-intent table,
+# and all three carried the same two defects on its BRDF rows: the acronym was
+# transposed, and 50/60/70/80 were printed as flat values although each of them
+# takes an intent in its units digit exactly as the "20 + Intent" row above them
+# does. Registered as one test rather than folded into the *-cli-args siblings
+# because the defect is a disagreement *between* the three screens -- nothing
+# ever compared them, which is how iccApplyNamedCmm came to name the same three
+# transforms "Model"/"Light"/"Output" while the other two named them
+# "Parameters"/"Direct"/"MCS Parameters" -- so the cross-tool comparison is the
+# assertion, and it needs all three tools in one process list.
+#
+# Needs no profile fixture: the only .icc it opens is the tracked
+# Testing/sRGB_v4_ICC_preference.icc, and it is opened for its *decode*, read
+# back from -exportcfg, which is written before any transform is built. A
+# profile actually carrying BRDF tags would be needed to apply these transforms
+# and is not needed to assert what the codes decode to.
+#
+# Timeout matches the siblings. Three no-argument usage runs plus seventeen
+# argument decodes: 0.27s in total on a strict Release clang build and 2.24s
+# under GCC Strict ASAN+UBSAN Debug in CI, a 54x margin on the 120 budget at
+# the slower of the two. None of the runs transforms any data -- the usage runs
+# print and exit, and the decode runs stop at transform creation -- so what the
+# sanitized build adds is twenty process startups rather than work, which is
+# why the two figures differ by 8x on a test that does almost nothing.
+if(TARGET iccApplyNamedCmm AND TARGET iccApplyProfiles AND TARGET iccApplyToLink)
+  iccdev_add_script_test(
+    iccdev.issue-2262-brdf-usage
+    120
+    "iccdev;cmm;tools;cli;issue-2190;issue-2262;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-2262-brdf-usage-regression.sh"
    )
 endif()
 
@@ -7880,6 +11998,12 @@ iccdev_add_script_test(
   "${ICCDEV_REPO_ROOT}"
   "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-issue-1781-applytolink-qa-matrix.sh"
 )
+set_tests_properties(iccdev.issue-1781-applytolink-qa-matrix PROPERTIES
+  # The grid-255 positive control processes 16,581,375 nodes under a bounded
+  # subprocess timeout. Reserve the hosted runner's CTest budget (capped at
+  # four) so sanitizer tests cannot starve it after reporting 100% progress.
+  PROCESSORS "${_iccdev_aggregate_ctest_processors}"
+)
 
 # #2011: the BT.2100 fixtures have to agree with themselves.  All four
 # Testing/HDR/BT2100PQ*.xml declared cicp TransferCharacteristics="18" -- ARIB
@@ -7922,4 +12046,16 @@ if(TARGET iccDescribeSinkTest)
     TIMEOUT 60
     LABELS  "iccdev;describe;api;sink;options"
   )
+endif()
+
+# UnixMultiConfigRuntime.cmake bails out on WIN32 without defining the
+# iccdev_unix_runtime fixture, so this wiring must be skipped there too or
+# Windows multi-config (Visual Studio) CTest runs get unsatisfied fixtures.
+if(ICCDEV_IS_MULTI_CONFIG AND NOT WIN32)
+  get_property(_iccdev_runtime_tests DIRECTORY PROPERTY TESTS)
+  foreach(_test IN LISTS _iccdev_runtime_tests)
+    if(NOT _test MATCHES "^iccdev\\.(unix-multi-config-runtime|unix-runtime-layout)$")
+      set_property(TEST "${_test}" APPEND PROPERTY FIXTURES_REQUIRED iccdev_unix_runtime)
+    endif()
+  endforeach()
 endif()

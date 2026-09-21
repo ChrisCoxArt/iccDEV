@@ -35,12 +35,24 @@ TOTAL=1
 find_library_file() {
   local dir="$1"
   local base="$2"
+  local candidate
 
-  find "$dir" -maxdepth 1 \( \
-      -name "lib${base}*.so" -o \
-      -name "lib${base}*.dylib" -o \
-      -name "lib${base}*.a" \
-    \) -print 2>/dev/null | sort | head -n 1
+  for candidate in \
+    "$dir/lib${base}d.so" \
+    "$dir/lib${base}d.so."* \
+    "$dir/lib${base}.so" \
+    "$dir/lib${base}.so."* \
+    "$dir/lib${base}d.dylib" \
+    "$dir/lib${base}.dylib" \
+    "$dir/lib${base}-staticd.a" \
+    "$dir/lib${base}-static.a"; do
+    if [ -f "$candidate" ] || [ -L "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 echo "=== namedColor2 apply regression ==="
@@ -73,7 +85,7 @@ fi
 
 LINK_EXTRA=()
 if [[ "$PROFLIB" == *.a ]] &&
-    grep -q '^ICC_USE_ZLIB:BOOL=ON$' "$BUILD_ROOT/CMakeCache.txt" 2>/dev/null; then
+    grep -q '^ICC_USE_ZLIB:BOOL=ON$' "${ICCDEV_CMAKE_CACHE:-$BUILD_ROOT/CMakeCache.txt}" 2>/dev/null; then
   LINK_EXTRA+=(-lz)
 fi
 

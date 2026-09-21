@@ -73,6 +73,25 @@ iccFromJson input.json output.icc
 iccDumpProfile output.icc
 ```
 
+### MATLAB bindings
+
+The MATLAB package provides shell-free wrappers around the same tools after
+`iccToJson` and `iccFromJson` have been built. Add `matlab/` to the MATLAB path,
+then use `iccdev.to_json` to obtain UTF-8 JSON text and `iccdev.from_json` to
+return a `uint8` ICC byte column:
+
+```matlab
+json_text = iccdev.to_json(fullfile('Testing', ...
+  'sRGB_v4_ICC_preference.icc'));
+profile_bytes = iccdev.from_json(json_text);
+```
+
+`from_json` also accepts an existing JSON file path. Both wrappers require a
+Java-enabled MATLAB or Octave runtime, preserve native parser diagnostics, and
+do not produce ICC bytes after a failed conversion. See
+[MATLAB bindings and QA](matlab-bindings.md) for the Release build targets and
+the `test_json_bindings` round-trip coverage.
+
 ## JSON Structure
 
 Every JSON profile is wrapped in a top-level `IccProfile` object:
@@ -339,11 +358,22 @@ Segment types:
 | `FormulaSegment`  | `functionType`, `parameters`  |
 | `SampledSegment`  | `samples`                     |
 
+A `FormulaSegment`'s `functionType` must be a JSON integer, and `parameters`
+must hold exactly the count that type defines (ICC.2-2023 Table 111), all
+finite numbers. Anything else is refused rather than zero-filled or truncated.
+
+| `functionType` | `parameters` count |
+|----------------|--------------------|
+| `0`            | 4                  |
+| `1`-`4`        | 5                  |
+| `5`, `7`       | 6                  |
+| `6`            | 7                  |
+
 ### Colorant Tags
 
 #### `colorantTableType` - colorant names and PCS coordinates
 
-Because `ToJson`/`ParseJson` have no access to the profile header, the encoding of the `"pcs"` arrays is declared explicitly via a `"pcsEncoding"` field:
+The encoding of the `"pcs"` arrays is declared explicitly via a `"pcsEncoding"` field:
 
 | `pcsEncoding` | `pcs` array contents |
 |---------------|----------------------|
@@ -351,7 +381,18 @@ Because `ToJson`/`ParseJson` have no access to the profile header, the encoding 
 | `"XYZ"` | X, Y, Z floats (0-2 range) |
 | `"16bit"` | Raw ICC U16 integers (0-65535) |
 
-`ToJson` always writes `"pcsEncoding": "Lab"`. `ParseJson` defaults to `"Lab"` when the field is absent (backward compatible with files written before this field was added).
+`ParseJson` defaults to `"Lab"` when the field is absent (backward compatible with files written before this field was added). A `pcsEncoding` that is present but is not one of the three strings above is refused.
+
+`ToJson` chooses the encoding from the PCS of the profile that owns the tag
+(ICC.1:2022 clause 10.5, Table 34): `"Lab"` for a Lab PCS, `"XYZ"` for an XYZ
+PCS, and `"16bit"` for any other PCS or for a tag with no owning profile. The
+Lab and XYZ forms round-trip every 16-bit value exactly.
+
+The `"colorantTable"` array is required. Each colorant entry must be an object
+with a string `"name"` and a `"pcs"` array containing exactly three numeric
+values. This matches the three PCS coordinates encoded for every
+`colorantTableType` entry by ICC.1. A document that breaks any of these rules is
+refused rather than loaded with a default or zero-filled value.
 
 ```json
 {
@@ -826,8 +867,10 @@ for build instructions.
 ### IIS ISAPI server-side integration
 
 The Windows IIS ISAPI sample at
-[`Tools/Winnt/IccIisIsapi/`](../Tools/Winnt/IccIisIsapi/) conditionally invokes
-`iccToJson` and `iccFromJson` as part of its tool pipeline when IccJSON is built.
+<a href="https://github.com/InternationalColorConsortium/iccDEV/tree/master/Tools/Winnt/IccIisIsapi/">Tools/Winnt/IccIisIsapi/</a>
+conditionally invokes `iccToJson` and `iccFromJson` as part of its tool pipeline
+when IccJSON is built.
 Uploaded ICC profiles are converted to JSON for inspection, and XML-originated
 profiles are also exported to JSON. See
-[`api.md`](../Tools/Winnt/IccIisIsapi/api.md) for the HTTP endpoint reference.
+<a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/Tools/Winnt/IccIisIsapi/api.md">api.md</a>
+for the HTTP endpoint reference.

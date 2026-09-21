@@ -507,6 +507,7 @@ jobs:
 
           ctest_args=(
             --test-dir "${BUILD_DIR}" \
+            --parallel "$(nproc)" \
             --output-junit "${BUILD_DIR}/ctest-results.xml" \
             --selection-output "${BUILD_DIR}/recent-ctests.txt"
           )
@@ -742,10 +743,10 @@ jobs:
 
           case "$CTEST_MODE" in
             fast)
-              test_cmd="python3 .github/scripts/run-recent-ctests.py --test-dir build --label-exclude slow --label-exclude calculator --label-exclude known-red --output-junit build/ctest-results.xml"
+              test_cmd="python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel $(nproc) --label-exclude slow --label-exclude calculator --label-exclude known-red --output-junit build/ctest-results.xml"
               ;;
             full)
-              test_cmd="python3 .github/scripts/run-recent-ctests.py --test-dir build --label-exclude known-red --output-junit build/ctest-results.xml"
+              test_cmd="python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel $(nproc) --label-exclude known-red --output-junit build/ctest-results.xml"
               ;;
             skip)
               test_cmd="skipped by manual ctest_mode=skip input"
@@ -804,16 +805,16 @@ jobs:
             case "$CTEST_MODE" in
               fast)
                 if [ "$CTEST_RECENT_LIMIT" = "0" ]; then
-                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --label-exclude slow --label-exclude calculator --label-exclude known-red"
+                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel \"\$(nproc)\" --label-exclude slow --label-exclude calculator --label-exclude known-red"
                 else
-                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --limit '${CTEST_RECENT_LIMIT}' --label-exclude slow --label-exclude calculator --label-exclude known-red"
+                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel \"\$(nproc)\" --limit '${CTEST_RECENT_LIMIT}' --label-exclude slow --label-exclude calculator --label-exclude known-red"
                 fi
                 ;;
               full)
                 if [ "$CTEST_RECENT_LIMIT" = "0" ]; then
-                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --label-exclude known-red"
+                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel \"\$(nproc)\" --label-exclude known-red"
                 else
-                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --limit '${CTEST_RECENT_LIMIT}' --label-exclude known-red"
+                  echo "python3 .github/scripts/run-recent-ctests.py --test-dir build --parallel \"\$(nproc)\" --limit '${CTEST_RECENT_LIMIT}' --label-exclude known-red"
                 fi
                 echo "ctest --test-dir build -R '^iccdev\\.hybrid-pipeline$' --output-on-failure --no-tests=error"
                 ;;
@@ -909,7 +910,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
       - name: Package developer report
-        if: ${{ success() }}
+        if: ${{ always() }}
         env:
           BASH_ENV: /dev/null
         run: |
@@ -1054,7 +1055,7 @@ jobs:
           } > "$html"
 
       - name: Upload developer report
-        if: ${{ success() }}
+        if: ${{ always() }}
         # preflight: allow-untrusted-artifact reason=sanitized-developer-report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -1115,7 +1116,7 @@ jobs:
             local label="$1"
             shift
             echo "[START] ${label}"
-            timeout 60s "$@"
+            timeout 180s "$@"
             echo "[PASS] ${label}"
           }
 

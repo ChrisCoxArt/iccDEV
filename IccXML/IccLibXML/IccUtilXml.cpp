@@ -67,6 +67,7 @@
 #include <new>      /* std::nothrow - icXmlReadFileBounded */
 #include <string>   /* std::string, std::to_string */
 #include <time.h>
+#include <cctype>
 #include "IccUtilXml.h"
 #include "IccConvertUTF.h"
 #include "IccTagFactory.h"
@@ -503,6 +504,29 @@ icUInt32Number icXmlGetHexData(void *pBuf, const char *szText, icUInt32Number nB
     }
   }
   return rv;
+}
+
+bool icXmlValidHexData(const char *szText)
+{
+  if (!szText)
+    return false;
+
+  // icXmlDumpHexData() writes the digits in pairs, 32 bytes to a line, so the
+  // only text between pairs is the line break and its indentation.  Both
+  // decoders skip anything they cannot read as a pair, one character at a
+  // time, so "0g11" silently gave the single byte 0x11 and a trailing digit
+  // was dropped: after one conversion a malformed payload could not be told
+  // from a shorter intentional one (#2610).
+  while (*szText) {
+    if (isspace((unsigned char)*szText)) {
+      szText++;
+      continue;
+    }
+    if (hexValue(szText[0]) < 0 || hexValue(szText[1]) < 0)
+      return false;
+    szText += 2;
+  }
+  return true;
 }
 
 icUInt32Number icXmlGetHexDataSize(const char *szText)
@@ -1084,6 +1108,92 @@ float clipTypeRange( const float &input )
   return input;
 }
 
+// #2401: ONE conversion, shared by both spellings of an array body.
+//
+// An <Array>/<Data> body may be written as text ("256 255 300 -1") or as a run
+// of <n> elements.  ParseText() clipped with clipTypeRange<T>(atof(...)) while
+// ParseArray()'s element branch cast atol() straight to T, so <n>256</n> in a
+// uInt8Array wrapped to 0 where the identical text array clipped to 255.  Two
+// implementations that merely happen to agree drift again, so they now have
+// one: agreement is structural here, not a coincidence the tests have to keep
+// re-checking.
+//
+// Integers are parsed integrally rather than through atof().  atol() was exact
+// for the whole uInt64 range on LP64, and routing those values through a
+// double's 53-bit mantissa would have LOST fidelity that the element form
+// already had -- 9007199254740993 landing as ...92.  It also avoids
+// clipTypeRange()'s (long double)max() comparison, which on a platform where
+// long double == double rounds UINT64_MAX up to 2^64, so the saturation test
+// fails and the cast is undefined.  Every integer instantiation of this
+// template is unsigned, which is why "below the range" is simply zero.
+template<typename T>
+static T icParseArrayValue(const char *num)
+{
+  // Skipped once, before anything else looks at the token.  Keeping this inside
+  // the integer branch would make the NaN literal test below whitespace
+  // sensitive: a pretty-printed "<n>\n  nan\n</n>" would miss strncmp() and
+  // fall through to clipTypeRange(), which flushes NaN to zero, while the
+  // unindented spelling produced a real NaN.
+  const char *p = num;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+    p++;
+
+  // Long-standing special case kept from ParseText(): a real NaN for floating
+  // point, zero for integers, which cannot represent one.
+  if (!strncmp(p, "nan", 3) || !strncmp(p, "-nan", 4)) {
+    if (std::is_floating_point<T>())
+      return (T)nanf(p);
+    return (T)0;
+  }
+
+  if constexpr (std::numeric_limits<T>::is_integer) {
+    static_assert(!std::numeric_limits<T>::is_signed,
+                  "negative values are clipped to zero here, which is only the "
+                  "right lower bound while every integer instantiation of "
+                  "CIccXmlArrayType is unsigned");
+
+    // A token carrying a decimal point or an exponent is not an integer
+    // literal, and strtoull() would stop at the '.' and read "1e300" as 1.
+    bool bFloatToken = false;
+    for (const char *q = p; *q; q++) {
+      if (*q == '.' || *q == 'e' || *q == 'E') {
+        bFloatToken = true;
+        break;
+      }
+    }
+
+    if (!bFloatToken) {
+      if (*p == '-')
+        return (T)0;    // clip below the range, as clipTypeRange() did
+
+      errno = 0;
+      char *end = nullptr;
+      unsigned long long v = strtoull(p, &end, 10);
+      if (errno == ERANGE ||
+          v > (unsigned long long)std::numeric_limits<T>::max())
+        return std::numeric_limits<T>::max();
+      return (T)v;
+    }
+
+    // Float-shaped token in an integer array.  Saturate in double space rather
+    // than deferring to clipTypeRange(): its bound is (long double)max(), and
+    // where long double == double (MSVC x64/ARM64) that rounds UINT64_MAX up to
+    // 2^64, so "1.8446744073709552e19" fails the > test and the cast to
+    // uint64_t is undefined.  Comparing >= against the same rounded-up bound
+    // saturates instead.  atol() was defined here before this change, so this
+    // path must not be the one that introduces UB.
+    double d = atof(p);
+    if (std::isnan(d) || d <= 0.0)
+      return (T)0;
+    if (d >= (double)std::numeric_limits<T>::max())
+      return std::numeric_limits<T>::max();
+    return (T)d;
+  }
+  else {
+    return clipTypeRange<T>(atof(p));
+  }
+}
+
 template <class T, icTagTypeSignature Tsig>
 icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSize, const char *szText)
 {	
@@ -1104,15 +1214,7 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
     }
     else if (bInNum) {
       num[b] = 0;
-      if (!strncmp(num, "nan", 3) || !strncmp(num, "-nan", 4)) {
-        if (std::is_floating_point<T>())        // compile type constant for each type
-          pBuf[n] = (T)nanf(num);
-        else
-          pBuf[n] = 0;  // flush nan to zero for integers
-      }
-      else {
-        pBuf[n] = clipTypeRange<T>(atof(num));  // clip input to valid output range
-      }
+      pBuf[n] = icParseArrayValue<T>(num);
       n++;
       bInNum = false;
     }
@@ -1120,19 +1222,41 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
   }
   if ( bInNum && (n < nSize) ) {
     num[b] = 0;
-    if (!strncmp(num, "nan", 3) || !strncmp(num, "-nan", 4)) {
-        if (std::is_floating_point<T>())        // compile type constant for each type
-          pBuf[n] = (T)nanf(num);
-        else
-          pBuf[n] = 0;  // flush nan to zero for integers
-    }
-    else {
-      pBuf[n] = clipTypeRange<T>(atof(num));  // clip input to valid output range
-    }
+    pBuf[n] = icParseArrayValue<T>(num);
     n++;
   } 
 
   return n;
+}
+
+// True when szText carries exactly one whitespace-delimited token.
+//
+// An <n>/<f> element stands for exactly one array slot, and icParseArrayValue()
+// converts the first token in the body and ignores anything after it.  So a body
+// like "10 20 30" would fill one slot and silently drop two values, leaving the
+// array shorter than the count that reserved the slots -- the same mismatch the
+// empty-element case produces at the other end.
+//
+// This is deliberately NOT ParseTextCount()==1.  That counter treats 'a', 'e' and
+// 'n' as numeric characters so "nan" survives, which makes "ProcessBlack" two
+// tokens and "ProcessMagenta" four; Testing/hybrid's three Overprint profiles put
+// exactly those in a colorantOrderTag, so counting with it here would refuse
+// tracked corpus profiles.  Whitespace is the right delimiter for "one value".
+static bool icXmlIsSingleToken(const char *szText)
+{
+  int nTokens = 0;
+
+  for (const char *p = szText; *p; ) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+      p++;
+    if (!*p)
+      break;
+    nTokens++;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+      p++;
+  }
+
+  return nTokens == 1;
 }
 
 template <class T, icTagTypeSignature Tsig>
@@ -1163,12 +1287,35 @@ bool CIccXmlArrayType<T, Tsig>::ParseArray(T* pBuf, icUInt32Number nSize, xmlNod
       icUInt32Number i;
       for (i=0; i<nSize && pNode; pNode = pNode->next) {
         if (pNode->type == XML_ELEMENT_NODE &&
-          !icXmlStrCmp(pNode->name, "f") &&
-          pNode->children &&
-          pNode->children->content) {
-            float f = 0.0f;
-            sscanf((const char *)(pNode->children->content), "%f", &f);
-            pBuf[i] = (T)f;
+          !icXmlStrCmp(pNode->name, "f")) {
+            // #2401: was an unchecked sscanf("%f") straight into a cast, which
+            // made this a THIRD conversion: no clamp, so <f>1e50</f> stored
+            // +inf into an MPE matrix where the identical text array clipped to
+            // FLT_MAX, and no "nan" literal case.  Same helper as the other two
+            // spellings.
+
+            // A counted element must actually carry a value.  An empty
+            // <f/> was skipped by the old `children && content` guard while
+            // icXmlNodeCount() still counted it, so the slot it stood for was
+            // never written and SetSize()'s malloc()ed buffer was serialized
+            // uninitialised -- MALLOC_PERTURB_=42 writes 0xd5 through to the
+            // .icc, and the parse still reported success.
+            if (!pNode->children || !pNode->children->content)
+              return false;
+
+            // Acceptance now matches the text form, which is the parity #2401
+            // was about: ParseTextCount() is what decides a text body has a
+            // value in it, so the element body is admitted on the same test
+            // rather than on a second rule that can drift from it.
+            const char *szValue = (const char *)(pNode->children->content);
+            if (!ParseTextCount(szValue))
+              return false;
+
+            // One element is one slot, so its body must be one value.
+            if (!icXmlIsSingleToken(szValue))
+              return false;
+
+            pBuf[i] = icParseArrayValue<T>(szValue);
             i++;
         }
       }
@@ -1194,10 +1341,39 @@ bool CIccXmlArrayType<T, Tsig>::ParseArray(T* pBuf, icUInt32Number nSize, xmlNod
       icUInt32Number i;
       for (i=0; i<nSize && pNode; pNode = pNode->next) {
         if (pNode->type == XML_ELEMENT_NODE &&
-          !icXmlStrCmp(pNode->name, "n") &&
-          pNode->children &&
-          pNode->children->content) {
-            pBuf[i] = (T)atol((const char *)(pNode->children->content));
+          !icXmlStrCmp(pNode->name, "n")) {
+            // #2401: this was (T)atol(...), an unchecked narrowing cast, so
+            // <n>256</n> in a uInt8Array wrapped to 0 and <n>300</n> to 44
+            // while the identical text-form array clipped both to 255.  atol()
+            // also discarded the fractional part outright for the
+            // float32/float64/float16 arrays, which reach this branch too:
+            // only icSigFloatArrayType scans for "f" elements (see the
+            // wrapper's scanType), so <n>0.5</n> in a float32Array stored 0.
+            // Both are the same defect -- this branch had its own conversion --
+            // so it now calls the one ParseText() uses.
+
+            // A counted element must actually carry a value.  An empty
+            // <n/> was skipped by the old `children && content` guard while
+            // icXmlNodeCount() still counted it, so the slot it stood for was
+            // never written and SetSize()'s malloc()ed buffer was serialized
+            // uninitialised -- MALLOC_PERTURB_=42 writes 0xd5 through to the
+            // .icc, and the parse still reported success.
+            if (!pNode->children || !pNode->children->content)
+              return false;
+
+            // Acceptance now matches the text form, which is the parity #2401
+            // was about: ParseTextCount() is what decides a text body has a
+            // value in it, so the element body is admitted on the same test
+            // rather than on a second rule that can drift from it.
+            const char *szValue = (const char *)(pNode->children->content);
+            if (!ParseTextCount(szValue))
+              return false;
+
+            // One element is one slot, so its body must be one value.
+            if (!icXmlIsSingleToken(szValue))
+              return false;
+
+            pBuf[i] = icParseArrayValue<T>(szValue);
             i++;
         }
       }
@@ -1339,11 +1515,34 @@ icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
     devAttr |= icMediaNegative;
   }
 
+	// Before #2565 the writer spelled this "blackAndwhite", so accept both.
 	attr = icXmlFindAttr(pNode, "MediaColour");
-  if (attr && !strcmp(icXmlAttrValue(attr), "blackAndWhite")) {
+  if (attr && (!strcmp(icXmlAttrValue(attr), "blackAndWhite") ||
+               !strcmp(icXmlAttrValue(attr), "blackAndwhite"))) {
 		devAttr |= icMediaBlackAndWhite;
 	}
-	
+
+  // ICC.2 Table 19 bits 4-7.  The writer names them only when set.
+  attr = icXmlFindAttr(pNode, "MediaBase");
+  if (attr && !strcmp(icXmlAttrValue(attr), "nonPaper")) {
+    devAttr |= icNonPaperBased;
+  }
+
+  attr = icXmlFindAttr(pNode, "MediaTexture");
+  if (attr && !strcmp(icXmlAttrValue(attr), "textured")) {
+    devAttr |= icTextured;
+  }
+
+  attr = icXmlFindAttr(pNode, "MediaIsotropy");
+  if (attr && !strcmp(icXmlAttrValue(attr), "nonIsotropic")) {
+    devAttr |= icNonIsotropic;
+  }
+
+  attr = icXmlFindAttr(pNode, "SelfLuminous");
+  if (attr && !strcmp(icXmlAttrValue(attr), "true")) {
+    devAttr |= icSelfLuminous;
+  }
+
   attr = icXmlFindAttr(pNode, "VendorSpecific");
   if (attr) {
     icUInt64Number vendor = 0;
@@ -1367,6 +1566,12 @@ icColorantEncoding icGetColorantValue(const icChar* str)
 
 	if (!strcmp(str, "P22"))  
 		return icColorantP22;  
+
+	if (!strcmp(str, "P3"))
+		return icColorantP3;
+
+	if (!strcmp(str, "ITU-R BT.2020"))
+		return icColorantBT2020;
 
   return icColorantUnknown;
 }
@@ -1400,12 +1605,24 @@ const std::string icGetDeviceAttrName(icUInt64Number devAttr)
 	xml += line;
 	
 	if (devAttr & icMediaBlackAndWhite)
-		snprintf(line, lineSize, " MediaColour=\"blackAndwhite\"");
+		snprintf(line, lineSize, " MediaColour=\"blackAndWhite\"");
 	else
 		snprintf(line, lineSize, " MediaColour=\"colour\"");
 	xml += line;
 
-  icUInt64Number otherAttr = ~((icUInt64Number)icTransparency|icMatte|icMediaNegative|icMediaBlackAndWhite);
+  // ICC.2 Table 19 bits 4-7, named only when set so that a profile without them
+  // writes the same four attributes as before.
+  if (devAttr & icNonPaperBased)
+    xml += " MediaBase=\"nonPaper\"";
+  if (devAttr & icTextured)
+    xml += " MediaTexture=\"textured\"";
+  if (devAttr & icNonIsotropic)
+    xml += " MediaIsotropy=\"nonIsotropic\"";
+  if (devAttr & icSelfLuminous)
+    xml += " SelfLuminous=\"true\"";
+
+  icUInt64Number otherAttr = ~((icUInt64Number)icTransparency|icMatte|icMediaNegative|icMediaBlackAndWhite|
+                               icNonPaperBased|icTextured|icNonIsotropic|icSelfLuminous);
 
   if (devAttr & otherAttr) {
     snprintf(line, lineSize, " VendorSpecific=\"%016llx\"", devAttr & otherAttr);
@@ -1513,5 +1730,26 @@ bool icXmlParseU32(const char *s, icUInt32Number &out, icUInt32Number max_value)
   unsigned long long v = std::strtoull(s, &end, 10);
   if (*end != '\0' || errno == ERANGE || v > max_value) return false;
   out = static_cast<icUInt32Number>(v);
+  return true;
+}
+
+bool icXmlParseFloat(const char *s, icFloatNumber &out)
+{
+  if (!s) return false;
+  char *end = nullptr;
+  double d = std::strtod(s, &end);
+  // strtod skips leading whitespace itself and leaves end at s when it
+  // converts nothing, which covers "" and all-whitespace input too.
+  if (end == s) return false;
+  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
+    end++;
+  if (*end != '\0') return false;
+  // A NaN, an infinity or a double beyond the float range would reach the
+  // fixed-point encoders through a conversion whose result is undefined.
+  if (!std::isfinite(d) ||
+      d > (double)std::numeric_limits<icFloatNumber>::max() ||
+      d < -(double)std::numeric_limits<icFloatNumber>::max())
+    return false;
+  out = static_cast<icFloatNumber>(d);
   return true;
 }

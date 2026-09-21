@@ -33,13 +33,31 @@ cmake -S Build/Cmake -B build \
   -DENABLE_WXWIDGETS=OFF \
   -DENABLE_SHARED_LIBS=ON \
   -DENABLE_STATIC_LIBS=ON
-cmake --build build --parallel "$(nproc)"
+jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+cmake --build build --parallel "$jobs"
 ctest --test-dir build -N --no-tests=error
-cmake --build build --target build-test-binaries --parallel "$(nproc)"
-ctest --test-dir build --output-on-failure --no-tests=error
-ctest --test-dir build --label-exclude slow --output-on-failure --no-tests=error
+ctest --test-dir build --parallel "$jobs" --output-on-failure --no-tests=error
+ctest --test-dir build --parallel "$jobs" --label-exclude slow --output-on-failure --no-tests=error
 cmake --build build --target check
 cmake --build build --target check-fast
+```
+
+The `check` and `check-fast` targets use the host's detected logical processor
+count. Set `-DICCDEV_CTEST_PARALLEL_LEVEL=<N>` at configure time to cap their
+concurrency. CTest fixtures and `RUN_SERIAL` properties still take precedence.
+
+Linux profiling configurations register `iccdev.profiling-smoke` when `gprof`
+is available. The test runs the instrumented `iccDumpProfile`, requires a
+nonempty `gmon.out`, and verifies that `gprof` produces a flat profile. Keep the
+profiling tree separate from sanitizer and coverage builds:
+
+```bash
+cmake -S Build/Cmake -B out/linux-profiling -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DENABLE_TOOLS=ON -DENABLE_TESTS=ON \
+  -DENABLE_PROFILING=ON
+cmake --build out/linux-profiling --target iccDumpProfile --parallel "$jobs"
+ctest --test-dir out/linux-profiling -R '^iccdev\.profiling-smoke$' \
+  --output-on-failure --no-tests=error
 ```
 
 Windows Visual Studio multi-config generators:
@@ -50,14 +68,49 @@ cmake --preset vs2022-x64 -S Build/Cmake -B out/vs2022-x64 ^
   -DENABLE_TOOLS=ON
 cmake --build out/vs2022-x64 --config Release -- /m /maxcpucount
 ctest --test-dir out/vs2022-x64 -C Release -N --no-tests=error
-cmake --build out/vs2022-x64 --config Release --target build-test-binaries
-ctest --test-dir out/vs2022-x64 -C Release --output-on-failure --no-tests=error
+ctest --test-dir out/vs2022-x64 -C Release --parallel %NUMBER_OF_PROCESSORS% --output-on-failure --no-tests=error
 cmake --build out/vs2022-x64 --config Release --target check
 ```
 
 Windows presets use a unified build-tree runtime directory. Visual Studio tools
 and iccDEV DLLs are under `out\vs2022-x64\bin\<Config>`; MinGW tools are under
 `out\mingw-x64\bin`.
+
+macOS Xcode and Unix Ninja Multi-Config:
+
+```bash
+cmake --preset macos-xcode -S Build/Cmake -B out/macos-xcode
+cmake --build out/macos-xcode --config Release --parallel
+ctest --test-dir out/macos-xcode -C Release \
+  -R '^iccdev\.(unix-runtime-layout|clut-eight-output-regression)$' \
+  --parallel "$(sysctl -n hw.ncpu)" \
+  --output-on-failure --no-tests=error
+```
+
+The `iccdev.unix-multi-config-runtime` setup fixture automatically prepares
+`Testing/ctest-runtime/<Config>/` inside the build tree. It exposes regular files
+to that configuration's built CLI targets, shared/static libraries (including
+linker and SONAME aliases), generated version headers, and the real CMake cache.
+Artifacts use hard links where possible, otherwise copies; library symlinks
+are resolved so legacy `find -type f` discovery cannot silently skip tools.
+CTest points the shell suites' `PATH`, library paths, `ICCDEV_TOOLS_DIR`, and
+`ICCDEV_BUILD_DIR` at this flat compatibility layout. It is a test runtime
+directory, not a second CMake build tree; continue using the original build
+directory with `cmake --build`.
+
+Only already-built artifacts are exposed. Build the selected configuration
+first; the runtime view never substitutes Release artifacts for unbuilt Debug targets.
+Each configuration has its own runtime directory and script-output directory;
+regeneration removes stale aliases without changing actual build artifacts.
+Single-config Unix and Windows runtime layouts are unchanged. Existing
+profile-generation scripts still operate in the source `Testing/` directory;
+do not run those fixtures concurrently against the same checkout. The CTest
+registrations mark both Unix and Windows profile-generation setup fixtures
+`RUN_SERIAL`; their dependent consumers still run concurrently afterward.
+
+For the dependency-free Xcode CI reproduction, run
+`bash .github/scripts/iccdev-xcode-ctest-smoke.sh`. It covers Release and Debug
+runtime staging, native profile-write behavior, and fresh `iccFromCube` output.
 
 Windows MinGW single-config generators, `cmd.exe`:
 
@@ -66,7 +119,6 @@ set PATH=C:\msys64\ucrt64\bin;C:\msys64\usr\bin;%PATH%
 cmake --preset mingw-x64 -S Build/Cmake -B out/mingw-x64 ^
   -DENABLE_TESTS=ON
 cmake --build out/mingw-x64 --parallel
-cmake --build out/mingw-x64 --target build-test-binaries --parallel
 ctest --test-dir out/mingw-x64 -R "^iccdev\.(windows-icc-dump-profile-smoke|issue-987-shared-mpe-export)$" --output-on-failure --no-tests=error
 ```
 
@@ -77,7 +129,6 @@ $env:PATH = 'C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:PATH
 cmake --preset mingw-x64 -S Build/Cmake -B out/mingw-x64 `
   -DENABLE_TESTS=ON
 cmake --build out/mingw-x64 --parallel
-cmake --build out/mingw-x64 --target build-test-binaries --parallel
 ctest --test-dir out/mingw-x64 -R "^iccdev\.(windows-icc-dump-profile-smoke|issue-987-shared-mpe-export)$" --output-on-failure --no-tests=error
 ```
 
@@ -88,7 +139,6 @@ packages, use the dependency-light static preset. `cmd.exe`:
 set PATH=C:\msys64\ucrt64\bin;C:\msys64\usr\bin;%PATH%
 cmake --preset mingw-core-x64 -S Build/Cmake -B out/mingw-core-x64
 cmake --build out/mingw-core-x64 --parallel
-cmake --build out/mingw-core-x64 --target build-test-binaries --parallel
 ctest --test-dir out/mingw-core-x64 -R "iccconnect|icc-dump-profile-smoke" --output-on-failure --no-tests=error
 ```
 
@@ -98,23 +148,24 @@ PowerShell:
 $env:PATH = 'C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:PATH
 cmake --preset mingw-core-x64 -S Build/Cmake -B out/mingw-core-x64
 cmake --build out/mingw-core-x64 --parallel
-cmake --build out/mingw-core-x64 --target build-test-binaries --parallel
 ctest --test-dir out/mingw-core-x64 -R "iccconnect|icc-dump-profile-smoke" --output-on-failure --no-tests=error
 ```
 
 Use `--no-tests=error` for discovery and execution so a registration regression
 cannot pass as a green no-op.
 
-The default `all` build intentionally excludes CTest-only helper binaries such as
-`iccFileIoSeekTellTest` and `iccParserRestoreCallsTest`. Build the
-`build-test-binaries` target before running filtered CTest commands directly, or
-use the `check` / `check-fast` targets to build tool and test dependencies
+Regression-only CTest helper binaries such as `iccFileIoSeekTellTest` and
+`iccParserRestoreCallsTest` are intentionally excluded from the default `all`
+product build. Build `build-test-binaries` before a direct filtered CTest run,
+or use `check`/`check-fast`; both targets build their tool and test dependencies
 before running the suite.
 
 ## Registered Suites
 
 | Test | Source |
 |------|--------|
+| `iccdev.unix-multi-config-runtime` | `Build/Cmake/Testing/UnixMultiConfigRuntime.cmake`; automatic Unix multi-config runtime setup |
+| `iccdev.unix-runtime-layout` | `Build/Cmake/Testing/TestUnixTestRuntime.cmake`; configuration isolation, stale aliases, spaced paths, and failure controls |
 | `iccdev.create-profiles` | `Testing/CreateAllProfiles.sh` |
 | `iccdev.c-validation-dlopen` | `.github/ci/regression/c-validation-dlopen.c` |
 | `iccdev.embedio-read8-bounds` | `.github/ci/regression/embedio-read8-bounds.cpp` |
@@ -123,10 +174,16 @@ before running the suite.
 | `iccdev.fileio-seek-tell` | `.github/ci/regression/fileio-seek-tell.cpp` |
 | `iccdev.iccconnect-config-parser` | `.github/ci/regression/iccconnect-config-parser.cpp` |
 | `iccdev.iccconnect-threaded-cmm` | `.github/ci/regression/iccconnect-threaded-cmm.cpp` |
+| `iccdev.owning-setter-self-alias-contract` | `.github/ci/regression/owning-setter-self-alias-contract.cpp`; ownership contract of five exported setters for issue #2630, the three `CIccMpeSpectral*` `copyData()` self-assignment cases for issue #2637, and the apply table `SetData()` releases for issue #2638 |
+| `iccdev.mpe-curveset-setcurve-contract` | `.github/ci/regression/mpe-curveset-setcurve-contract.cpp`; public API bounds and ownership contract for issue #2607 |
+| `iccdev.issue-2607-curveset-extra-xml` | `.github/ci/regression/issue-2607-curveset-too-many-curves.xml`; tool-level rejection control for an extra CurveSet child |
+| `iccdev.bench-apply-metrics` | `Build/Cmake/Testing/CMakeLists.txt`; asserts the deterministic one-profile, four-pixel metrics contract |
 | `iccdev.applytolink-invalid-decoded-intent` | `Build/Cmake/Testing/CMakeLists.txt` |
 | `iccdev.applytolink-v4-missing-device-descriptions` | `Build/Cmake/Testing/CMakeLists.txt` |
 | `iccdev.xform-abstorel-adjust` | `.github/ci/regression/xform-abstorel-adjust.cpp` |
+| `iccdev.pcs-adjust-placement` | `.github/ci/regression/pcs-adjust-placement.cpp` |
 | `iccdev.reflectance-observer-illum-range` | `.github/ci/regression/reflectance-observer-illum-range.cpp` |
+| `iccdev.spectral-absolute-flag` | `.github/ci/regression/spectral-absolute-flag.cpp` |
 | `iccdev.pcs-edge-metadata` | `.github/ci/regression/pcs-edge-metadata.cpp` |
 | `iccdev.parser-restore-calls` | `.github/ci/regression/parser-restore-calls.cpp` |
 | `iccdev.legacy-run-tests` | `Testing/RunTests.sh` |
@@ -158,6 +215,8 @@ before running the suite.
 | `iccdev.cam-degenerate-regressions` | `.github/scripts/iccdev-cam-degenerate-regression-tests.sh` |
 | `iccdev.calculator-regressions` | `.github/scripts/iccdev-calculator-regression-tests.sh` |
 | `iccdev.lut16-zero-curve-regressions` | `.github/scripts/iccdev-lut16-zero-curve-regression-tests.sh` |
+| `iccdev.applynamedcmm-cli-args` | `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh` |
+| `iccdev.applysearch-cli-args` | `.github/scripts/iccdev-applysearch-cli-args-regression.sh` |
 | `iccdev.namedcolor-apply-regressions` | `.github/scripts/iccdev-namedcolor-apply-regression-tests.sh` |
 | `iccdev.v5-namedcmm-regressions` | `.github/scripts/iccdev-v5-namedcmm-regression-tests.sh` |
 | `iccdev.namedcolor-overprint-regressions` | `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh` |
@@ -178,17 +237,32 @@ before running the suite.
 | `iccdev.iccviz-degenerate-detection` | `.github/ci/regression/iccviz-degenerate-detection.cpp` |
 | `iccdev.iccviz-pdf-axis-labels` | `Build/Cmake/Testing/RunIccVizPdfAxisTest.cmake` |
 
+`iccdev.issue-1781-applytolink-qa-matrix` reserves up to four CTest processor slots.
+Its grid-255 positive control processes 16,581,375 nodes under a bounded
+subprocess timeout, so the reservation prevents unrelated sanitizer tests from
+starving it without increasing that timeout.
+
 `iccdev.legacy-run-tests` requires `iccToJson` and `iccFromJson` under CTest.
 The JSON round-trip uses a temporary directory for generated `.json` and
 round-trip `.icc` files so a passing Unix run does not remove or modify tracked
 files in `Testing/`.
+
+`iccdev.applysearch-cli-args` derives a batch of more than 1,024 rows from the
+tracked RGB input and requires byte-identical output for the default path and
+`-threads 0`, `1`, `2`, `4`, and `8`. It also covers configuration mode,
+malformed thread counts, and the single-thread requirement for `-debugcalc`.
+Because those cases exercise up to eight internal threads, the aggregate
+reserves the runner's CTest budget, capped at four processor slots.
 
 `iccdev.tool-coverage` may add focused command-line regressions inside the
 existing script without changing the CTest suite count. When a bug is tied to an
 AFL-minimized crash or hang, embed the smallest stable reproducer in the script
 or generate it under `ICCDEV_TEST_OUTDIR`; do not require local AFL output
 directories or commit generated crash artifacts. Validate both the direct script
-path and the CTest wrapper when changing this suite. The JSON parser suite
+path and the CTest wrapper when changing this suite. The aggregate reserves up
+to four CTest processor slots because it launches more than 100 sanitizer-instrumented
+commands with bounded per-command timeouts; this lets the surrounding suite run
+in parallel without starving the aggregate's subprocesses. The JSON parser suite
 includes malformed curve gamma and out-of-range numeric narrowing coverage, and
 must reject invalid numeric fields before conversion without sanitizer findings.
 
@@ -210,8 +284,8 @@ integration test as a separate `slow` CTest label. The maintainer `check` target
 runs the full suite, including `slow`. Routine CI tool sweeps use the fast lane
 with `--label-exclude slow --label-exclude calculator`, and the `check-fast`
 target excludes `slow` and `known-red` with one label regular expression. Run
-full CTest or the hybrid gate
-explicitly when the slow and calculator suites are in scope:
+full CTest or the hybrid gate explicitly when the slow and calculator suites
+are in scope. The hybrid aggregate reserves up to four CTest processor slots:
 `ctest --test-dir build -R '^iccdev\.hybrid-pipeline$' --output-on-failure`.
 
 The normal `ci-pr-action` full lane additionally excludes the `pr-extended`
@@ -295,8 +369,11 @@ cause is cache parsing, so it reproduces anywhere and needs no build products.
 
 Windows MSVC AddressSanitizer uses comma-separated `ASAN_OPTIONS`
 (`detect_leaks=0,halt_on_error=1`) and does not support LeakSanitizer
-`detect_leaks=1`. Leak-only CTest regressions are therefore registered on
-LeakSanitizer-capable toolchains and skipped for MSVC builds.
+`detect_leaks=1`. Darwin AddressSanitizer, including AppleClang, also rejects
+`detect_leaks=1`. Leak-only CTest regressions are therefore registered only on
+LeakSanitizer-capable platforms; mixed correctness/leak regressions retain
+their correctness checks without forcing leak detection on MSVC or Apple
+builds.
 
 For issue #1948 `CIccIO` strict-aliasing writer divergence, use the manual
 registered `.github/workflows/ci-afl-issue-1677-repro.yml` workflow. The same
@@ -342,12 +419,22 @@ shipped. A fourth arm repeats MODULE mode with a target-less
 `RefIccMAXConfig.cmake` planted earlier on `CMAKE_PREFIX_PATH`, the shape a
 pre-2.3.2 install has. Each arm pins the library it resolved back to the staged
 prefix, so an iccDEV installed elsewhere on the machine cannot satisfy the test
-in place of this build tree. Unlike the Windows consumers above, this one is
-skipped -- with a logged reason -- on sanitizer builds rather than inheriting
-the parent settings: its consumers are separate CMake projects, and an
-uninstrumented executable cannot load an ASan-instrumented library. The
-MODULE-mode arms are likewise skipped on static-only builds, where
-`FindRefIccMAX.cmake` reports not-found by design.
+in place of this build tree. The direct MODULE arm sets
+`REFICCMAX_SKIP_CONFIG` so an unrelated system CONFIG package cannot bypass the
+manual-discovery path under test; the legacy-config arm leaves CONFIG enabled
+to verify its target-less-package fallback. Unlike the Windows consumers
+above, this one is skipped -- with a logged reason -- on sanitizer builds
+rather than inheriting the parent settings: its consumers are separate CMake
+projects, and an uninstrumented executable cannot load an ASan-instrumented
+library. The MODULE-mode arms are likewise skipped on static-only builds,
+where `FindRefIccMAX.cmake` reports not-found by design.
+
+When the parent uses vcpkg, the test forwards its toolchain, installed tree,
+and target triplet while disabling manifest mode for the nested consumers. This
+keeps dependency discovery in the already populated parent tree instead of
+falling back to vcpkg's unrelated global classic tree. The
+`build-test-binaries` target builds both shared and static library artifacts
+that the test stages, so the focused CTest can run without a prior full build.
 
 ## Fixtures and Logs
 
@@ -389,12 +476,12 @@ For repeatable agent-assisted work, use
    - Set labels and a timeout.
    - Add `FIXTURES_REQUIRED iccdev_profiles` when the test needs generated
      profiles.
-3. Update hard-coded coverage counts when generated profile counts change:
-   - Windows profile parse count in `Build/Cmake/Testing/CMakeLists.txt`.
-   - JSON profile parse count in `.github/workflows/ci-json-roundtrip.yml`.
-     Keep these in sync with `Testing/CreateAllProfiles.sh` and
-     `Testing/CreateAllProfiles.bat`.
-   - WASM expected ICC count in `Build/Cmake/wasm-package/regression.js`,
+3. Update `Testing/qa-profile-manifest.tsv` when generated profiles change.
+   The Windows profile setup and JSON round-trip workflow verify that every
+   manifest-declared generated profile exists after generation. Keep the
+   manifest in sync with `Testing/CreateAllProfiles.sh` and
+   `Testing/CreateAllProfiles.bat`.
+   Update the WASM expected ICC count in `Build/Cmake/wasm-package/regression.js`,
      `.github/workflows/ci-pr-wasm.yml`, `.github/workflows/ci-pr-action.yml`,
      and `.github/workflows/ci-latest-release.yml` when
      `Testing/CreateAllProfiles.sh` changes the generated-profile set.
@@ -414,11 +501,15 @@ script output and still leave a deterministic pass/fail condition.
 ## CI Coverage
 
 The `ci-json-python` orchestrator calls the reusable Unix and Windows build
-workflows. The Windows reusable workflow runs CTest discovery, asserts the
-7 registered Windows suites, executes CTest with JUnit output, and then runs
-the `check` target. The Unix reusable workflow runs the Linux CTest gate for
-full-test jobs and asserts the expected 25-suite discovery line before
-execution.
+workflows. The Windows reusable workflow serially builds its CTest helper
+binaries, runs CTest discovery, and executes CTest with JUnit output. The Unix
+reusable workflow runs the Linux CTest gate for full-test jobs and verifies its
+discovered suite set before execution. `ci-pr-win` uses a non-cancelling, Windows-specific
+concurrency group so a direct Windows dispatch cannot interrupt an active
+reusable Windows gate. `ci-pr-unix` supports direct `workflow_dispatch` with
+the same safe matrix defaults as its reusable invocation. `CI Comprehensive
+Build and Test` keeps both Windows gates enabled through the callable build
+matrix.
 
 Python packaging CI builds source and wheel artifacts, validates metadata with
 `twine check`, prints the configured cibuildwheel identifiers for Windows,

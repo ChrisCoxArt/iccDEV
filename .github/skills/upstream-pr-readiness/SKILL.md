@@ -31,12 +31,15 @@ Do not call `gh pr create`, `gh pr reopen`, or an equivalent API.
 
 ## Workflow
 
-1. Work in a clean clone or worktree.
+1. Work in a clean clone or worktree. For maintainer branch grooming, apply
+   `../../../docs/linear-stack-workflow.md` local Git defaults first.
 2. Fetch the target branch and current base.
 3. Rebase onto the current base before PR creation or review.
 4. Verify linear history and review the rewrite:
 
    ```bash
+   git config --get pull.rebase
+   git config --get merge.ff
    git diff --check origin/master..HEAD
    test -z "$(git rev-list --merges origin/master..HEAD)"
    git range-diff origin/master origin/BRANCH HEAD
@@ -55,16 +58,24 @@ Do not call `gh pr create`, `gh pr reopen`, or an equivalent API.
    ctest --test-dir /tmp/iccdev-pr-ready --output-on-failure
    ```
 
-7. Run task-specific Release, compiler, sanitizer, diagnostics, runtime-dispatch,
+7. Record a `base...HEAD` contract matrix for every changed cross-cutting
+   surface: producer, consumer, build/runtime behavior, platform or toolchain
+   boundary, CI trigger, dependency owner, and local evidence.
+8. Run task-specific Release, compiler, sanitizer, diagnostics, runtime-dispatch,
    fallback, malformed-input, and other negative tests.
-8. Remove generated artifacts and verify a clean worktree.
-9. Inspect all active and suppressed findings from any existing review.
-10. Produce the evidence record from
+9. Remove generated artifacts and verify a clean worktree.
+10. Inspect all active and suppressed findings from review threads and review
+    summaries.
+11. Produce the evidence record from
     `docs/governance/UPSTREAM_PR_READINESS.md`.
 
 ## Result
 
 Only `readiness: PASS` plus explicit authorization permits PR creation.
 
-If a re-review finds missed unchanged-code issues, change the result to FAIL
-and return to branch-only grooming.
+If a re-review finds any new blocker, including one in the repair, change the
+result to FAIL and return to branch-only grooming.
+
+## References
+
+- `../../../docs/linear-stack-workflow.md`

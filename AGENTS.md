@@ -13,11 +13,27 @@ shares one source of truth. Update rules here, not in the mirrors.
 
 - Check `git --no-pager status --short --branch` before edits.
 - Prefer focused changes with exact repros and regression coverage.
-- Keep documentation links Doxygen-safe: if a Markdown link points outside the Doxygen INPUT tree, use an explicit HTML anchor instead of a Markdown reference so generated docs stay warning-free.
+- Keep documentation links Doxygen-safe: if a Markdown link points outside the
+  Doxygen INPUT tree, use an explicit HTML anchor instead of a Markdown reference
+  so generated docs stay warning-free. Before handing off documentation changes,
+  run `doxygen .github/ci/doxygen/Doxyfile` and require an empty
+  `docs/generated/doxygen-warnings.log`; do not add generated Doxygen output to
+  the repository.
 - Use 2-space C++ indentation, K&R braces, `m_` members, and return-value errors.
 - Exit 1-127 is graceful failure. Exit 128+ is signal termination.
 - Use sanitizer builds for bug hunting; see `.github/instructions/build-system.instructions.md`.
 - Add the nearest regression test for behavior fixes.
+- For legacy packed intent decoding and named-color overprint behavior, keep
+  `iccApplyNamedCmm` and `iccApplySearch` coverage aligned with
+  `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`,
+  `.github/scripts/iccdev-applysearch-cli-args-regression.sh`, and
+  `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`.
+- Before the first automated review, record a `base...HEAD` contract matrix for
+  every changed cross-cutting surface: producer, consumer, build/runtime
+  behavior, platform or toolchain boundary, CI trigger, dependency owner, and
+  local evidence. A later update still requires the complete contract matrix,
+  not a delta-only review. Any newly found blocker returns the branch to
+  branch-only grooming before another review.
 - Every new or relocated C/C++ source or header must retain the complete ICC
   Software License block used by adjacent files; abbreviated, placeholder, or
   omitted license text is a blocking defect.
@@ -31,8 +47,12 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Need | File |
 |------|------|
 | Build, test, style, CI | `.github/copilot-instructions.md` |
+| Apple mobile static cores and smoke app | `docs/build.md` |
+| Manual iOS example app helpers | `examples/ios-apply-preview/README.md`, `examples/ios-benchapply/README.md`, `examples/ios-clut-editor/README.md`, `.github/skills/ios-manual-examples/SKILL.md` |
+| iOS CLUT editor POC | `examples/ios-clut-editor/README.md`, `.github/skills/ios-clut-editor/SKILL.md` |
 | AVX2 CLUT diagnostics and optimization handoff | `docs/avx2-clut-diagnostics.md` |
 | Pull request preparation and handoff | `docs/pre-pr-security-cycle.md` |
+| Maintainer local Git/devenv defaults | `docs/linear-stack-workflow.md` |
 | Pre-PR security skill | `.github/skills/pre-pr-security-cycle/SKILL.md` |
 | Pre-PR security prompt | `.github/prompts/pre-pr-security-cycle.prompt.md` |
 | Stacked PR and fast-lane workflow | `.github/skills/stacked-pr-fast-lane/SKILL.md` |
@@ -40,9 +60,12 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Code-review bug hunting | `.github/prompts/code-review-hunting.prompt.md` |
 | Regression bisect workflow | `.github/prompts/bisect-regression.prompt.md` |
 | Unified maintainer container | `docs/regression-container.md` |
+| Memcheck, Helgrind, DRD, Massif, and Callgrind | `docs/valgrind-analysis.md`, `.github/skills/valgrind-analysis/SKILL.md` |
 | Regression container prompt | `.github/prompts/regression-container-maintainer.prompt.md` |
 | Maintainer CTest selection and CI budget | `.github/skills/maintainer-ci-ctest/SKILL.md` |
 | New CLI tool onboarding | `.github/prompts/add-new-tool.prompt.md` |
+| Manual iOS examples | `.github/prompts/ios-manual-examples.prompt.md` |
+| iOS CLUT editor planning | `.github/prompts/ios-clut-editor.prompt.md` |
 | Contributor onboarding | `.github/prompts/contributor-onboarding.prompt.md` |
 | Apply-path throughput benchmark | `Tools/CmdLine/IccBenchApply/Readme.md` |
 | Security repro | `.github/prompts/reproduce-security-issue.prompt.md` |
@@ -53,17 +76,20 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Workflow hardening | `.github/instructions/workflow-governance.instructions.md` |
 | Maintainer label system | `docs/label-system.md` |
 | Label triage prompt | `.github/prompts/maintainer-label-triage.prompt.md` |
+| Label triage audit agent | `.github/agents/maintainer-label-triage.agent.md` |
 | Testing details | `.github/instructions/testing.instructions.md` |
 | Python bindings | `.github/instructions/python-bindings.instructions.md` |
 | MATLAB MEX bindings | `.github/instructions/matlab-mex.instructions.md` |
-| MATLAB build and QA | `docs/matlab-bindings.md` |
-| MATLAB binding tests | `.github/skills/matlab-bindings-test/SKILL.md` |
+| MATLAB MEX code review | `.github/instructions/matlab-code-review.instructions.md` |
+| MATLAB build, IccJSON conversion, and QA | `docs/matlab-bindings.md` |
+| MATLAB binding and IccJSON tests | `.github/skills/matlab-bindings-test/SKILL.md` |
 | MATLAB binding debug | `.github/prompts/debug-matlab-bindings.prompt.md` |
 | Python binding tests | `.github/skills/python-bindings-test/SKILL.md` |
 | WASM build tests | `.github/skills/wasm-build-test/SKILL.md` |
 | MCP subprocess debug | `.github/prompts/debug-mcp-subprocess.prompt.md` |
 | Python/Cython debug | `.github/prompts/debug-python-bindings.prompt.md` |
 | Documentation maintenance | `docs/documentation-maintenance.md` |
+| PCS adjustment placement (`CIccPcsXform` refactor) | `docs/pcs-adjustment-placement.md` |
 
 ## CFL Harness Scope
 
@@ -90,7 +116,7 @@ under `.github/ci/test-data` is a hard error rather than a silent prune. Raise
 inputs -- they are independent gates. Validate with
 
 ```bash
-cfl/build.sh --targets profilevisualize,writerserialize --seconds 30
+.github/ci/cfl/build.sh --targets profilevisualize,writerserialize --seconds 30
 ```
 
 ## WASM Scope

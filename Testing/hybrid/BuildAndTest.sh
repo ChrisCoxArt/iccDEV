@@ -10,6 +10,12 @@
 #################################################################################
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SILENCE_FILE="$SCRIPT_DIR/../silence.txt"
+if [ -r "$SILENCE_FILE" ]; then
+  export UBSAN_OPTIONS="${UBSAN_OPTIONS:+${UBSAN_OPTIONS}:}suppressions=$SILENCE_FILE"
+fi
+
 mkdir -p ICC Results config
 
 echo "========== Phase 1: Build ICC profiles from XML sources =========="
@@ -53,6 +59,17 @@ iccDumpProfile Results/LCDDisplayCat8Obs.icc
 echo "========== Phase 5: Spectral color management =========="
 iccApplyNamedCmm -exportcfganddata config/cmykGraysRef.json Data/cmykGrays.txt 3 1 ICC/CMYK_Hybrid_Profile.icc 10003 ICC/Spec380_10_730-D50_2deg.icc 3 > Results/cmykGraysRef.txt
 iccApplySearch -exportcfganddata config/cmykGraysEst.json Results/cmykGraysRef.txt 0 1 ICC/Spec380_10_730-D50_2deg.icc 3 ICC/Lab_float-D50_2deg.icc 3 ICC/CMYK_Hybrid_Profile.icc 10003 -INIT 3 ICC/Lab_float-D50_2deg.icc 1 ICC/Lab_float-D93_2deg-MAT.icc 1 ICC/Lab_float-F11_2deg-MAT.icc 1 ICC/Lab_float-IllumA_2deg-MAT.icc 1 > Results/cmykGraysEst.txt
+
+# Spectral image reproduction -- the image-based form of the cmykGrays search
+# above.  MS_smCowsIcon.tif is an 8-channel multispectral image whose only
+# colour description is the mspc sub-profile embedded in it, so the chain's
+# first stage has an empty iccFile with useV5SubProfile: there is no external
+# profile to name.  connect.useSearch is -cfg only, so this step is driven by a
+# tracked config the way the ICS packages do it, rather than -exportcfg.
+# The icon is 92x64 to keep the sanitizer legs quick; SpectralImageReproduction
+# runs the identical chain over the full 600x420 cows on demand.
+iccApplyProfiles -cfg config/msCowsIconToCmyk.json
+iccTiffDump   Results/MS_smCowsIconCmyk.tif
 
 echo "========== Phase 6: T-shirt overprint simulation =========="
 iccApplyProfiles -exportcfg config/TShirtDesignPrevUW-W.json Data/TShirtDesignCMYKW.tif Results/TShirtDesignPrevUW-W.tif 1 1 0 0 0 -embedded 10001 ../sRGB_v4_ICC_preference.icc 1

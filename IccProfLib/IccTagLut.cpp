@@ -709,6 +709,27 @@ bool CIccTagCurve::IsIdentity()
 *  
 *****************************************************************************
 */
+/**
+****************************************************************************
+* Name: CIccTagCurve::Begin
+*
+* Purpose: Precomputes what Apply() would otherwise rederive per call.
+*
+*  m_nMaxIndex is the table's top index. m_fGamma decodes the single-entry form,
+*  where m_Curve[0] is a u8Fixed8Number holding the gamma: Apply() used to redo
+*  that decode on every call before handing the result to pow().
+*****************************************************************************
+*/
+void CIccTagCurve::Begin()
+{
+  m_nMaxIndex = m_nSize ? (icUInt16Number)(m_nSize - 1) : 0;
+
+  //Convert 0.0 to 1.0 float to 16bit and then convert from u8Fixed8Number
+  m_fGamma = (m_nSize == 1 && m_Curve)
+               ? (icFloatNumber)(m_Curve[0] * 65535.0 / 256.0)
+               : (icFloatNumber)1.0;
+}
+
 icFloatNumber CIccTagCurve::Apply(icFloatNumber v) const
 {
   if (std::isnan(v))
@@ -718,16 +739,19 @@ icFloatNumber CIccTagCurve::Apply(icFloatNumber v) const
   else if(v<0.0) v = 0.0;
   else if(v>1.0) v = 1.0;
 
-  icUInt32Number nIndex = static_cast<icUInt32Number>(v * m_nMaxIndex);
-
+  // The two degenerate table sizes are tested before nIndex is computed. They
+  // were tested after, so every call through a gamma curve or an empty curve
+  // paid a multiply and a cast whose result it then discarded.
   if (!m_nSize) {
     return v;
   }
   if (m_nSize==1) {
-    //Convert 0.0 to 1.0 float to 16bit and then convert from u8Fixed8Number
-    icFloatNumber dGamma = (icFloatNumber)(m_Curve[0] * 65535.0 / 256.0);
-    return (icFloatNumber)pow(v, dGamma);
+    // Gamma decoded once in Begin(); this rebuilt it from m_Curve[0] per call.
+    return (icFloatNumber)pow(v, m_fGamma);
   }
+
+  icUInt32Number nIndex = static_cast<icUInt32Number>(v * m_nMaxIndex);
+
   if (nIndex == m_nMaxIndex) {
     return m_Curve[nIndex];
   }
@@ -937,12 +961,21 @@ bool CIccTagParametricCurve::Read(icUInt32Number size, CIccIO *pIO)
     if (nHdrSize + nNumParam*sizeof(icS15Fixed16Number) > size)
       return false;
 
+    ICC_JSON_CURVE_TRACE("stage=reader.begin function_type=%u required=%u params=%p",
+                         (unsigned)m_nFunctionType, (unsigned)nNumParam,
+                         (void*)m_dParam);
     for (i=0; i<nNumParam; i++) {
       icS15Fixed16Number num;
       if (!pIO->Read32(&num, 1))
         return false;
       m_dParam[i]=icFtoD(num);
+      ICC_JSON_CURVE_TRACE("stage=reader.encoded index=%u count=%u encoded=0x%08x",
+                           (unsigned)i, (unsigned)nNumParam,
+                           (unsigned)num);
+      ICC_JSON_CURVE_TRACE_FLOAT("reader.decoded", i, nNumParam, &m_dParam[i]);
     }
+    ICC_JSON_CURVE_TRACE("stage=reader.end function_type=%u read=%u status=success",
+                         (unsigned)m_nFunctionType, (unsigned)nNumParam);
   }
 
   return true;
@@ -981,11 +1014,20 @@ bool CIccTagParametricCurve::Write(CIccIO *pIO)
   if (m_nNumParam) {
     int i;
     const icUInt16Number nNumParam = m_nNumParam;
+    ICC_JSON_CURVE_TRACE("stage=writer.begin function_type=%u required=%u params=%p",
+                         (unsigned)m_nFunctionType, (unsigned)nNumParam,
+                         (void*)m_dParam);
     for (i=0; i<nNumParam; i++) {
+      ICC_JSON_CURVE_TRACE_FLOAT("writer.read", i, nNumParam, &m_dParam[i]);
       icS15Fixed16Number num = icDtoF(m_dParam[i]);
+      ICC_JSON_CURVE_TRACE("stage=writer.encoded index=%u count=%u encoded=0x%08x",
+                           (unsigned)i, (unsigned)nNumParam,
+                           (unsigned)num);
       if (!pIO->Write32(&num, 1))
         return false;
     }
+    ICC_JSON_CURVE_TRACE("stage=writer.end function_type=%u written=%u status=success",
+                         (unsigned)m_nFunctionType, (unsigned)nNumParam);
   }
 
   if (!pIO->Align32())
@@ -1154,6 +1196,10 @@ bool CIccTagParametricCurve::SetFunctionType(icUInt16Number nFunctionType)
   else
     m_dParam = NULL;
 
+  ICC_JSON_CURVE_TRACE("stage=curve.allocate function_type=%u required=%u params=%p initialization=none",
+                       (unsigned)m_nFunctionType, (unsigned)m_nNumParam,
+                       (void*)m_dParam);
+
   return true;
 }
 
@@ -1187,6 +1233,44 @@ bool CIccTagParametricCurve::IsIdentity()
 
 /**
 ****************************************************************************
+* Name: icParametricPow
+*
+* Purpose: pow() for a parametric curve segment, holding a negative base at
+*  zero.
+*
+*  A negative base under a non-integer exponent makes pow() return NaN, which
+*  the matrix after a TRC carries into the PCS.  Type 0 tests nothing, and the
+*  thresholds of types 1 to 4 test X rather than the base, so a negative a or a
+*  d below the base's zero crossing still reaches pow() with one.  The base is
+*  given the value at zero instead, so the segment takes the value it has where
+*  its base is zero.  For a positive gamma that is 0; for a gamma of zero or
+*  below it is 1 or +inf, which is what an input of exactly zero already gives
+*  such a curve.  An integer exponent was always finite for a negative base
+*  and is left alone: a gamma of 1.0 is how extended-range linear data passes
+*  a TRC.
+*
+*  With a negative a, types 1 and 2 test the side of -b/a where the base is
+*  negative, so this makes such a curve 0 (or c) everywhere.  That is the
+*  formula's own inversion, not something this function decides.
+*
+* Args:
+*  base = the segment's base, X or aX + b
+*  gamma = the curve's exponent g
+*
+* Return: base raised to gamma, a negative base under a fractional exponent
+*  counting as zero.
+*****************************************************************************
+*/
+static double icParametricPow(double base, double gamma)
+{
+  if (base < 0.0 && gamma != floor(gamma))
+    base = 0.0;
+
+  return pow(base, gamma);
+}
+
+/**
+****************************************************************************
 * Name: CIccTagParametricCurve::Apply
 * 
 * Purpose: Applies the curve to the value passed.
@@ -1202,9 +1286,12 @@ icFloatNumber CIccTagParametricCurve::Apply(icFloatNumber X) const
 {
   double a, b;
 
+  ICC_TAINT_TRACE_BUFFER("curve.apply", "source-read", m_dParam,
+                         m_nNumParam, sizeof(*m_dParam));
+
   switch(m_nFunctionType) {
     case 0x0000:
-      return (icFloatNumber)pow(X, m_dParam[0]);
+      return (icFloatNumber)icParametricPow(X, m_dParam[0]);
 
     case 0x0001:
       a=m_dParam[1];
@@ -1213,7 +1300,7 @@ icFloatNumber CIccTagParametricCurve::Apply(icFloatNumber X) const
       if (a == 0.0)
         return 0;
       if (X >= -b/a) {
-        return (icFloatNumber)pow((double)a*X + b, (double)m_dParam[0]);
+        return (icFloatNumber)icParametricPow((double)a*X + b, (double)m_dParam[0]);
       }
       else {
         return 0;
@@ -1226,7 +1313,7 @@ icFloatNumber CIccTagParametricCurve::Apply(icFloatNumber X) const
       if (a == 0.0)
         return (icFloatNumber)m_dParam[3];
       if (X >= -b/a) {
-        return (icFloatNumber)pow((double)a*X + b, (double)m_dParam[0]) + m_dParam[3];
+        return (icFloatNumber)icParametricPow((double)a*X + b, (double)m_dParam[0]) + m_dParam[3];
       }
       else {
         return m_dParam[3];
@@ -1234,7 +1321,7 @@ icFloatNumber CIccTagParametricCurve::Apply(icFloatNumber X) const
 
     case 0x0003:
       if (X >= m_dParam[4]) {
-        return (icFloatNumber)pow((double)m_dParam[1]*X + m_dParam[2], (double)m_dParam[0]);
+        return (icFloatNumber)icParametricPow((double)m_dParam[1]*X + m_dParam[2], (double)m_dParam[0]);
       }
       else {
         return m_dParam[3]*X;
@@ -1242,7 +1329,7 @@ icFloatNumber CIccTagParametricCurve::Apply(icFloatNumber X) const
 
     case 0x0004:
       if (X >= m_dParam[4]) {
-        return (icFloatNumber)pow((double)m_dParam[1]*X + m_dParam[2], (double)m_dParam[0]) + m_dParam[5];
+        return (icFloatNumber)icParametricPow((double)m_dParam[1]*X + m_dParam[2], (double)m_dParam[0]) + m_dParam[5];
       }
       else {
         return m_dParam[3]*X + m_dParam[6];
@@ -1504,6 +1591,12 @@ bool CIccTagSegmentedCurve::Write(CIccIO *pIO)
 */
 void CIccTagSegmentedCurve::SetCurve(CIccSegmentedCurve *pCurve)
 {
+  // Reinstalling the curve this tag already owns is a no-op.  Deleting it
+  // first would leave m_pCurve dangling and delete it a second time in the
+  // destructor, because GetCurve() hands the member out to any caller.
+  if (m_pCurve == pCurve)
+    return;
+
   delete m_pCurve;
   m_pCurve = pCurve;
 }
@@ -1925,6 +2018,7 @@ CIccCLUT::CIccCLUT(icUInt8Number nInputChannels, icUInt16Number nOutputChannels,
   memset(&m_nReserved2, 0 , sizeof(m_nReserved2));
 
   m_UnitClipFunc = ClutUnitClip;
+  m_nMaxDataOffset2d = 0;   // set by Begin() for the 2-input case
 }
 
 
@@ -1960,6 +2054,7 @@ CIccCLUT::CIccCLUT(const CIccCLUT &ICLUT)
   memcpy(m_pData, ICLUT.m_pData, num*sizeof(icFloatNumber));
 
   m_UnitClipFunc = ICLUT.m_UnitClipFunc;
+  m_nMaxDataOffset2d = ICLUT.m_nMaxDataOffset2d;
 }
 
 
@@ -1998,6 +2093,7 @@ CIccCLUT &CIccCLUT::operator=(const CIccCLUT &CLUTTag)
   memcpy(m_pData, CLUTTag.m_pData, num*sizeof(icFloatNumber));
 
   m_UnitClipFunc = CLUTTag.m_UnitClipFunc;
+  m_nMaxDataOffset2d = CLUTTag.m_nMaxDataOffset2d;
 
   return *this;
 }
@@ -2528,14 +2624,28 @@ void CIccCLUT::DumpLut(IDescribeSink &sink, const icChar *szName,
  *
  *****************************************************************************
  */
-void CIccCLUT::Begin()
+bool CIccCLUT::Begin()
 {
   int i;
-  // CWE-400/834: m_nInput indexes the fixed 16-entry m_GridPoints/m_MaxGridPoint/
-  // m_nPower arrays and drives m_nNodes = (1<<m_nInput). Init() already rejects
-  // m_nInput>16 on load; assert the bound locally so it is explicit at point of use.
-  if (m_nInput > 16)
-    return;
+
+  // Init() is what establishes every quantity below: the grid, the data buffer,
+  // and the input count itself. It refuses an m_nInput outside 1..16, a grid
+  // granularity below 2, and any grid whose size overflows 32 bits, and it
+  // leaves m_pData NULL when it does. That NULL is the one reliable signal that
+  // this object was never made usable, and it is the state a CLUT built outside
+  // the profile reader can be left in -- icCLutFromXml() and icCLUTFromJson()
+  // construct a CIccCLUT directly from a parsed channel count, and the public
+  // constructor plus a skipped or failed Init() reaches it too. Refuse here so
+  // an uninitialized CLUT cannot be handed to the interpolators.
+  if (!m_pData)
+    return false;
+
+  // m_nInput indexes the fixed 16-entry m_GridPoints/m_MaxGridPoint/m_nPower
+  // arrays and drives m_nNodes = (1<<m_nInput) (CWE-400/834). Init() rejects
+  // m_nInput>16, so a CLUT holding data cannot be over the bound; keep the
+  // check so the limit is explicit at the point the arrays are indexed.
+  if (m_nInput < 1 || m_nInput > 16)
+    return false;
   for (i=0; i<m_nInput; i++) {
     m_MaxGridPoint[i] = m_GridPoints[i] - 1;
   }
@@ -2555,7 +2665,7 @@ void CIccCLUT::Begin()
   // bound on the field so the offset-table walks below have an explicit upper limit
   // a corrupted CLUT cannot exceed. Value-preserving: a valid m_nNodes is <= 65536.
   if (m_nNodes > 65536)
-    return;
+    return false;
 
   if (m_nInput==1) {
     m_nOffset[0] = n000 = 0;
@@ -2566,6 +2676,10 @@ void CIccCLUT::Begin()
     m_nOffset[1] = n001 = m_DimSize[0];
     m_nOffset[2] = n010 = m_DimSize[1];
     m_nOffset[3] = n011 = n001 + n010;
+
+    // Ceiling for Interp2d's offset clamp; see there. Depends only on values
+    // fixed by this point, so Interp2d no longer recomputes it per pixel.
+    m_nMaxDataOffset2d = (int)NumPoints()*(int)m_nOutput - ((int)m_nOutput + (int)n011);
   }
   else if (m_nInput==3) {
     m_nOffset[0] = n000 = 0;
@@ -2719,6 +2833,8 @@ void CIccCLUT::Begin()
       }
     }
   }
+
+  return true;
 }
 
 
@@ -2854,11 +2970,32 @@ void CIccCLUT::Interp2d(icFloatNumber *destPixel, const icFloatNumber *srcPixel)
  */
 void CIccCLUT::Interp3dTetra(icFloatNumber *destPixel, const icFloatNumber *srcPixel) const
 {
-  // CWE-400/834: m_nOutput controls the destPixel write loop below. Valid LUT
-  // profiles cap output channels at <=16 (the read path rejects larger); guard
-  // locally so the bound is explicit even if the field is corrupted in memory.
-  if (m_nOutput > 16)
-    return;
+  // NOTE FOR ANYONE ADDING A BOUNDS CHECK HERE -- please don't; this one was a
+  // defect.
+  //
+  // "if (m_nOutput > 16) return;" used to stand here, described as bounding the
+  // destPixel write loop below on the grounds that "valid LUT profiles cap
+  // output channels at <=16". They do not, and this was the only interpolator
+  // that believed it. Interp1d, Interp2d, Interp3d, Interp4d, Interp5d and
+  // Interp6d all write m_nOutput values with no such bound, and m_nOutput is an
+  // icUInt16Number precisely because MPE CLUT elements need more than 16 --
+  // CIccMpeCLUT::Read bounds m_nInputChannels at 16 but deliberately leaves
+  // m_nOutputChannels unbounded, and a spectral CLUT's output count is its
+  // spectral step count.
+  //
+  // So for a perfectly legal 3-input CLUT with 17 or more outputs, this returned
+  // without writing anything: destPixel was left holding whatever the caller had
+  // in it, and only when the tetrahedral path was selected. Interp3d, reached
+  // from the same element under icElemInterpLinear, produced correct values for
+  // the identical CLUT. Measured before removal, at 3 inputs and 0.5 in each
+  // channel: nOut=16 gave 0.250 from both routines; nOut=17 and nOut=20 gave
+  // 0.250 from Interp3d and an untouched destination from Interp3dTetra.
+  //
+  // destPixel is sized by the caller from the same channel count this loop
+  // walks -- m_nBufChannels in the MPE pipeline, GetNumDstSamples() for a LUT
+  // xform, both pinned to the tag's output count at Begin() -- so the write is
+  // in bounds for any m_nOutput the object can legitimately carry, exactly as it
+  // is in the six sibling routines.
   icUInt8Number mx = m_MaxGridPoint[0];
   icUInt8Number my = m_MaxGridPoint[1];
   icUInt8Number mz = m_MaxGridPoint[2];
@@ -3470,18 +3607,37 @@ void CIccCLUT::InterpND(icFloatNumber *destPixel, const icFloatNumber *srcPixel,
   icFloatNumber* s = pApply->m_s;
   icUInt32Number* ig = pApply->m_ig;
 
-  // CWE-400/834: m_nInput drives the grid loop below and m_nNodes = (1<<m_nInput)
-  // used for the df[] loop. Input channels are capped at <=16 by Init() on load;
-  // guard locally so both bounds are explicit at point of use.
-  if (m_nInput > 16)
-    return;
-
-  // CWE-400/CWE-834: m_nNodes == (1<<m_nInput) and indexes the fixed df[]/m_nOffset
-  // arrays; assert the derived upper bound (m_nInput<=16 => m_nNodes<=65536) on the
-  // field itself so the node walks below have an explicit limit.
-  const icUInt32Number nMaxNodes = 65536;
-  if (m_nNodes > nMaxNodes)
-    return;
+  // NOTE FOR ANYONE ADDING A BOUNDS CHECK HERE -- please don't; put it in
+  // Begin().
+  //
+  // Two per-pixel guards used to stand at this point: "if (m_nInput > 16)
+  // return;" and "if (m_nNodes > 65536) return;". Both are gone deliberately.
+  //
+  // m_nInput indexes the fixed 16-entry m_GridPoints/m_MaxGridPoint/m_nPower
+  // arrays and drives m_nNodes = (1<<m_nInput), which indexes df[] and
+  // m_nOffset. Those bounds still matter -- they are just no longer this
+  // function's to assert. Begin() establishes both: it refuses an m_nInput
+  // outside 1..16 and refuses a CLUT whose Init() never allocated m_pData, it
+  // returns bool rather than leaving the object half-configured, and all nine of
+  // its callers act on the result up through CIccCmm::Begin(), which aborts the
+  // chain on the first failure. So Apply() cannot be reached with either bound
+  // violated, and re-testing them per pixel could only re-confirm what Begin()
+  // proved.
+  //
+  // The history is worth knowing, because these lines have twice been reasoned
+  // about incorrectly. They were called "duplicated from Begin()" and, later,
+  // "the only guard that works" -- both by tracing the call chain rather than
+  // probing it, and neither was true at the time. Before Begin() could refuse,
+  // m_nInput > 16 was already unreachable here: the element readers turned a
+  // failed Init() into a failed Read() through their GetData(0) NULL checks,
+  // because Init() leaves m_pData NULL when it refuses and GetData(0) is
+  // &m_pData[0]. The guards were unreachable, not load-bearing.
+  //
+  // Note also what they never did: nothing here protected the failure that
+  // actually crashes an un-Begin()'d CLUT, which is a NULL m_nOffset and an
+  // uninitialized m_MaxGridPoint, regardless of the channel count.
+  // Begin()-before-Apply() is the precondition that matters, and it is now a
+  // checked one.
 
   for (i=0; i<m_nInput; i++) {
     // See icClutGridClamp: scales into grid units and clamps, replacing the
@@ -3785,11 +3941,26 @@ void CIccMBB::Cleanup()
 {
   int i;
 
-  // CWE-400/834: the curve-pointer arrays are allocated to m_nInput/m_nOutput at
-  // load (both capped at <=16 by the lut tag read path). Clamp the delete loops to
-  // the array bound so a corrupted channel count can never walk past the allocation.
-  int nIn  = (m_nInput  > 16) ? 16 : m_nInput;
-  int nOut = (m_nOutput > 16) ? 16 : m_nOutput;
+  // These loops must mirror NewCurvesA/B/M exactly, because those are what
+  // allocated the arrays: A takes !IsInputB() ? m_nInput : m_nOutput, M and B
+  // take IsInputMatrix() ? m_nInput : m_nOutput, and IsInputB() is defined as
+  // IsInputMatrix(), so each branch below frees the same count its allocator
+  // used.
+  //
+  // They used to be clamped to 16 "so a corrupted channel count can never walk
+  // past the allocation". That reasoning is inverted: the arrays are sized by the
+  // very counts being clamped, so a count above 16 does not overrun the
+  // allocation -- clamping *leaks* the entries from 16 upward, silently, in a
+  // destructor. And a count below the allocation cannot happen, because nothing
+  // mutates m_nInput/m_nOutput between NewCurves* and Cleanup() except Init(),
+  // which calls Cleanup() first.
+  //
+  // The bound belongs where the count is established, and now is: Init() refuses
+  // anything outside 1..16, matching CIccCLUT::Init() and the guarantee
+  // CIccCLUT::Begin() relies on. So these loops trust their counts, exactly as
+  // the interpolators trust what Begin() established.
+  int nIn  = m_nInput;
+  int nOut = m_nOutput;
 
   if (IsInputMatrix()) {
     if (m_CurvesB) {
@@ -3862,11 +4033,32 @@ void CIccMBB::Cleanup()
  *  nOutputChannels = number of output channels
  *****************************************************************************
  */
-void CIccMBB::Init(icUInt8Number nInputChannels, icUInt8Number nOutputChannels)
+bool CIccMBB::Init(icUInt8Number nInputChannels, icUInt8Number nOutputChannels)
 {
+  // Establish the bound here, where the counts are set, rather than re-testing it
+  // in the loops that consume them. Everything downstream sizes itself from these
+  // two numbers -- NewCurvesA/B/M allocate arrays of them, Cleanup() frees the
+  // same counts, and SetCLUT() requires a CIccCLUT whose own dimensionality
+  // matches m_nInput, which CIccCLUT::Init() independently caps at 16. Sixteen is
+  // therefore the bound the whole object already depends on; it just was not
+  // stated anywhere, so Cleanup() clamped defensively and leaked instead.
+  //
+  // Nothing loaded from a profile is newly refused: the mAB, lut8 and lut16 read
+  // paths all reject counts above 15 before they get here, and both the XML and
+  // JSON MBB parsers bound theirs at 15 as well. What this catches is a direct
+  // caller of the public API -- the same door CIccCLUT::Init() and
+  // CIccCLUT::Begin() are guarding.
+  //
+  // Checked before Cleanup(), so a refused call leaves the object exactly as it
+  // was rather than half-torn-down.
+  if (nInputChannels < 1 || nInputChannels > 16 ||
+      nOutputChannels < 1 || nOutputChannels > 16)
+    return false;
+
   Cleanup();
   m_nInput = nInputChannels;
   m_nOutput = nOutputChannels;
+  return true;
 }
 
 /**
@@ -4365,7 +4557,8 @@ CIccMatrix* CIccMBB::NewMatrix()
  * Args:
  *  pGridPoints = number of grid points in the CLUT
  *
- * Return: Pointer to the CIccCLUT object
+ * Return: Pointer to the CIccCLUT object, or NULL if the CLUT could not be
+ *  initialized for this object's channel counts and the requested grid.
  *****************************************************************************
  */
 CIccCLUT* CIccMBB::NewCLUT(icUInt8Number *pGridPoints, icUInt8Number nPrecision/*=2*/)
@@ -4375,7 +4568,19 @@ CIccCLUT* CIccMBB::NewCLUT(icUInt8Number *pGridPoints, icUInt8Number nPrecision/
 
   m_CLUT = new CIccCLUT(m_nInput, m_nOutput, nPrecision);
 
-  m_CLUT->Init(pGridPoints);
+  // Init() refuses an input count outside 1..16, a grid granularity below 2, and
+  // any grid whose node count overflows 32 bits. Its result was dropped here and
+  // the CLUT handed back regardless, so callers received an object with
+  // m_pData NULL that nothing distinguished from a working one -- GetData(0)
+  // returned NULL and was written through (#1781). iccApplyToLink works around
+  // this by constructing the CLUT itself and calling SetCLUT(); it should not
+  // have to. Report the failure the way the return type always implied, and drop
+  // the CLUT rather than leaving the tag owning an unusable one.
+  if (!m_CLUT->Init(pGridPoints)) {
+    delete m_CLUT;
+    m_CLUT = NULL;
+    return NULL;
+  }
 
   return m_CLUT;
 }
@@ -4396,6 +4601,17 @@ CIccCLUT* CIccMBB::NewCLUT(icUInt8Number *pGridPoints, icUInt8Number nPrecision/
 */
 CIccCLUT *CIccMBB::SetCLUT(CIccCLUT *clut)
 {
+  // Reinstalling the table this tag already owns is a no-op.  The dimension
+  // check below cannot catch it -- a table always matches its own tag -- so
+  // without this the delete frees the object being stored back.  NewCLUT()
+  // returns the INSTALLED table when the tag already has one, which makes
+  // SetCLUT(NewCLUT(grid)) a use-after-free with no self-alias visible at the
+  // call site; GetCLUT() is public as well.  This also answers the NULL that
+  // NewCLUT() returns when Init() refuses, which would otherwise be
+  // dereferenced on the next line.
+  if (m_CLUT == clut)
+    return clut;
+
   if (clut->GetInputDim() != m_nInput || clut->GetOutputChannels() != m_nOutput) {
     delete clut;
     return NULL;
@@ -4415,7 +4631,8 @@ CIccCLUT *CIccMBB::SetCLUT(CIccCLUT *clut)
  * Args:
  *  nGridPoints = number of grid points in the CLUT
  *
- * Return: Pointer to the CIccCLUT object
+ * Return: Pointer to the CIccCLUT object, or NULL if the CLUT could not be
+ *  initialized for this object's channel counts and the requested grid.
  *****************************************************************************
  */
 CIccCLUT* CIccMBB::NewCLUT(icUInt8Number nGridPoints, icUInt8Number nPrecision/*=2*/)
@@ -4425,7 +4642,13 @@ CIccCLUT* CIccMBB::NewCLUT(icUInt8Number nGridPoints, icUInt8Number nPrecision/*
 
   m_CLUT = new CIccCLUT(m_nInput, m_nOutput, nPrecision);
 
-  m_CLUT->Init(nGridPoints);
+  // See the pGridPoints overload above: Init()'s refusal was dropped and the
+  // uninitialized CLUT returned as though it were usable.
+  if (!m_CLUT->Init(nGridPoints)) {
+    delete m_CLUT;
+    m_CLUT = NULL;
+    return NULL;
+  }
 
   return m_CLUT;
 }

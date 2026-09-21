@@ -40,6 +40,7 @@ cdef extern from "icProfileHeader.h":
         icSigLuvData        = 0x4C757620
         icSigYCbCrData      = 0x59436272
         icSigYxyData        = 0x59787920
+        icSigLmsData        = 0x4C4D5320
         icSigRgbData        = 0x52474220
         icSigGrayData       = 0x47524159
         icSigHsvData        = 0x48535620
@@ -183,6 +184,8 @@ cdef extern from "IccCmm.h":
         icCmmStatTooManySamples     = 16
         icCmmStatBadMCSLink         = 17
         icCmmStatUnsupported        = 18
+        icCmmStatUnsupportedProfileClass = 19
+        icCmmStatCantAdjustPcs      = 20
 
     # Interpolation types
     ctypedef enum icXformInterp:

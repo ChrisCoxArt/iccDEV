@@ -87,6 +87,7 @@ Copyright:  (c) see Software License
 #define _ICC_SIGNATURE_UTILS_H
 
 #include "IccDefs.h"
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -103,6 +104,170 @@ Copyright:  (c) see Software License
 
 #ifndef icSigSpectralPcsData
 #define icSigSpectralPcsData ((icColorSpaceSignature)0x73706320)  // 'spc '
+#endif
+
+// -----------------------------------------------------------------------------
+// TAINTED READ/WRITE TRACEPOINTS
+//
+// Define ICC_TAINT_TRACE_ENABLED in a diagnostic build, then set
+// ICC_TAINT_TRACE=1 at runtime. MemorySanitizer builds and executions under
+// Valgrind report whether a source or destination contains poisoned bytes
+// without first reading those bytes. Other builds report state=unknown; C++
+// has no portable initialized-memory query, and reading a suspected value just
+// to log it would reproduce the undefined behavior being investigated.
+// ICC_JSON_CURVE_TRACE remains a runtime alias for the original focused repro.
+// -----------------------------------------------------------------------------
+
+#if defined(ICC_TAINT_TRACE_ENABLED) || defined(ICC_JSON_CURVE_TRACE_ENABLED)
+#include <cstdlib>
+#include <cstring>
+#if defined(__has_feature)
+  #if __has_feature(memory_sanitizer)
+    #include <sanitizer/msan_interface.h>
+    #define ICC_TAINT_TRACE_HAS_MSAN 1
+  #endif
+#endif
+#if !defined(ICC_TAINT_TRACE_HAS_MSAN) && defined(__has_include)
+  #if __has_include(<valgrind/memcheck.h>)
+    #include <valgrind/memcheck.h>
+    #define ICC_TAINT_TRACE_HAS_VALGRIND 1
+  #endif
+#endif
+
+struct IccTaintMemoryResult {
+  const char *state;
+  intptr_t offset;
+};
+
+inline bool IccTaintTraceEnabled()
+{
+  const char *value = std::getenv("ICC_TAINT_TRACE");
+  if (value && value[0] && std::strcmp(value, "0"))
+    return true;
+
+  value = std::getenv("ICC_JSON_CURVE_TRACE");
+  return value && value[0] && std::strcmp(value, "0");
+}
+
+inline IccTaintMemoryResult IccTaintMemoryState(const void *data, size_t size)
+{
+  if (!data && size)
+    return {"unaddressable", 0};
+
+#ifdef ICC_TAINT_TRACE_HAS_MSAN
+  const intptr_t offset = data && size ? __msan_test_shadow(data, size) : -1;
+  return {offset < 0 ? "initialized" : "poisoned", offset};
+#elif defined(ICC_TAINT_TRACE_HAS_VALGRIND)
+  if (RUNNING_ON_VALGRIND && data && size) {
+    const uintptr_t address = (uintptr_t)data;
+    const uintptr_t badAddress =
+      (uintptr_t)VALGRIND_CHECK_MEM_IS_ADDRESSABLE(data, size);
+    if (badAddress)
+      return {"unaddressable", (intptr_t)(badAddress - address)};
+
+    const uintptr_t poisonedAddress =
+      (uintptr_t)VALGRIND_CHECK_MEM_IS_DEFINED(data, size);
+    if (poisonedAddress)
+      return {"poisoned", (intptr_t)(poisonedAddress - address)};
+
+    return {"initialized", -1};
+  }
+  return {"unknown", -2};
+#else
+  (void)data;
+  (void)size;
+  return {"unknown", -2};
+#endif
+}
+
+#define ICC_TAINT_TRACE(format, ...) \
+  do { \
+    if (IccTaintTraceEnabled()) \
+      ICC_LOG_INFO("TAINT_TRACE " format, __VA_ARGS__); \
+  } while(0)
+
+#define ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, boundary, data, size) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const void *iccTaintData = (data); \
+      const size_t iccTaintSize = (size); \
+      const IccTaintMemoryResult iccTaintResult = \
+        IccTaintMemoryState(iccTaintData, iccTaintSize); \
+      if (iccTaintResult.offset >= 0) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s boundary=%s data=%p size=%zu state=%s first_bad=%td", \
+                     stage, access, boundary, iccTaintData, iccTaintSize, \
+                     iccTaintResult.state, (ptrdiff_t)iccTaintResult.offset); \
+      else \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s boundary=%s data=%p size=%zu state=%s", \
+                     stage, access, boundary, iccTaintData, iccTaintSize, \
+                     iccTaintResult.state); \
+    } \
+  } while(0)
+
+#define ICC_TAINT_TRACE_MEMORY(stage, access, data, size) \
+  ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, "internal", data, size)
+
+#define ICC_TAINT_TRACE_BUFFER(stage, access, data, count, elementSize) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const size_t iccTaintCount = (count); \
+      const size_t iccTaintElementSize = (elementSize); \
+      if (iccTaintElementSize && \
+          iccTaintCount > SIZE_MAX / iccTaintElementSize) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s data=%p count=%zu element_size=%zu state=invalid-size", \
+                     stage, access, (const void*)(data), iccTaintCount, \
+                     iccTaintElementSize); \
+      else \
+        ICC_TAINT_TRACE_MEMORY(stage, access, data, \
+                               iccTaintCount * iccTaintElementSize); \
+    } \
+  } while(0)
+
+#define ICC_TAINT_TRACE_INDEX(stage, access, index, count, data, elementSize) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const size_t iccTaintIndex = (index); \
+      const size_t iccTaintCount = (count); \
+      if (iccTaintIndex >= iccTaintCount) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s index=%zu count=%zu data=%p element_size=%zu bounds=out", \
+                     stage, access, iccTaintIndex, iccTaintCount, \
+                     (const void*)(data), (size_t)(elementSize)); \
+    } \
+  } while(0)
+
+#define ICC_JSON_CURVE_TRACE(format, ...) ICC_TAINT_TRACE(format, __VA_ARGS__)
+
+#define ICC_JSON_CURVE_TRACE_FLOAT(stage, index, count, valuePtr) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const icFloatNumber *iccTaintValue = (valuePtr); \
+      const IccTaintMemoryResult iccTaintResult = \
+        IccTaintMemoryState(iccTaintValue, sizeof(*iccTaintValue)); \
+      if (iccTaintResult.offset == -1) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=initialized value=%.9g", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue), \
+                     (double)*iccTaintValue); \
+      else if (iccTaintResult.offset >= 0) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=%s first_bad=%td", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue), \
+                     iccTaintResult.state, \
+                     (ptrdiff_t)iccTaintResult.offset); \
+      else \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=unknown", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue)); \
+    } \
+  } while(0)
+#else
+#define ICC_TAINT_TRACE(format, ...) ((void)0)
+#define ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, boundary, data, size) ((void)0)
+#define ICC_TAINT_TRACE_MEMORY(stage, access, data, size) ((void)0)
+#define ICC_TAINT_TRACE_BUFFER(stage, access, data, count, elementSize) ((void)0)
+#define ICC_TAINT_TRACE_INDEX(stage, access, index, count, data, elementSize) ((void)0)
+#define ICC_JSON_CURVE_TRACE(format, ...) ((void)0)
+#define ICC_JSON_CURVE_TRACE_FLOAT(stage, index, count, valuePtr) ((void)0)
 #endif
 
 inline bool IsSpaceSpectralPCS(icColorSpaceSignature sig)
@@ -630,8 +795,19 @@ inline bool IsValidColorSpaceSignature(icUInt32Number sig)
 //   Debug and warning output is gated behind ICC_SIGNATURE_VERBOSE.
 //
 // NOTE:
-//   This should be used to verify the `technology` field in `profileDescription`
-//   tags or `outputDevice` blocks.
+//   A technology signature appears in exactly two places: the top-level
+//   technologyTag ('tech', a signatureType), and the `technology` field of each
+//   icProfileDescStruct entry in profileSequenceDescTag ('pseq'). Use this
+//   predicate for those. It is not carried by profileDescriptionTag ('desc'),
+//   which is a multiLocalizedUnicode, and there is no "outputDevice" block --
+//   this NOTE named both until #2368, contradicting the CAVEAT below.
+//
+//   CAVEAT: it rejects icSigUndefined (0), which CIccTagProfileSeqDesc::Validate
+//   accepts as "technology not defined" and which is a common real-world value --
+//   iccFromCube writes it (Tools/CmdLine/IccFromCube/iccFromCube.cpp:624). Gating a
+//   profileSequenceDesc entry on this predicate alone therefore rejects legitimate
+//   profiles; test for zero separately. It matches CIccTagSignature::Validate, where a
+//   technologyTag holding zero is genuinely non-compliant (#2101).
 //
 // HISTORY:
 //   Instrumented and standardized by David Hoyt on 01-MAR-2025.
@@ -660,12 +836,24 @@ inline bool IsValidTechnologySignature(icUInt32Number sig)
     case (icUInt32Number)icSigCRTDisplay:
     case (icUInt32Number)icSigPMDisplay:
     case (icUInt32Number)icSigAMDisplay:
+    // ICC.1:2022 Table 29's two display rows, absent from the enum until now (#2101).
+    case (icUInt32Number)icSigLCDDisplay:
+    case (icUInt32Number)icSigOLEDDisplay:
     case (icUInt32Number)icSigPhotoCD:
     case (icUInt32Number)icSigPhotoImageSetter:
     case (icUInt32Number)icSigGravure:
     case (icUInt32Number)icSigOffsetLithography:
     case (icUInt32Number)icSigSilkscreen:
     case (icUInt32Number)icSigFlexography:
+
+    // Same four ICC.1 v4.3 rows missing from CIccInfo::GetTechnologySigName().  This
+    // header ships as a public API, so its answer disagreeing with
+    // CIccTagSignature::Validate is visible to consumers even though nothing in the
+    // tree calls it today (#2101).
+    case (icUInt32Number)icSigMotionPictureFilmScanner:
+    case (icUInt32Number)icSigMotionPictureFilmRecorder:
+    case (icUInt32Number)icSigDigitalMotionPictureCamera:
+    case (icUInt32Number)icSigDigitalCinemaProjector:
       return true;
 
     default:

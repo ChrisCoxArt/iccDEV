@@ -9,9 +9,11 @@ readiness.
 
 | File | Purpose |
 |------|---------|
-| `.github/labels.yml` | Canonical label names, colors, and descriptions. |
+| `.github/labels.yml` | Managed label names, colors, and descriptions. |
 | `.github/labeler.yml` | Deterministic pull request path-to-label rules. |
 | `.github/scripts/sync-labels.sh` | Local and CI label synchronization helper. |
+| `docs/label-inventory-audit.md` | Managed-versus-legacy inventory and API-write record. |
+| `.github/agents/maintainer-label-triage.agent.md` | Read-only label-system audit. |
 | `.github/workflows/sync-labels.yml` | Applies `.github/labels.yml` on `master` or manual dispatch. |
 | `.github/workflows/pr-labeler.yml` | Applies path labels to pull requests. |
 | `.github/workflows/ci-fork-automation-gate.yml` | Fails protected automation changes from forks and applies `Governance`. |
@@ -35,6 +37,21 @@ them. New workflow or status labels should be lower-case hyphenated, except
 when matching an established GitHub convention or existing repository label.
 New area labels should match the current Title Case scope style.
 
+## Inventory and API Budget
+
+`.github/labels.yml` is the managed manifest, not a destructive declaration of
+every live GitHub label. The repository retains legacy labels while open issues,
+open PRs, workflows, prompts, or documentation still use them. Do not attach an
+undeclared legacy label to new automation; either add it to the managed manifest
+or complete an intentional migration.
+
+Record a live-versus-managed inventory before a taxonomy change using
+`docs/label-inventory-audit.md`. Label synchronization first fetches the live
+inventory and updates only missing or drifted managed labels. Issue triage does
+not synchronize the taxonomy: it only applies labels that the taxonomy-sync
+workflow has already provisioned. Batch taxonomy edits in one change to avoid
+repeated label API writes.
+
 ## Workflow Behavior
 
 ### Label Sync
@@ -48,9 +65,10 @@ script, and calls:
 .github/scripts/sync-labels.sh
 ```
 
-The script creates missing labels and updates existing color or description
-metadata. It does not delete labels. Retire labels manually only after checking
-open issues, open PRs, workflow references, prompts, and documentation.
+The script creates missing labels and updates only changed color or description
+metadata after reading the live inventory. It does not delete labels. Retire
+labels manually only after checking open issues, open PRs, workflow references,
+prompts, and documentation.
 
 For local validation without mutating GitHub:
 
@@ -98,25 +116,27 @@ applied until the protected-path change has been reviewed.
 
 ### Issue Triage
 
-`label.yml` runs on issue open, edit, and reopen events. It syncs the repository
-label inventory, then adds `needs-triage` and lightweight issue-kind and scope
-labels from the issue title and body, including `Python` for Python, Cython,
-PyPI, pip, setuptools, or wheel reports. It may also add `needs-repro` or
+`label.yml` runs on issue open, edit, and reopen events. It adds
+`needs-triage` and lightweight issue-kind and scope labels from the issue title
+and body, including `Python` for Python, Cython, PyPI, pip, setuptools, or
+wheel reports. It may also add `needs-repro` or
 `requires:more-information` when a report is too short, contains a placeholder,
 or describes a crash without a reproducible input or command.
 
 The triage workflow is a routing aid, not a maintainer decision. Maintainers may
 adjust or remove labels after reviewing reproductions, security impact, and
 required test coverage. Label sync creates missing labels and updates the color
-or description of labels declared in `.github/labels.yml`; retiring a label is
-manual and must follow the deletion review in the maintainer change process.
+or description of managed labels declared in `.github/labels.yml`; retiring a
+label is manual and must follow the deletion review in the maintainer change
+process.
 
 ### PR CI Status Labels
 
 `update-labels.yml` evaluates open PRs on schedule, PR events, and manual
 dispatch. It keeps `passed`, `failed`, and `pending` mutually exclusive. It adds
 `Merge Ready` only when CI is successful, the PR is not draft, the merge state is
-clean, and the review decision is approved.
+clean, and the review decision is approved. It does not synchronize the label
+manifest; the dedicated taxonomy-sync workflow provisions managed labels.
 
 Do not use these status labels as the only merge gate. Branch protection and
 required checks remain authoritative.
@@ -128,14 +148,17 @@ status label automation from starting another full CI run. Use labels for
 classification and review routing, not as CI controls.
 
 Pull requests and manual dispatches default to `ci_scope=auto`. In auto scope,
-the full matrix runs only for source, build, test, or container changes;
+the full matrix runs only for source, build, or test changes;
+documentation-only changes use the constrained fast-lane settings, and
 workflow-only changes receive the preflight and workflow-security gates.
+Container-only changes use workflow-security gates and local container
+validation.
 Dispatch `ci_scope=full` explicitly for a long-cycle matrix. For the shortest
 same-repository PR lane, provide an open `pr_number`, choose
 `ci_scope=fast-lane`, and set `ctest_recent_limit`, `include_windows`,
 and `warning_policy` on that dispatch. Fast lane defaults to the latest
-registered CTest and strict warning failure. Windows is opt-in; Docker
-verification is scheduled when the pull request changes the container surface.
+registered CTest and strict warning failure. Windows is opt-in. The PR
+orchestrator does not run a Docker verification job.
 
 Manual dispatches use an event-qualified concurrency group. A dispatch on an
 open PR therefore does not cancel that PR's `pull_request` run; inspect the
@@ -146,11 +169,10 @@ Fuzzers)` (without Windows). Both callers use `_build-matrix.yml`, which
 centralizes the current reusable Unix and Windows gates plus focused sanitizer,
 option, version-header, and clean-rebuild lanes.
 
-Docker PR verification is required whenever the container surface changes,
-including the unified Dockerfile, packaged MCP source, or
-`ci-docker-pr.yml`. `PR Summary` fails a non-success `docker-ci` result for
-those changes; update the pinned GitHub Action, Docker, or container SHA
-references and rerun the lane before treating the container check as verified.
+Container-surface changes, including the unified Dockerfile, packaged MCP
+source, or `ci-docker-pr.yml`, select workflow-security gates only. The brittle
+Docker Clang verification job is not part of `ci-pr-action`; validate a
+container change locally before the canonical `ci-docker` publishing workflow.
 
 ### Required Check Policy
 
@@ -179,22 +201,28 @@ The `ci-qa-pr-docker-testing` integrity ruleset does not require hosted status
 contexts before a direct maintainer push. It requires signed commits, linear
 fast-forward history, and deletion protection; maintainers dispatch
 `ci-pr-action` and `ci-docker` immediately after pushing the testing branch.
-Pull requests targeting `ci-qa-pr-docker-testing` also run `ci-pr-action`; its
-Docker PR lane is required for same-repository container-surface changes and
-builds the exact PR revision into a job-local image.
+Pull requests targeting `ci-qa-pr-docker-testing` also run `ci-pr-action`.
+Container-surface changes select its workflow-security gates only; they do not
+create a job-local Docker image.
 
 ### CodeQL Ready
 
 `ci-codeql-security.yml` uses the `codeql-ready` label to trigger the full
-CodeQL security workflow for a PR. Use this label when a change touches C/C++,
-CMake, CodeQL query logic, parser hardening, or security-sensitive automation
-and the fast preflight checks are not enough.
+CodeQL security workflow for an open same-repository PR. Labelling a merged PR
+does not rerun CodeQL: the push trigger already analyzes `master`, and a
+label-triggered run would use the PR base commit's trusted query set while
+publishing its results against `master`. Closed unmerged PRs are also ignored:
+they are not active review targets and must be reopened before CodeQL can run.
+Use this label when a change touches
+C/C++, CMake, CodeQL query logic, parser hardening, or security-sensitive
+automation and the fast preflight checks are not enough.
 
 ## Maintainer Change Process
 
 1. Add or edit labels in `.github/labels.yml` first.
 2. Add `.github/labeler.yml` path rules only for deterministic scope labels.
-3. Update this guide, `.github/skills/maintainer-label-system/SKILL.md`, or
+3. Update this guide, `docs/label-inventory-audit.md`,
+   `.github/skills/maintainer-label-system/SKILL.md`, or
    `.github/prompts/maintainer-label-triage.prompt.md` when policy changes.
 4. Validate locally:
 

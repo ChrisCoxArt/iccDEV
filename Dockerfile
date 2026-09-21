@@ -8,11 +8,17 @@
 #
 ###############################################################
 
-FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG GIT_COMMIT=unknown
+ARG BUILD_JOBS=32
+ARG FLAMEGRAPH_COMMIT=41fee1f99f9276008b7cd112fca19dc3ea84ac32
+ARG LLVM_MSAN_LIBCXX_COMMIT=1ab49a973e210e97d61e5db6557180dcb92c3e98
+ARG LIBXML2_MSAN_COMMIT=3d840e17858de03a09fba8b202e3a89267d5795a
+ARG CODEQL_VERSION=2.27.0
+ARG CODEQL_SHA256=8e870433e5c80d0e916c3c1aa9005fc88aab990bcdcc649fade9dfc4d7e94305
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -23,8 +29,12 @@ LABEL org.opencontainers.image.title="iccDEV" \
       org.opencontainers.image.source="https://github.com/InternationalColorConsortium/iccDEV"
 
 # Pebble is inherited from the Ubuntu base but unused by the unified image.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+# Refresh the indexes for each attempt so a mirror-sync mismatch cannot reuse
+# the incomplete index from the preceding attempt.
+RUN for attempt in 1 2 3; do \
+      rm -rf /var/lib/apt/lists/*; \
+      if apt-get -o Acquire::Retries=3 update \
+       && apt-get install -y --no-install-recommends \
     afl++=4.33c-1.1ubuntu1 \
     bash=5.3-2ubuntu1 \
     binutils=2.46-3ubuntu2 \
@@ -36,8 +46,8 @@ RUN apt-get update \
     clang-tools-22=1:22.1.2-1ubuntu1 \
     cmake=4.2.3-2ubuntu2 \
     cppcheck=2.19.0-3 \
-    curl=8.18.0-1ubuntu2.4 \
-    diffutils=1:3.12-1 \
+    curl=8.18.0-1ubuntu2.5 \
+    diffutils=1:3.12-1ubuntu0.1 \
     file=1:5.46-5build2 \
     g++=4:15.2.0-5ubuntu1 \
     gcc=4:15.2.0-5ubuntu1 \
@@ -46,30 +56,36 @@ RUN apt-get update \
     gh=2.46.0-4 \
     git=1:2.53.0-1ubuntu1 \
     gcovr=7.2+really-2 \
-    gpgv=2.4.8-4ubuntu3 \
+    gpgv=2.4.8-4ubuntu3.1 \
     jq=1.8.1-4ubuntu2 \
     libclang-rt-22-dev=1:22.1.2-1ubuntu1 \
     libclang-rt-21-dev=1:21.1.8-6ubuntu1 \
     libjpeg-dev=8c-2ubuntu12 \
+    libjson-xs-perl=4.040-1 \
     libtiff-tools=4.7.0-3ubuntu5 \
     liblzma-dev=5.8.3-1 \
     libpng-dev=1.6.57-1 \
-    libssl-dev=3.5.5-1ubuntu3.3 \
+    libcurl4t64=8.18.0-1ubuntu2.5 \
+    libssl-dev=3.5.5-1ubuntu3.5 \
+    libssl3t64=3.5.5-1ubuntu3.5 \
     libtiff-dev=4.7.0-3ubuntu5 \
     libwxgtk3.2-dev=3.2.9+dfsg-1 \
-    zlib1g=1:1.3.dfsg+really1.3.1-1ubuntu3 \
+    zlib1g=1:1.3.dfsg+really1.3.1-1ubuntu3.1 \
     lld-22=1:22.1.2-1ubuntu1 \
     lldb-22=1:22.1.2-1ubuntu1 \
     libxml2-16=2.15.2+dfsg-0.1ubuntu0.1 \
     libxml2-dev=2.15.2+dfsg-0.1ubuntu0.1 \
     lcov=2.4-3 \
+    linux-perf=7.0.0-31.31 \
     lsb-release=12.1-2build1 \
     llvm-22=1:22.1.2-1ubuntu1 \
     llvm-22-tools=1:22.1.2-1ubuntu1 \
     make=4.4.1-3 \
     nano=8.7.1-1ubuntu0.1 \
     nlohmann-json3-dev=3.12.0.really.3.12.0.really.3.11.3-3build1 \
-    openssl-provider-legacy=3.5.5-1ubuntu3.3 \
+    ninja-build=1.13.2-1 \
+    openssl=3.5.5-1ubuntu3.5 \
+    openssl-provider-legacy=3.5.5-1ubuntu3.5 \
     pkg-config=2.5.1-4 \
     python3=3.14.3-0ubuntu2 \
     python3-dev=3.14.3-0ubuntu2 \
@@ -81,7 +97,17 @@ RUN apt-get update \
     valgrind=1:3.26.0-0ubuntu1 \
     wx-common=3.2.9+dfsg-1 \
     yamllint=1.37.1-1 \
-    zlib1g-dev=1:1.3.dfsg+really1.3.1-1ubuntu3 \
+    zlib1g-dev=1:1.3.dfsg+really1.3.1-1ubuntu3.1; then \
+        break; \
+      fi; \
+      if [ "$attempt" -eq 3 ]; then \
+        exit 1; \
+      fi; \
+      sleep "$((attempt * 10))"; \
+    done \
+ && test -f /usr/include/valgrind/memcheck.h \
+ && sed -i 's/^#geninfo_unexecuted_blocks = 0$/geninfo_unexecuted_blocks = 1/' /etc/lcovrc \
+ && grep -Fx 'geninfo_unexecuted_blocks = 1' /etc/lcovrc \
  && rm -f /usr/bin/pebble \
  && rm -rf /var/lib/apt/lists/*
 
@@ -98,32 +124,52 @@ RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-22 100 \
  && update-alternatives --install /usr/bin/llvm-symbolizer llvm-symbolizer /usr/bin/llvm-symbolizer-22 100 \
  && ln -s /usr/bin/nano /usr/local/bin/pico
 
+RUN git init --quiet /opt/FlameGraph \
+ && git -C /opt/FlameGraph remote add origin https://github.com/brendangregg/FlameGraph.git \
+ && git -C /opt/FlameGraph fetch --quiet --depth 1 origin "$FLAMEGRAPH_COMMIT" \
+ && git -C /opt/FlameGraph checkout --quiet --detach FETCH_HEAD \
+ && test "$(git -C /opt/FlameGraph rev-parse HEAD)" = "$FLAMEGRAPH_COMMIT" \
+ && test -x /opt/FlameGraph/stackcollapse-perf.pl \
+ && test -x /opt/FlameGraph/flamegraph.pl
+
 ENV CC=clang \
     CXX=clang++ \
     ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer \
     ICCDEV_ROOT=/workspace/iccDEV \
     ICCDEV_BUILD_DIR=/workspace/build \
+    ICCDEV_VALIDATION_LIBRARY=/opt/iccdev-validation/lib/libIccProfLib2.so \
     ICCDEV_TOOLS_DIR=/workspace/build/Tools \
     ICCDEV_TESTING_DIR=/workspace/iccDEV/Testing \
     ICCDEV_MCP_PYTHON=/opt/iccdev-mcp/bin/python \
+    ICCDEV_MSAN_LIBCXX_DIR=/opt/iccdev-msan-libcxx \
     ICCDEV_SPECTRAL_PREVIEW_PYTHON=/opt/iccdev-spectral-preview/bin/python \
+    ICCDEV_VALGRIND_SOURCE_DIR=/workspace/iccDEV \
+    ICCDEV_VALGRIND_BUILD_DIR=/workspace/valgrind/build \
+    ICCDEV_VALGRIND_OUTPUT_DIR=/workspace/valgrind/output \
     ICCDEV_BUILD_LABEL="iccDEV unified image" \
+    ICCDEV_FLAMEGRAPH_DIR=/opt/FlameGraph \
+    ICCDEV_FLAMEGRAPH_REVISION="${FLAMEGRAPH_COMMIT}" \
+    LCOV_HOME=/ \
     ICCDEV_IMAGE_PULL="docker pull ghcr.io/internationalcolorconsortium/iccdev:latest" \
     PATH="/opt/iccdev-mcp/bin:${PATH}"
 
+RUN groupadd --system iccdev-ci \
+ && useradd --system --gid iccdev-ci --home-dir /workspace --create-home --shell /bin/bash iccdev-ci
+
+COPY --chown=iccdev-ci:iccdev-ci .github/ci/requirements /workspace/iccDEV/.github/ci/requirements
+
 RUN python3 -m venv /opt/iccdev-spectral-preview \
  && /opt/iccdev-spectral-preview/bin/python -m pip install \
+      --resume-retries 5 \
       --upgrade \
       'pip>=25.1.1' \
       'setuptools>=78.1.1' \
       --quiet \
  && /opt/iccdev-spectral-preview/bin/python -m pip install \
+      --resume-retries 5 \
       --only-binary=:all: \
       --no-cache-dir \
-      'numpy==2.5.2' \
-      'tifffile==2026.8.16' \
-      'pillow==12.3.0' \
-      'imagecodecs==2026.8.16' \
+      -r /workspace/iccDEV/.github/ci/requirements/docker-spectral-preview.txt \
       --quiet \
  && /opt/iccdev-spectral-preview/bin/python -m pip check \
  && /opt/iccdev-spectral-preview/bin/python -c 'import imagecodecs,numpy,PIL,tifffile; print(f"imagecodecs {imagecodecs.__version__}"); print(f"numpy {numpy.__version__}"); print(f"pillow {PIL.__version__}"); print(f"tifffile {tifffile.__version__}")' \
@@ -141,6 +187,16 @@ RUN hadolint_version="2.15.1" \
  && rm -f /tmp/hadolint \
  && hadolint --version
 
+RUN codeql_archive="/tmp/codeql-bundle-linux64.tar.gz" \
+ && curl -fsSLo "$codeql_archive" \
+      "https://github.com/github/codeql-action/releases/download/codeql-bundle-v${CODEQL_VERSION}/codeql-bundle-linux64.tar.gz" \
+ && printf '%s  %s\n' "$CODEQL_SHA256" "$codeql_archive" | sha256sum -c - \
+ && tar -xzf "$codeql_archive" -C /opt \
+ && test -x /opt/codeql/codeql \
+ && ln -s /opt/codeql/codeql /usr/local/bin/codeql \
+ && rm -f "$codeql_archive" \
+ && codeql version
+
 RUN python3 -m venv /opt/iccdev-workflow-qa \
  && /opt/iccdev-workflow-qa/bin/python -m pip install \
       --upgrade \
@@ -150,7 +206,7 @@ RUN python3 -m venv /opt/iccdev-workflow-qa \
  && /opt/iccdev-workflow-qa/bin/python -m pip install \
       --only-binary=:all: \
       --no-cache-dir \
-      'zizmor==1.29.0' \
+      -r /workspace/iccDEV/.github/ci/requirements/docker-workflow-qa.txt \
       --quiet \
  && /opt/iccdev-workflow-qa/bin/python -m pip check \
  && ln -s /opt/iccdev-workflow-qa/bin/zizmor /usr/local/bin/zizmor \
@@ -161,13 +217,18 @@ RUN python3 -m venv /opt/iccdev-workflow-qa \
       /opt/iccdev-workflow-qa/lib/python*/site-packages/pip \
       /opt/iccdev-workflow-qa/lib/python*/site-packages/pip-*.dist-info
 
-RUN groupadd --system iccdev-ci \
- && useradd --system --gid iccdev-ci --home-dir /workspace --create-home --shell /bin/bash iccdev-ci
+COPY --chmod=0755 .github/scripts/iccdev-build-msan-libcxx.sh /usr/local/bin/iccdev-build-msan-libcxx
+
+RUN iccdev-build-msan-libcxx \
+      --prefix /opt/iccdev-msan-libcxx \
+      --llvm-commit "$LLVM_MSAN_LIBCXX_COMMIT" \
+      --libxml2-commit "$LIBXML2_MSAN_COMMIT" \
+      --jobs "$BUILD_JOBS"
 
 COPY --chown=iccdev-ci:iccdev-ci . /workspace/iccDEV
-COPY --chmod=0755 docker/iccdev-banner.sh /usr/local/bin/iccdev-banner
-COPY --chmod=0755 docker/iccdev-fuzz-env.sh /usr/local/bin/iccdev-fuzz-env
-COPY --chmod=0755 docker/iccdev-generate-profiles.sh /usr/local/bin/iccdev-generate-profiles
+COPY --chmod=0755 .github/ci/docker/iccdev-banner.sh /usr/local/bin/iccdev-banner
+COPY --chmod=0755 .github/ci/docker/iccdev-fuzz-env.sh /usr/local/bin/iccdev-fuzz-env
+COPY --chmod=0755 .github/ci/docker/iccdev-generate-profiles.sh /usr/local/bin/iccdev-generate-profiles
 COPY --chmod=0755 iccdev-mcp/docker/docker-entrypoint.sh /usr/local/bin/iccdev-mcp-entrypoint
 
 RUN find /workspace/iccDEV/.github/scripts -maxdepth 1 -type f -name '*.sh' -exec chmod 0755 '{}' +
@@ -220,15 +281,16 @@ RUN rm -rf .git \
      -DCMAKE_SHARED_LINKER_FLAGS="$SAN_FLAGS" \
      -DENABLE_SANITIZERS=ON \
      -DSANITIZER_RECOVER=ON \
+     -DICCDEV_ENABLE_TAINT_TRACE=ON \
      -DENABLE_TOOLS=ON \
      -DENABLE_TESTS=ON \
      -DENABLE_WXWIDGETS=OFF \
      -DENABLE_SHARED_LIBS=ON \
      -DENABLE_STATIC_LIBS=ON \
      -Wno-dev \
- && cmake --build /workspace/build --parallel "$(nproc)"
+ && cmake --build /workspace/build --parallel "$BUILD_JOBS"
 
-RUN cmake --build /workspace/build --target build-test-binaries --parallel "$(nproc)"
+RUN cmake --build /workspace/build --target build-test-binaries --parallel "$BUILD_JOBS"
 
 # Regression helpers are EXCLUDE_FROM_ALL, so this has to follow
 # build-test-binaries: before it the executable does not exist and ctest
@@ -242,10 +304,21 @@ RUN git checkout -- silence.txt \
  && test -z "$(git status --porcelain --untracked-files=all)"
 
 USER root
+RUN bash /workspace/iccDEV/.github/ci/docker/build-validation-library.sh \
+      /workspace/iccDEV /opt/iccdev-validation/lib "$BUILD_JOBS" \
+ && /opt/iccdev-mcp/bin/python -c "import iccdev; from pathlib import Path; assert iccdev.native_validation_available(); result = iccdev.validate_profile_file(Path(\"/workspace/iccDEV/Testing/sRGB_v4_ICC_preference.icc\")); assert result.status == iccdev.ValidationStatus.OK, result"
+
 RUN chmod 0755 /usr/local/bin/iccdev-banner \
  && chmod 0755 /usr/local/bin/iccdev-fuzz-env \
  && chmod 0755 /usr/local/bin/iccdev-generate-profiles \
  && chmod 0755 /usr/local/bin/iccdev-mcp-entrypoint \
+ && git config --system --add safe.directory /opt/FlameGraph \
+ && ln -sf /workspace/iccDEV/.github/ci/valgrind/build.sh /usr/local/bin/iccdev-valgrind-build \
+ && ln -sf /workspace/iccDEV/.github/ci/valgrind/run.sh /usr/local/bin/iccdev-valgrind-run \
+ && ln -sf /workspace/iccDEV/.github/ci/valgrind/status.sh /usr/local/bin/iccdev-valgrind-status \
+ && ln -sf /workspace/iccDEV/.github/ci/valgrind/validate.sh /usr/local/bin/iccdev-valgrind-validate \
+ && ln -sf /workspace/iccDEV/.github/ci/valgrind/self-test.sh /usr/local/bin/iccdev-valgrind-self-test \
+ && iccdev-valgrind-validate \
  && find /workspace/build/Tools -mindepth 2 -maxdepth 2 -type f -executable \
      -exec ln -sf '{}' /usr/local/bin/ ';' \
  && printf '%s\n' \
@@ -261,7 +334,7 @@ RUN chmod 0755 /usr/local/bin/iccdev-banner \
  && chown iccdev-ci:iccdev-ci /workspace/.bashrc
 
 HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \
-  CMD clang --version >/dev/null && cmake --version >/dev/null && command -v iccDumpProfile >/dev/null && command -v iccdev-mcp-rest >/dev/null && command -v iccdev-fuzz-env >/dev/null || exit 1
+  CMD ["bash", "-c", "clang --version >/dev/null && cmake --version >/dev/null && command -v ninja >/dev/null && command -v cppcheck >/dev/null && command -v clang-tidy >/dev/null && command -v scan-build >/dev/null && command -v hadolint >/dev/null && command -v codeql >/dev/null && command -v zizmor >/dev/null && command -v shellcheck >/dev/null && command -v afl-fuzz >/dev/null && command -v valgrind >/dev/null && command -v ms_print >/dev/null && command -v callgrind_annotate >/dev/null && command -v perf >/dev/null && command -v lcov >/dev/null && command -v genhtml >/dev/null && command -v gcovr >/dev/null && command -v llvm-cov >/dev/null && command -v llvm-profdata >/dev/null && perl -MJSON::XS -e 1 && test \"$LCOV_HOME\" = / && grep -Fqx 'geninfo_unexecuted_blocks = 1' /etc/lcovrc && test -x \"$ICCDEV_FLAMEGRAPH_DIR/stackcollapse-perf.pl\" && test -x \"$ICCDEV_FLAMEGRAPH_DIR/flamegraph.pl\" && test \"$(git -C \"$ICCDEV_FLAMEGRAPH_DIR\" rev-parse HEAD)\" = \"$ICCDEV_FLAMEGRAPH_REVISION\" && command -v iccdev-valgrind-build >/dev/null && command -v iccdev-valgrind-run >/dev/null && command -v iccdev-valgrind-status >/dev/null && command -v iccdev-valgrind-validate >/dev/null && command -v iccdev-valgrind-self-test >/dev/null && command -v iccdev-build-msan-libcxx >/dev/null && test -f /usr/include/valgrind/memcheck.h && test -f /opt/iccdev-msan-libcxx/lib/libc++.so.1 && test -f /opt/iccdev-msan-libcxx/lib/libc++abi.so.1 && test -f /opt/iccdev-msan-libcxx/lib/libxml2.so && command -v iccDumpProfile >/dev/null && command -v iccdev-mcp-rest >/dev/null && command -v iccdev-fuzz-env >/dev/null"]
 
 LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
 ENV ICCDEV_SOURCE_REVISION="${GIT_COMMIT}"

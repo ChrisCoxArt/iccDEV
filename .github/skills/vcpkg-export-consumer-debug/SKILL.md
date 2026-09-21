@@ -40,6 +40,11 @@ the portfile passes `-DICC_USE_ZLIB=ON`, and the overlay `port-version` is
 incremented. Do not add zlib directly to `examples/hello-iccdev/vcpkg.json`;
 that consumer receives it through the `iccdev` port.
 
+For a registry baseline update, synchronize the root and `Build/Cmake`
+manifests, `examples/hello-iccdev/vcpkg-configuration.json`, the explicit
+checkouts in `ci-vcpkg-ports.yml`, and `VCPKG_BASELINE` in `ci.yml`. The
+overlay port manifest intentionally has no registry baseline.
+
 ## Staleness Check
 
 1. Compare the tested ref with the current PR head:
@@ -81,6 +86,33 @@ cmake -S "examples\hello-iccdev" -B $exampleBuild `
   -DVCPKG_MANIFEST_MODE=OFF `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static `
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+```
+
+### Installed-Package Consumer Cannot Find Parent Dependencies
+
+Signal:
+
+```text
+Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)
+```
+
+Cause: `iccdev.installed-package-consumer` disables manifest mode for its
+nested projects. If the driver does not also forward the parent build's
+`VCPKG_INSTALLED_DIR`, the vcpkg toolchain searches its global classic tree
+instead of the manifest tree already populated for the parent build.
+
+Fix contract: pass the parent installed tree into the CTest driver and forward
+it to each nested configure together with `CMAKE_TOOLCHAIN_FILE`,
+`VCPKG_MANIFEST_MODE=OFF`, and `VCPKG_TARGET_TRIPLET`. Keep
+`build-test-binaries` dependent on every shared and static library artifact the
+test stages.
+
+Focused Windows validation:
+
+```powershell
+cmake --build out\vs2022-x64 --config Release --target build-test-binaries
+ctest --test-dir out\vs2022-x64 -C Release `
+  -R '^iccdev\.installed-package-consumer$' --output-on-failure --no-tests=error
 ```
 
 ### Source Uninstall Breaks on CMake Path Spaces

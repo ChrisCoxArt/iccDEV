@@ -229,9 +229,13 @@ jobs:
             "echo \"Tools directory: \$SCRIPT_DIR\"" \
             > "$stage/path.sh"
           chmod +x "$stage/path.sh"
+          # -h, not a bare invocation: since #2405 an incomplete operand list is a
+          # failure (usage on stderr, non-zero), and this step runs under
+          # "set -euo pipefail", so a bare call would abort the job on the first
+          # tool.  -h is the supported route to the banner and exits 0.
           for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
             LD_LIBRARY_PATH="$stage${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+              "$stage/$tool" -h 2>&1 | grep -q "IccLibConnect Version"
           done
           # Summary of staged bundle contents
           total=$(find "$stage" -type f | wc -l)
@@ -442,9 +446,10 @@ jobs:
             done
             install_name_tool -add_rpath "@loader_path" "$target" || true
           done
+          # -h for the same reason as the Linux staging step above (#2405).
           for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
             DYLD_LIBRARY_PATH="$stage${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
-              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+              "$stage/$tool" -h 2>&1 | grep -q "IccLibConnect Version"
           done
           # Summary of staged bundle contents
           total=$(find "$stage" -type f | wc -l)
@@ -597,7 +602,7 @@ jobs:
 
       - name: Set up MATLAB
         # matlab-actions/setup-matlab v3
-        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        uses: matlab-actions/setup-matlab@f9e43010f1ae678f7cfa0542fe2a4f60f7d1ad8d
         with:
           release: R2026a
 
@@ -631,7 +636,11 @@ jobs:
           git branch
           git status
           Write-Host "========= Fetching Deps... ================`n"
-          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/v2.3.1/vcpkg-exported-deps.zip" -Destination "deps.zip"
+          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-deps/iccdev-windows-vcpkg-classic-308e561.zip" -Destination "deps.zip"
+          $actualDigest = (Get-FileHash -LiteralPath 'deps.zip' -Algorithm SHA256).Hash
+          if ($actualDigest -ne 'd3591ccfbdae65a908a8488030b270782942106e06093602f9d919e027cd2976') {
+            throw "vcpkg export digest mismatch: $actualDigest"
+          }
           Write-Host "========= Extracting Deps... ================`n"
           tar -xf deps.zip
           cd Build/Cmake
@@ -651,7 +660,7 @@ jobs:
 
       - name: Build MATLAB MEX gateway
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');
@@ -684,6 +693,8 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName -Destination $stage -Force }
           foreach ($required in @(
             'iccDumpProfile.exe',
+            'iccToJson.exe',
+            'iccFromJson.exe',
             'iccPawgReport.exe',
             'IccProfLib2.dll'
           )) {
@@ -700,12 +711,15 @@ jobs:
           Copy-Item -Path "matlab" -Destination "$stage/matlab" -Recurse -Force
           New-Item -ItemType Directory -Force `
             -Path "$stage/Testing/Display", "$stage/Testing/HDR", `
+              "$stage/Testing/ApplyDataFiles/test-profiles", `
               "$stage/IccProfLib", "$stage/.github/ci/regression" |
             Out-Null
           Copy-Item -Path "Testing/sRGB_v4_ICC_preference.icc" `
             -Destination "$stage/Testing/sRGB_v4_ICC_preference.icc" -Force
           Copy-Item -Path "Testing/sRGB_v4_ICC_preference.icc" `
             -Destination "$stage/Testing/Display/sRGB_v4_ICC_preference.icc" -Force
+          Copy-Item -Path "Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc" `
+            -Destination "$stage/Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc" -Force
           Copy-Item -Path "Testing/Display/sRGB_D65_MAT.xml" `
             -Destination "$stage/Testing/Display/sRGB_D65_MAT.xml" -Force
           Copy-Item -Path "Testing/Display/sRGB_D65_MAT-300cdm2.xml" `
@@ -730,6 +744,8 @@ jobs:
             'matlab\+iccdev\+qa\delta_e_2000.m',
             'matlab\+iccdev\+qa\pcs_to_lab.m',
             'matlab\tests\test_pawg_q1.m',
+            'matlab\tests\test_json_bindings.m',
+            'matlab\tests\test_lut_type_range.m',
             'matlab\tests\test_usage_guidance.m',
             'matlab\tests\fixtures\default_usage_examples.txt',
             'matlab\tests\test_luminance_normalization.m',
@@ -740,6 +756,7 @@ jobs:
             'matlab\examples\docker_interop.m',
             'Testing\sRGB_v4_ICC_preference.icc',
             'Testing\Display\sRGB_v4_ICC_preference.icc',
+            'Testing\ApplyDataFiles\test-profiles\sRGB_D65_MAT.icc',
             'Testing\Display\sRGB_D65_MAT.xml',
             'Testing\Display\sRGB_D65_MAT-300cdm2.xml',
             'Testing\Display\sRGB_D65_MAT-500cdm2.xml',
@@ -875,7 +892,7 @@ jobs:
 
       - name: Run staged MATLAB release QA
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             stage = fullfile(pwd, 'staging', 'iccDEV-Testing');
@@ -884,6 +901,8 @@ jobs:
             addpath(fullfile(matlab_dir, 'tests'));
             setenv('PATH', [stage pathsep getenv('PATH')]);
             test_usage_guidance();
+            test_json_bindings();
+            test_lut_type_range();
             test_luminance_normalization();
             test_colorimetry_issue_1475();
             qa_output = evalc('run_local_qa()');
@@ -947,12 +966,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      EMSDK_VERSION: 4.0.20
-      EMSDK_REF: e4fe26ef59168ff44f4c23c466e497bf60b3411e
-      ZLIB_REF: f9dd6009be3ed32415edf1e89d1bc38380ecb95d
-      LIBTIFF_REF: 97ae1f6f0bba8999326f084f04950ecfd6166580
-      LIBXML2_REF: 39b66eb2089f491eacf8e22a7965a235f7f5735e
-      NLOHMANN_JSON_REF: f0bf4c731a53aab29ebde0234385b9e63bf70dcd
+      EMSDK_VERSION: 4.0.21
+      EMSDK_REF: b2436aafa7351ee1b581f15841f1b45ed716a279
+      ZLIB_REF: da607da739fa6047df13e66a2af6b8bec7c2a498
+      LIBTIFF_REF: 5fe20d0e9aba49a6a350ed533459d1505203838f
+      LIBXML2_REF: b7fa62cbe8ef0df5869e000d5b690bdedd07f33e
+      NLOHMANN_JSON_REF: 55f93686c01528224f448c19128836e7df245f72
       WASM_DEPS_CACHE_VERSION: v2
     defaults:
       run:
@@ -1534,7 +1553,7 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
 
-          cmake --build build-cpack --target package-sha256
+          cmake --build build-cpack --target package-sha256 --parallel "$(nproc)"
 
       - name: Validate runtime package outputs
         run: |
@@ -1653,7 +1672,15 @@ jobs:
           test -f docs/generated/html/dot_search-lane.svg
           test -f docs/generated/html/dot_tolink-lane.svg
           test -f docs/generated/html/icc__apply__qa__suite_8sh_source.html
-          grep -q 'iccApply visual lanes' docs/generated/html/index.html
+          grep -q 'iccDEV Documentation' docs/generated/html/index.html
+          test -f docs/generated/html/curateddocumentation.html
+          test -f docs/generated/html/curatedlibraries.html
+          test -f docs/generated/html/curatedtools.html
+          test -f docs/generated/html/curatedtesting.html
+          if grep -q 'superpowers' docs/generated/html/navtreedata.js; then
+            echo "::error::Doxygen navigation contains excluded internal documentation"
+            exit 1
+          fi
           if compgen -G 'docs/generated/html/namespaceanonymous*' >/dev/null ||
              compgen -G 'docs/generated/html/structanonymous*' >/dev/null ||
              compgen -G 'docs/generated/html/classanonymous*' >/dev/null; then
@@ -1710,7 +1737,7 @@ jobs:
             echo "class hierarchy browser, call/caller graphs,"
             echo "collaboration diagrams, UML class diagrams,"
             echo "include dependency graphs, directory graphs,"
-            echo "treeview navigation, client-side search,"
+            echo "curated treeview navigation, client-side search,"
             echo "and cross-referenced inline source browser."
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
@@ -1725,9 +1752,12 @@ jobs:
   release:
     name: "Publish Latest Release"
     needs: [linux, macos, windows, wasm, cpack-linux, doxygen]
-    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' }}
+    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' || github.ref == 'refs/heads/ci-publish-colourbill-ctrl' }}
     runs-on: ubuntu-latest
-    environment: release
+    environment:
+      name: >-
+        ${{ github.ref == 'refs/heads/ci-publish-colourbill-ctrl' &&
+            'ci-publishing-colourbill-ctrl' || 'release' }}
     timeout-minutes: 15
     permissions:
       contents: write  # Required to publish the latest release.
@@ -1814,6 +1844,8 @@ jobs:
 
           windows_bundle_root="artifacts/iccdev-windows-msvc/iccDEV-Testing"
           matlab_required=(
+            "iccToJson.exe"
+            "iccFromJson.exe"
             "iccPawgReport.exe"
             "matlab/+iccdev/private/icc_mex.mexw64"
             "matlab/run_local_qa.m"
@@ -1824,6 +1856,8 @@ jobs:
             "matlab/+iccdev/+qa/delta_e_2000.m"
             "matlab/+iccdev/+qa/pcs_to_lab.m"
             "matlab/tests/test_pawg_q1.m"
+            "matlab/tests/test_json_bindings.m"
+            "matlab/tests/test_lut_type_range.m"
             "matlab/tests/test_usage_guidance.m"
             "matlab/tests/fixtures/default_usage_examples.txt"
             "matlab/tests/test_luminance_normalization.m"
@@ -1834,6 +1868,7 @@ jobs:
             "matlab/examples/docker_interop.m"
             "Testing/sRGB_v4_ICC_preference.icc"
             "Testing/Display/sRGB_v4_ICC_preference.icc"
+            "Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc"
             "Testing/Display/sRGB_D65_MAT.xml"
             "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
             "Testing/Display/sRGB_D65_MAT-500cdm2.xml"

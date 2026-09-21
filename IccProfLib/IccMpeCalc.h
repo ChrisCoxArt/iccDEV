@@ -90,6 +90,10 @@ class IIccOpDef;
 
 #define icMaxDataStackSize 65535
 
+/** ICC.2:2023 Table 85b calculatorLimits block: its signature, and its size in bytes. */
+#define icSigCalcLimits   0x636C6D74  /* 'clmt' */
+#define icCalcLimitsSize  28
+
 // Defensive upper bound on the number of elements parsed from a calc-based
 // multiProcessElement. ICC.2 stores every one of these as a 32-bit count with
 // NO maximum imposed by the specification: the calculator sub-element count
@@ -127,6 +131,15 @@ typedef enum : uint32_t {
 typedef enum {
   // useful value that is not defined by the spec.
   icSigNullDataOp                   = 0x00000000, /* not valid, used for data range */
+
+  //ICC.2:2023 Table 102 rows 1 and 2. Neither carries an (S) selector, but they
+  //differ in what they touch: 'noop' takes no stack argument and leaves no
+  //result, while 'scnt' takes X1...XN and leaves X1...XN N -- it reads the stack
+  //depth and pushes it WITHOUT consuming the operands. Both are specified with
+  //"S shall be zero"; iccDEV does not enforce that, matching how it already
+  //treats the pi/+INF/-INF/NaN rows of the same table (#2086).
+  icSigNoOperationOp                = 0x6e6f6f70,  /* 'noop' */
+  icSigStackCountOp                 = 0x73636e74,  /* 'scnt' */
 
   //Floating point constant operation
   icSigDataOp                       = 0x64617461,  /* 'data' */
@@ -220,6 +233,7 @@ typedef enum {
   icSigVectorMinimumOp              = 0x766d696e,  /* 'vmin' */
   icSigVectorMaximumOp              = 0x766d6178,  /* 'vmax' */
   icSigVectorAndOp                  = 0x76616e64,  /* 'vand' */
+  icSigVectorXorOp                  = 0x76786f72,  /* 'vxor' */
   icSigVectorOrOp                   = 0x766f7220,  /* 'vor ' */
 
   //Matrix Operations
@@ -409,8 +423,11 @@ public:
   icFuncParseStatus SetFunction(CIccCalcOpList &opList, std::string &sReport);
 
   icUInt32Number GetMaxTemp() const;
-  int CheckUnderflowOverflow(SIccCalcOp *op, icUInt32Number nOps, int nArgs, bool bCheckUnderflow, std::string &sReport) const;
-  icFuncParseStatus DoesStackUnderflowOverflow(std::string &sReport) const;
+  icUInt32Number GetNumTempChannels() const;
+  icUInt32Number GetNumOps() const { return m_nOps; }
+  int CheckUnderflowOverflow(SIccCalcOp *op, icUInt32Number nOps, int nArgs, bool bCheckUnderflow, std::string &sReport,
+                             icUInt32Number nMaxStack = icMaxDataStackSize) const;
+  icFuncParseStatus DoesStackUnderflowOverflow(std::string &sReport, icUInt32Number nMaxStack = icMaxDataStackSize) const;
   bool HasValidOperations(std::string &sReport) const;
   bool HasUnsupportedOperations(std::string &sReport, const CIccProfile *pProfile) const;
   bool DoesOverflowInput(icUInt16Number nInputChannels) const;
@@ -501,7 +518,22 @@ public:
   virtual bool IsLateBinding() const;
   virtual bool IsLateBindingReflectance() const;
 
+  /** ICC.2:2023 Table 85b calculatorLimits ('clmt'), stored between the sub-element
+   *  positions and the data when m_bHasLimits is set.  A limit of 0 means no maximum.
+   *  m_nLimitsReserved holds the block's three reserved words (bytes 4-7 and 20-27 of
+   *  the block, which starts at 16 + 8 * (E + 1)); they shall be 0. */
+  bool m_bHasLimits;
+  icUInt32Number m_nMaxStackSize;
+  icUInt32Number m_nMaxTempChannels;
+  icUInt32Number m_nMaxOperations;
+  icUInt32Number m_nLimitsReserved[3];
+
+  /** Operations in the main function plus those of every sub-calculator. */
+  icUInt64Number GetTotalOps() const;
+
 protected:
+
+  icValidateStatus ValidateLimits(const CIccMpeCalculator *pLimits, const std::string &sigPath, std::string &sReport) const;
 
   bool SetElem(icUInt32Number idx, CIccMultiProcessElement *pElem, icUInt32Number &count, CIccMultiProcessElement ***pArray);
 

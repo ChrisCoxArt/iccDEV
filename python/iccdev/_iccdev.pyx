@@ -54,6 +54,7 @@ class ColorSpace(enum.IntEnum):
     Luv       = cicc.icSigLuvData
     YCbCr     = cicc.icSigYCbCrData
     Yxy       = cicc.icSigYxyData
+    LMS       = cicc.icSigLmsData
     RGB       = cicc.icSigRgbData
     Gray      = cicc.icSigGrayData
     HSV       = cicc.icSigHsvData
@@ -160,6 +161,11 @@ class CmmStatus(enum.IntEnum):
     TooManySamples     = cicc.icCmmStatTooManySamples
     BadMCSLink         = cicc.icCmmStatBadMCSLink
     Unsupported        = cicc.icCmmStatUnsupported
+    # The mirror stopped at 18, so #1843's icCmmStatUnsupportedProfileClass read
+    # back from Python as a bare code(19). Adding 20 without it would leave the
+    # same hole one place further along (#2176).
+    UnsupportedProfileClass = cicc.icCmmStatUnsupportedProfileClass
+    CantAdjustPcs      = cicc.icCmmStatCantAdjustPcs
 
 
 class ValidationStatus(enum.IntEnum):
