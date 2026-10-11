@@ -60,6 +60,7 @@ RUN for attempt in 1 2 3; do \
     jq=1.8.1-4ubuntu2 \
     libclang-rt-22-dev=1:22.1.2-1ubuntu1 \
     libclang-rt-21-dev=1:21.1.8-6ubuntu1 \
+    libheif-dev=1.21.2-3ubuntu0.6 \
     libjpeg-dev=8c-2ubuntu12 \
     libjson-xs-perl=4.040-1 \
     libtiff-tools=4.7.0-3ubuntu5 \
@@ -288,7 +289,8 @@ RUN rm -rf .git \
      -DENABLE_SHARED_LIBS=ON \
      -DENABLE_STATIC_LIBS=ON \
      -Wno-dev \
- && cmake --build /workspace/build --parallel "$BUILD_JOBS"
+ && cmake --build /workspace/build --parallel "$BUILD_JOBS" \
+ && test -x /workspace/build/Tools/IccHeifDump/iccHeifDump
 
 RUN cmake --build /workspace/build --target build-test-binaries --parallel "$BUILD_JOBS"
 
@@ -311,7 +313,7 @@ RUN git checkout -- silence.txt \
 USER 0
 RUN bash /workspace/iccDEV/.github/ci/docker/build-validation-library.sh \
       /workspace/iccDEV /opt/iccdev-validation/lib "$BUILD_JOBS" \
- && /opt/iccdev-mcp/bin/python -c "import iccdev; from pathlib import Path; assert iccdev.native_validation_available(); result = iccdev.validate_profile_file(Path(\"/workspace/iccDEV/Testing/sRGB_v4_ICC_preference.icc\")); assert result.status == iccdev.ValidationStatus.OK, result"
+ && /opt/iccdev-mcp/bin/python -c "from iccdev_mcp import _native as iccdev; from pathlib import Path; assert iccdev.native_validation_available(); result = iccdev.validate_profile_file(Path(\"/workspace/iccDEV/Testing/sRGB_v4_ICC_preference.icc\")); assert result.status == iccdev.ValidationStatus.OK, result"
 
 RUN chmod 0755 /usr/local/bin/iccdev-banner \
  && chmod 0755 /usr/local/bin/iccdev-fuzz-env \

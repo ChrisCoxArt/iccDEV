@@ -96,7 +96,7 @@ jobs:
             -o Dpkg::Use-Pty=0 \
             install -y --no-install-recommends \
             build-essential cmake gcc g++ clang clang-tools \
-            libpng-dev libxml2 libxml2-dev libtiff-dev \
+            libheif-dev libpng-dev libxml2 libxml2-dev libtiff-dev \
             nlohmann-json3-dev libwxgtk3.2-dev wx-common \
             python3 python3-pip curl git llvm
       - name: Set Compiler
@@ -304,7 +304,7 @@ jobs:
           unset GITHUB_TOKEN || true
           git config --add safe.directory "$PWD"
           echo "Installing Homebrew dependencies..."
-          packages=(libpng nlohmann-json libxml2 wxwidgets libtiff jpeg-turbo)
+          packages=(libheif libpng nlohmann-json libxml2 wxwidgets libtiff jpeg-turbo)
           missing=()
           for package in "${packages[@]}"; do
             if brew list --versions "$package" >/dev/null 2>&1; then
@@ -636,9 +636,9 @@ jobs:
           git branch
           git status
           Write-Host "========= Fetching Deps... ================`n"
-          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-deps/iccdev-windows-vcpkg-classic-308e561.zip" -Destination "deps.zip"
+          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip" -Destination "deps.zip"
           $actualDigest = (Get-FileHash -LiteralPath 'deps.zip' -Algorithm SHA256).Hash
-          if ($actualDigest -ne 'd3591ccfbdae65a908a8488030b270782942106e06093602f9d919e027cd2976') {
+          if ($actualDigest -ne '89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e') {
             throw "vcpkg export digest mismatch: $actualDigest"
           }
           Write-Host "========= Extracting Deps... ================`n"
@@ -1518,6 +1518,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            libheif-dev \
             libjpeg-dev \
             libpng-dev \
             libtiff-dev \
@@ -1576,6 +1577,9 @@ jobs:
           unzip -Z1 "${zip_file}" > build-cpack/ZIP-CONTENTS.txt
           grep -q '/VERSION$' build-cpack/ZIP-CONTENTS.txt
           grep -q '/TOOL-CATALOG.md$' build-cpack/ZIP-CONTENTS.txt
+          grep -q '/bin/iccHeifDump$' build-cpack/ZIP-CONTENTS.txt
+          unzip -p "${zip_file}" '*/TOOL-CATALOG.md' |
+            grep -Fx -- "- \`iccHeifDump\`"
           if grep -q '/Testing/' build-cpack/ZIP-CONTENTS.txt; then
             echo "Runtime package unexpectedly contains Testing tree" >&2
             exit 1
