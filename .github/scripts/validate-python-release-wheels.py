@@ -28,7 +28,11 @@
 """Validate the exact cibuildwheel output before release upload."""
 
 import argparse
+import base64
+import csv
 from email.parser import BytesParser
+import hashlib
+import io
 from pathlib import Path
 import re
 import stat
@@ -94,6 +98,41 @@ def require_header(headers, name, expected):
         raise ValueError(f"Unexpected wheel metadata {name}")
 
 
+def validate_record(archive, dist_info):
+    record = f"{dist_info}/RECORD"
+    signatures = {record + ".jws", record + ".p7s"}
+    files = {member.filename for member in archive.infolist() if not member.is_dir()}
+    expected = files - signatures
+    recorded = set()
+    try:
+        rows = csv.reader(io.StringIO(archive.read(record).decode("utf-8")), strict=True)
+        for row in rows:
+            if len(row) != 3:
+                raise ValueError("Malformed wheel RECORD row")
+            name, checksum, size = row
+            if name not in expected or name in recorded:
+                raise ValueError(f"Unexpected or duplicate wheel RECORD entry: {name}")
+            recorded.add(name)
+            if name == record:
+                if checksum or size:
+                    raise ValueError("Wheel RECORD must not hash itself")
+                continue
+            algorithm, separator, digest = checksum.partition("=")
+            if not separator or algorithm not in ("sha256", "sha384", "sha512"):
+                raise ValueError(f"Missing or unsupported wheel RECORD hash: {name}")
+            hasher = hashlib.new(algorithm)
+            with archive.open(name) as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            actual = base64.urlsafe_b64encode(hasher.digest()).rstrip(b"=").decode("ascii")
+            if digest != actual or size != str(archive.getinfo(name).file_size):
+                raise ValueError(f"Wheel RECORD hash or size mismatch: {name}")
+    except csv.Error as error:
+        raise ValueError("Malformed wheel RECORD CSV") from error
+    if recorded != expected:
+        raise ValueError(f"Missing wheel RECORD entries: {sorted(expected - recorded)}")
+
+
 def validate_archive(archive, version, python_tag, abi, platforms):
     members = archive.infolist()
     names = {member.filename for member in members}
@@ -142,9 +181,10 @@ def validate_archive(archive, version, python_tag, abi, platforms):
     canonical = (Path(__file__).resolve().parents[2] / "LICENSE.md").read_text(encoding="utf-8")
     if license_text.split() != canonical.split():
         raise ValueError("Wheel license does not match canonical LICENSE.md")
+    validate_record(archive, dist_info)
 
 
-def validate_wheels(wheel_dir, identifiers, version, lane=None):
+def validate_wheels(wheel_dir, identifiers, version, lane=None, allow_mcp=False):
     identifiers = list(identifiers)
     expected = set(identifiers)
     supported = set().union(*(lane_identifiers(name) for name in LANE_PLATFORMS))
@@ -154,7 +194,8 @@ def validate_wheels(wheel_dir, identifiers, version, lane=None):
         raise ValueError("Duplicate cibuildwheel identifiers")
     if lane is not None and (lane not in LANE_PLATFORMS or expected != lane_identifiers(lane)):
         raise ValueError(f"Identifier inventory disagrees with lane: {lane}")
-    wheels = sorted(wheel_dir.glob("*.whl"))
+    wheels = sorted(path for path in wheel_dir.glob("*.whl")
+                    if not (allow_mcp and path.name.startswith("iccdev_mcp-")))
     covered = set()
     for wheel in wheels:
         parts = wheel.name[:-4].split("-")
@@ -182,17 +223,24 @@ def validate_wheels(wheel_dir, identifiers, version, lane=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel_dir", type=Path)
-    parser.add_argument("--identifiers", type=Path, required=True)
+    inventory = parser.add_mutually_exclusive_group(required=True)
+    inventory.add_argument("--identifiers", type=Path)
+    inventory.add_argument("--release", action="store_true",
+                           help="Require all 45 iccdev binding wheels; validate MCP separately")
     parser.add_argument("--lane", choices=sorted(LANE_PLATFORMS),
                         help="Require the complete repository inventory for this CI lane")
     args = parser.parse_args()
+    if args.release and args.lane:
+        parser.error("--lane requires --identifiers, not --release")
     repo_root = Path(__file__).resolve().parents[2]
     try:
         wheels = validate_wheels(
             args.wheel_dir,
-            args.identifiers.read_text(encoding="ascii").split(),
+            (sorted(set().union(*(lane_identifiers(lane) for lane in LANE_PLATFORMS)))
+             if args.release else args.identifiers.read_text(encoding="ascii").split()),
             package_version(repo_root),
             lane=args.lane,
+            allow_mcp=args.release,
         )
     except (ValueError, OSError, KeyError, zipfile.BadZipFile) as error:
         parser.exit(1, f"[FAIL] {error}\n")
