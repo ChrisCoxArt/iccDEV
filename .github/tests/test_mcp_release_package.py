@@ -125,3 +125,38 @@ def test_release_proves_both_installation_modes_and_collects_mcp_artifacts():
     assert '-name \'*.tar.gz\'' in steps["Generate release checksums"]["run"]
     assert "release-assets/*.tar.gz" in steps["Create latest release"]["run"]
     assert steps["Attest release archive provenance"]["with"]["subject-checksums"] == "release-assets/SHA256SUMS"
+
+
+def test_release_uses_opt_in_iccdev_trusted_pypi_publication_and_public_smoke():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ci-latest-release.yml").read_text(encoding="ascii")
+    )
+    dispatch = workflow["on"]["workflow_dispatch"]["inputs"]["pypi_packages"]
+    assert dispatch["type"] == "choice" and dispatch["default"] == "none"
+    assert dispatch["options"] == ["none", "iccdev"]
+
+    release = workflow["jobs"]["release"]
+    assert release["permissions"]["id-token"] == "write"
+    assert "'release'" in release["environment"]["name"]
+    steps = {step["name"]: step for step in release["steps"]}
+    stage = steps["Stage validated PyPI distributions"]
+    assert "inputs.pypi_packages == 'iccdev'" in stage["if"]
+    assert "validate-python-release-wheels.py release-assets --release" in stage["run"]
+    assert '"$distribution_count" -ne 45' in stage["run"]
+    assert "iccdev-mcp" not in stage["run"]
+
+    publish_iccdev = steps["Publish iccdev to PyPI"]
+    assert publish_iccdev["uses"] == \
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    assert publish_iccdev["with"]["packages-dir"] == "pypi-iccdev/"
+    assert publish_iccdev["with"]["attestations"] is True
+    assert "password" not in publish_iccdev["with"]
+    assert "Publish iccdev-mcp to PyPI" not in steps
+    assert "Verify public iccdev-mcp installation" not in steps
+
+    iccdev_smoke = steps["Verify public iccdev installation"]["run"]
+    assert "https://pypi.org/simple" in iccdev_smoke
+    assert "ICCDEV_REQUIRE_INSTALLED_PACKAGE=1" in iccdev_smoke
+    summary = steps["Summary Report"]
+    assert "PYPI_MCP_OUTCOME" not in summary["env"]
+    assert "PyPI iccdev-mcp publication" not in summary["run"]

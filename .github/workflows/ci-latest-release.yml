@@ -35,10 +35,19 @@ permissions:
 
 "on":
   workflow_dispatch:
+    inputs:
+      pypi_packages:
+        description: Validated iccdev distributions to publish to PyPI
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - iccdev
 
 concurrency:
   group: "latest-release-${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   cache-policy:
@@ -1059,8 +1068,12 @@ jobs:
             emmake make install
             cd "$THIRD_PARTY"
 
-            # libpng (checksum verified)
-            curl -sLO https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
+            # libpng (bounded download retries and checksum verification)
+            curl --fail --location --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+              --connect-timeout 30 --max-time 60 \
+              --output libpng-1.6.57.tar.gz \
+              https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
             echo "01fdab044cdc575c74a9ef62a4042fbe24fea8bedfe8aa5c89f4467b781bbb60  libpng-1.6.57.tar.gz" | sha256sum -c -
             tar -xzf libpng-1.6.57.tar.gz && mv libpng-1.6.57 libpng && cd libpng
             CPPFLAGS="-I$THIRD_PARTY/zlib" LDFLAGS="-L$THIRD_PARTY/zlib/out/lib" \
@@ -1069,8 +1082,12 @@ jobs:
             emmake make install
             cd "$THIRD_PARTY"
 
-            # libjpeg (checksum verified)
-            curl -sLO https://ijg.org/files/jpegsrc.v9e.tar.gz
+            # libjpeg (bounded download retries and checksum verification)
+            curl --fail --location --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+              --connect-timeout 30 --max-time 60 \
+              --output jpegsrc.v9e.tar.gz \
+              https://ijg.org/files/jpegsrc.v9e.tar.gz
             echo "4077d6a6a75aeb01884f708919d25934c93305e49f7e3f36db9129320e6f4f3d  jpegsrc.v9e.tar.gz" | sha256sum -c -
             tar -xzf jpegsrc.v9e.tar.gz && mv jpeg-9e libjpeg && cd libjpeg
             emconfigure ./configure --prefix="$THIRD_PARTY/libjpeg/out" --disable-shared --enable-static
@@ -1828,7 +1845,9 @@ jobs:
           unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
           python -m pip install "build>=1.2,<1.7" "twine>=5,<8" "PyYAML>=6,<7"
           python -m pip install -e "./iccdev-mcp[dev,rest]"
-          python -m pytest --rootdir . --import-mode=importlib .github/tests/test_mcp_release_package.py -q
+          python -m pytest --rootdir . --import-mode=importlib \
+            .github/tests/test_mcp_release_package.py \
+            .github/tests/test_wasm_workflow.py -q
           python -m pytest --rootdir . --import-mode=importlib iccdev-mcp/tests/test_server.py iccdev-mcp/tests/test_rest_api.py -q
           python .github/scripts/iccdev-mcp-package-smoke.py --source-tree
           python -m build iccdev-mcp --outdir mcp-dist
@@ -2265,6 +2284,75 @@ jobs:
             --notes-file "$body_file" \
             --latest
 
+      - name: Stage validated PyPI distributions
+        if: ${{ inputs.pypi_packages == 'iccdev' && github.ref == 'refs/heads/master' }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+
+          python3 .github/scripts/validate-python-release-wheels.py release-assets --release
+          mkdir -p pypi-iccdev
+          cp release-assets/iccdev-*.whl pypi-iccdev/
+          distribution_count="$(find pypi-iccdev -maxdepth 1 -type f | wc -l)"
+          if [[ "$distribution_count" -ne 45 ]]; then
+            echo "::error::Expected 45 iccdev wheels, found $(sanitize_line "$distribution_count")"
+            exit 1
+          fi
+
+      - name: Publish iccdev to PyPI
+        id: pypi_iccdev
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              inputs.pypi_packages == 'iccdev' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: pypi-iccdev/
+          attestations: true
+          verbose: true
+
+      # preflight: allow-package-install reason=post-publication-pypi-smoke
+      - name: Verify public iccdev installation
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              inputs.pypi_packages == 'iccdev' }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
+
+          iccdev_version="$(python3 -c 'import re,pathlib; print(re.search(r"(?m)^version = \"([^\"]+)\"", pathlib.Path("python/pyproject.toml").read_text()).group(1))')"
+          install_with_retry() {
+            local interpreter="$1"
+            shift
+            for attempt in {1..12}; do
+              if "$interpreter" -m pip install --no-cache-dir \
+                   --index-url https://pypi.org/simple "$@"; then
+                return 0
+              fi
+              if [[ "$attempt" -eq 12 ]]; then
+                return 1
+              fi
+              sleep 15
+            done
+          }
+
+          iccdev_environment="$(mktemp -d)/iccdev"
+          python3 -m venv "$iccdev_environment"
+          install_with_retry "$iccdev_environment/bin/python" --only-binary=:all: \
+            "iccdev==$iccdev_version" "pytest>=9.0.3,<10" "numpy>=1.23,<3"
+          ICCDEV_REQUIRE_INSTALLED_PACKAGE=1 "$iccdev_environment/bin/python" \
+            -m pytest --rootdir . --import-mode=importlib python/tests -q -m "not parity"
+
       - name: Summary Report
         if: always()
         shell: bash --noprofile --norc {0}
@@ -2272,6 +2360,7 @@ jobs:
           BASH_ENV: /dev/null
           RELEASE_OUTCOME: ${{ steps.publish.outcome }}
           ATTESTATION_OUTCOME: ${{ steps.attest.outcome }}
+          PYPI_ICCDEV_OUTCOME: ${{ steps.pypi_iccdev.outcome }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -2297,6 +2386,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA:0:7}\`"
             echo "- Release publication: ${RELEASE_OUTCOME:-skipped}"
             echo "- Artifact attestation: ${ATTESTATION_OUTCOME:-skipped}"
+            echo "- PyPI iccdev publication: ${PYPI_ICCDEV_OUTCOME:-skipped}"
             echo "- Assets staged: ${asset_count} package files"
             echo ""
             for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl release-assets/*.tar.gz; do
