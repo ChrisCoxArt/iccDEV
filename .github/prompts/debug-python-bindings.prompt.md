@@ -3,6 +3,31 @@
 Use this prompt when the iccdev Python/Cython package fails to build, import, or
 produces incorrect results from ICC profile operations.
 
+For the interim compiler-free install, use a compatible `.whl` asset from a
+successful rolling Latest Build, then `python -m pip install "<wheel-asset-URL>"`.
+Check CPython ABI, OS, and architecture before diagnosing a rejected wheel.
+PyPI publication is separate and pending account setup. For release failures,
+run the workflow regression suites from the repository root:
+
+```bash
+python -m pytest --rootdir . --import-mode=importlib .github/tests/test_python_release_wheels.py .github/tests/test_python_test_collection.py -q
+```
+
+Validate each lane with `python .github/scripts/validate-python-release-wheels.py
+<wheel-dir> --identifiers <wheel-dir>/build-identifiers.txt --lane <lane-id>`.
+The lane selects the complete expected inventory independently of the artifact.
+See `docs/python-packaging-release.md` for the artifact and source-build paths.
+
+For wheel CI failures, inspect the shared `_build-python-wheels.yml` used by
+both `ci-json-python` and `ci-latest-release`. Python 3.13 drives cibuildwheel
+3.4.0 for the full seven-lane CPython 3.9-3.13 matrix. Windows ARM64 Python
+3.9/3.10 omit optional NumPy; other targets require binary NumPy wheels. Both
+callers run the installed-wheel `not parity` suite. Primary CI keeps its
+native parity and sdist checks, rejects empty test collection, and disables
+shared wheel artifact upload (`upload-wheels: false`); the release caller uploads
+explicitly named artifacts (`upload-wheels: true`). Keep wheel build jobs
+unprivileged and release credentials confined to their publishing steps.
+
 ## Build Diagnostics
 
 1. **Check Cython compilation**

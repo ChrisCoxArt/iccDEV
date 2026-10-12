@@ -1095,10 +1095,18 @@ On Windows, run from a Developer Command Prompt or another shell where `cl.exe`
 is already available. The package build reuses that environment instead of
 launching another `vcvarsall.bat`, which avoids failures from very long
 developer `PATH` values. Native-backed parity tests use the built iccDEV tools
-for ProfileLib, XML, and JSON parity; cibuildwheel keeps using the lightweight
-`not parity` subset so isolated wheel tests do not require repository build
-artifacts.
-For Python packaging PR gates, merge criteria, and production PyPI release
+for ProfileLib, XML, and JSON parity. `ci-json-python` and `ci-latest-release`
+share `_build-python-wheels.yml`, using Python 3.13 to drive cibuildwheel 3.4.0
+for seven platform lanes and 45 CPython 3.9-3.13 wheels. Both callers run the
+installed-wheel `not parity` unit suite without native build artifacts.
+Windows ARM64 Python 3.9/3.10 test without optional NumPy; other wheel targets
+require binary NumPy wheels. Primary CI retains native parity and isolated
+sdist tests, fails on empty test collection, and disables wheel artifact
+upload for the shared matrix. Release CI enables explicitly named artifacts and validates every
+expected wheel before release upload. CMake/CTest and CPack still own
+the native tool and runtime packages; the Python wheels bundle the portable
+core and do not depend on those package generators.
+For interim GitHub wheels, Python packaging PR gates, merge criteria, and production PyPI release
 steps, see [Python packaging PR, merge, and production release](python-packaging-release.md).
 
 ## vcpkg Consumers

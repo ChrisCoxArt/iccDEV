@@ -1,8 +1,72 @@
 # Python packaging PR, merge, and production release
 
-This guide applies to the `python/` package on the `pip-install-iccdev` branch.
+This guide applies to the `python/` package on the default `master` branch.
 It separates PR validation, branch merge criteria, and production release steps.
 Do not publish Python artifacts from a pull request branch.
+
+## Interim GitHub release wheels
+
+Both `ci-json-python.yml` and the manual `ci-latest-release.yml` call
+`.github/workflows/_build-python-wheels.yml` to build CPython 3.9-3.13 wheels
+directly from their checked-out commit. Seven matrix lanes produce 45 wheels
+covering Linux x86_64/aarch64 (manylinux and musllinux), macOS
+x86_64/arm64/universal2, and Windows AMD64/ARM64. The shared build driver uses
+Python 3.13 and pins cibuildwheel 3.4.0, including when building older Python
+wheels. Primary Python CI sets `upload-wheels: false`; the release caller sets
+`upload-wheels: true`.
+No PyPI account, publishing token, or PyPI upload is required for this route.
+
+Wheel jobs compile the portable bundled library without a prebuilt CMake
+tree and run installed-package unit tests, including core profile and CMM
+operations. Native parity tests remain in `ci-json-python`. The universal2
+arm64 slice is tested on its build host; its x86_64 slice is not executed
+there, while the separate x86_64 lane tests native Intel wheels.
+
+NumPy is optional. Windows ARM64 CPython 3.9/3.10 test the core without it
+because NumPy publishes no compatible wheels for those targets; the existing
+NumPy test uses `pytest.importorskip`. Other targets retain NumPy coverage.
+The test dependency installer requires binary NumPy wheels to avoid an
+unrelated source build inside wheel validation.
+
+For the release caller, each lane uploads an explicit `iccdev-python-<lane>`
+artifact with its wheels and cibuildwheel identifier inventory. The release
+job downloads all seven artifacts by name and validates version,
+ABI/platform coverage, native extension, type stubs, and complete canonical
+BSD-3-Clause license contents before copying raw `.whl` assets into the release.
+Both producer and release consumer pass `--lane <lane-id>` to the validator,
+which independently requires that lane's full five- or ten-target inventory.
+Missing, duplicate, or foreign identifiers cannot narrow the expected targets.
+Inconsistent wheel metadata/tags, unsafe or duplicate archive members, and
+missing, duplicate, or unexpected wheels stop publication. Wheels
+participate in `SHA256SUMS`, `SHA512SUMS`, and artifact provenance alongside
+the native packages. No PR artifacts or mutable build caches are reused.
+
+Wheel jobs retain read-only repository permissions, clear Git credentials and
+`GITHUB_TOKEN` before running package code, and do not receive publishing
+secrets. Release write and attestation permissions belong to the release job;
+`GH_TOKEN` is supplied only to its publish step. Keep the governed Bash and
+PowerShell prologues in the reusable native jobs. The release summary
+sanitizes dynamic values and reports actual publication and attestation
+outcomes separately from locally staged assets.
+
+Dispatch on a work branch builds and tests artifacts without publishing a
+release; the existing release job branch allowlist stays in force. After
+merge, a maintainer can manually run the workflow on `master` to publish a
+new rolling Latest Build. Existing release assets are not modified.
+
+Users choose a compatible wheel on the
+[Latest Build page](https://github.com/InternationalColorConsortium/iccDEV/releases/latest),
+copy its exact release-tag download URL, and run:
+
+```bash
+python -m pip install "<wheel-asset-URL>"
+```
+
+Downloading the wheel and installing its local path also works. The wheel
+contains the core library; CLI-backed helpers need the native tools separately.
+Until the first successful release run with these changes, use the source
+install documented in the user guide. Production PyPI publication remains a
+separate maintainer action after account and trusted-publisher setup.
 
 ## Pull request validation
 
@@ -40,11 +104,37 @@ CRT libraries are only valid with a debug Python interpreter or explicit
 authoritative and must not be rescued by another Release library elsewhere in
 the checkout.
 
-The PR must also pass the `ci-json-python` workflow. That workflow validates
-Linux builds for Python 3.12 and 3.13 and macOS and Windows builds for Python
-3.9, 3.12, and 3.13, builds source and wheel artifacts, runs `twine check`,
-prints cibuildwheel identifiers for all target platforms, and runs a native
-wheel smoke build on each hosted platform.
+The PR must also pass the `ci-json-python` workflow. Its native binding and
+parity jobs cover Linux and Windows builds for Python 3.12 and 3.13 and macOS
+builds for Python 3.9, 3.12, and 3.13. It retains isolated sdist installation
+and `twine check`, and calls the same seven-lane installed-wheel matrix as the
+release workflow, including Windows ARM64 Python 3.9/3.10. The shared wheel
+matrix replaces the former per-platform cibuildwheel import smoke builds:
+primary CI passes `run-wheel-smoke: false` to its native build jobs. Other
+callers retain their existing bounded 2.x smoke driver through the default
+`run-wheel-smoke: true`. Pytest exit code 5 (no tests collected) is a failure
+in primary CI. Windows native parity uses CMake's `bin/Release` runtime
+directory and requires all eight CLI tools before pytest, preventing a
+missing tool path from silently skipping the native comparisons. The test
+helper retains legacy `Tools/<target>/<config>` discovery for other builds.
+The shared wheel workflow runs the wiring and collection
+regressions in every lane. Run them locally from the repository root using
+Python 3.13 with cibuildwheel 3.4.0, pytest, PyYAML, and packaging installed so
+the wheel inventory test is collected:
+
+```bash
+python -m pytest --rootdir . --import-mode=importlib .github/tests/test_python_release_wheels.py .github/tests/test_python_test_collection.py -q
+python .github/scripts/validate-python-release-wheels.py <wheel-dir> --identifiers <wheel-dir>/build-identifiers.txt --lane <lane-id>
+```
+
+The lane IDs are `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-arm64`,
+`macos-universal2`, `windows-amd64`, and `windows-arm64`. Omitting `--lane`
+permits ad-hoc subset checks; release producers and consumers must specify it.
+These tests cover workflow and artifact contracts and do not need native
+CTest registration. CMake/CTest and CPack retain their native build, test,
+and runtime-package responsibilities; setuptools and Cython produce wheels.
+Release-wheel testing does not establish native sanitizer coverage. Run
+separate instrumented native checks when fixing library behavior.
 
 Run pytest from the repository root with `--import-mode=importlib`. Installed
 wheel validation must also set `ICCDEV_REQUIRE_INSTALLED_PACKAGE=1`; the test
@@ -98,12 +188,14 @@ by maintainers, not from a PR branch or CI scratch artifact.
 
    ```bash
    cd python
-   python -m pip install --upgrade "build>=1.2,<1.4" "twine>=5.0,<7" "cibuildwheel>=2.23,<3"
+   python -m pip install --upgrade "build>=1.2,<1.4" "twine>=5.0,<7" "cibuildwheel==3.4.0"
    python -m build --sdist --wheel
    python -m twine check dist/*.whl dist/*.tar.gz
    python -m cibuildwheel --output-dir wheelhouse
    ```
 
+   Run the cibuildwheel driver with Python 3.13, as in the shared CI workflow;
+   it can still build the configured Python 3.9-3.13 wheels.
    The `sdist` build command vendors `IccProfLib` automatically so `pip install
    iccdev` can build without a repository checkout. `vendor_iccproflib.py`
    remains available for manual inspection or cleanup, but a release build must

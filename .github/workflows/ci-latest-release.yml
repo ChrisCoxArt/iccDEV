@@ -1769,9 +1769,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  python-wheels:
+    needs: cache-policy
+    uses: ./.github/workflows/_build-python-wheels.yml
+    with:
+      upload-wheels: true
+
   release:
     name: "Publish Latest Release"
-    needs: [linux, macos, windows, wasm, cpack-linux, doxygen]
+    needs: [linux, macos, windows, wasm, cpack-linux, doxygen, python-wheels]
     if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' || github.ref == 'refs/heads/ci-publish-colourbill-ctrl' }}
     runs-on: ubuntu-latest
     environment:
@@ -1831,6 +1837,48 @@ jobs:
           name: reficcmax-runtime-packages-linux
           path: artifacts/reficcmax-runtime-packages-linux
 
+      - name: Download Linux x86_64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-linux-x86_64
+          path: artifacts/iccdev-python-linux-x86_64
+
+      - name: Download Linux aarch64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-linux-aarch64
+          path: artifacts/iccdev-python-linux-aarch64
+
+      - name: Download macOS x86_64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-x86_64
+          path: artifacts/iccdev-python-macos-x86_64
+
+      - name: Download macOS arm64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-arm64
+          path: artifacts/iccdev-python-macos-arm64
+
+      - name: Download macOS universal2 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-universal2
+          path: artifacts/iccdev-python-macos-universal2
+
+      - name: Download Windows AMD64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-windows-amd64
+          path: artifacts/iccdev-python-windows-amd64
+
+      - name: Download Windows ARM64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-windows-arm64
+          path: artifacts/iccdev-python-windows-arm64
+
       - name: Restore release artifact metadata
         shell: bash --noprofile --norc {0}
         env:
@@ -1854,6 +1902,13 @@ jobs:
             iccdev-wasm-release
             iccdev-doxygen-html
             reficcmax-runtime-packages-linux
+            iccdev-python-linux-x86_64
+            iccdev-python-linux-aarch64
+            iccdev-python-macos-x86_64
+            iccdev-python-macos-arm64
+            iccdev-python-macos-universal2
+            iccdev-python-windows-amd64
+            iccdev-python-windows-arm64
           )
           for artifact in "${expected[@]}"; do
             if [ ! -d "artifacts/$artifact" ]; then
@@ -1931,9 +1986,16 @@ jobs:
 
           mkdir -p release-assets
 
+          for id in linux-x86_64 linux-aarch64 macos-x86_64 macos-arm64 macos-universal2 windows-amd64 windows-arm64; do
+            wheel_dir="artifacts/iccdev-python-$id"
+            python3 .github/scripts/validate-python-release-wheels.py "$wheel_dir" --identifiers "$wheel_dir/build-identifiers.txt" --lane "$id"
+            cp "$wheel_dir"/*.whl release-assets/
+          done
+
           for dir in artifacts/iccdev-*; do
             [ -d "$dir" ] || continue
             name="$(basename "$dir")"
+            [[ "$name" == iccdev-python-* ]] && continue
             echo "--- Packaging $name ---"
             (cd "$dir" && zip -r "../../release-assets/${name}.zip" . \
               -x './binary-hardening.md' \
@@ -1994,12 +2056,12 @@ jobs:
           (
             cd release-assets
             find . -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.whl' \) \
               -printf '%P\0' \
               | sort -z \
               | xargs -0 sha256sum > SHA256SUMS
             find . -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.whl' \) \
               -printf '%P\0' \
               | sort -z \
               | xargs -0 sha512sum > SHA512SUMS
@@ -2008,7 +2070,7 @@ jobs:
           {
             echo "### Release Checksums"
             echo ""
-            echo "Generated \`SHA256SUMS\` and \`SHA512SUMS\` for release zip assets."
+            echo "Generated \`SHA256SUMS\` and \`SHA512SUMS\` for release packages and Python wheels."
             echo ""
             echo '```'
             sed -n '1,20p' release-assets/SHA256SUMS | while IFS= read -r line; do
@@ -2019,12 +2081,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
       - name: Attest release archive provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v3.2.0
         with:
           subject-checksums: release-assets/SHA256SUMS
 
       # preflight: allow-token-exposure reason=github-release-publish
       - name: Create latest release
+        id: publish
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2063,6 +2127,7 @@ jobs:
             echo "| WASM (Emscripten) | \`iccdev-wasm-release.zip\` |"
             echo "| Doxygen HTML Docs | \`iccdev-doxygen-html.zip\` |"
             echo "| Linux CPack Runtime | \`reficcmax-*.zip\`, \`reficcmax-*.deb\`, \`reficcmax-*.rpm\` |"
+            echo "| Python (CPython 3.9-3.13) | \`iccdev-*.whl\` for Linux, macOS, and Windows |"
             echo "| Checksums | \`SHA256SUMS\`, \`SHA512SUMS\` |"
             echo ""
             echo "### Provenance"
@@ -2079,6 +2144,14 @@ jobs:
             echo "| **Docker Pull** | \`docker pull ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
             echo "| **Docker Run** | \`docker run -it ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
             echo ""
+            echo "### Install Python without a compiler"
+            echo ""
+            echo "Choose the .whl asset matching your CPython version, OS, and architecture."
+            echo "Run \`python -m pip install \"<copied-wheel-asset-URL>\"\` or download the wheel and install its local path."
+            echo "PyPI publication is separate; these wheels require no PyPI account."
+            echo "Linux wheels cover manylinux and musllinux x86_64/aarch64; macOS covers x86_64/arm64/universal2; Windows covers AMD64/ARM64."
+            echo "Core profile/CMM APIs are self-contained. CLI-backed helpers need the matching native tool bundle."
+            echo ""
             echo "---"
             echo "*Auto-published by ci-latest-release.*"
           } > "$body_file"
@@ -2087,6 +2160,7 @@ jobs:
             release-assets/*.zip \
             release-assets/*.deb \
             release-assets/*.rpm \
+            release-assets/*.whl \
             release-assets/SHA256SUMS \
             release-assets/SHA512SUMS \
             --repo "$GH_REPOSITORY" \
@@ -2100,24 +2174,40 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
+          RELEASE_OUTCOME: ${{ steps.publish.outcome }}
+          ATTESTATION_OUTCOME: ${{ steps.attest.outcome }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           git config --global --add safe.directory "$PWD"
+          if [[ -f .github/scripts/sanitize-sed.sh ]]; then
+            source .github/scripts/sanitize-sed.sh
+          else
+            # always() also runs after a failed checkout. Keep that summary safe.
+            sanitize_line() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._:/#=-'; }
+            sanitize_filename() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9._-'; }
+          fi
           release_tag="ci-latest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+          asset_count=0
+          for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl; do
+            [ -f "$f" ] || continue
+            asset_count=$((asset_count + 1))
+          done
           {
             echo "### Release Summary"
             echo ""
             echo "- Tag: \`${release_tag}\`"
             echo "- Commit: \`${GITHUB_SHA:0:7}\`"
-            asset_count=$(find release-assets -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) | wc -l)
-            echo "- Assets uploaded: ${asset_count} package files"
-            echo "- Provenance: GitHub Artifact Attestations generated from \`SHA256SUMS\`"
+            echo "- Release publication: ${RELEASE_OUTCOME:-skipped}"
+            echo "- Artifact attestation: ${ATTESTATION_OUTCOME:-skipped}"
+            echo "- Assets staged: ${asset_count} package files"
             echo ""
-            for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm; do
+            for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl; do
               [ -f "$f" ] || continue
-              echo "  - \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
+              printf '  - %s\n' "$(sanitize_filename "$(basename "$f")")"
             done
-          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          } | while IFS= read -r line; do
+            sanitize_line "$line"
+            printf '\n'
+          done >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

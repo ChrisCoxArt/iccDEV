@@ -66,7 +66,7 @@ locations.
 ## Dependencies and Build Constraints
 
 - Python 3.9+
-- Cython >= 3.0,<3.2 for all source builds
+- Cython >= 3.0,<3.4 for all source builds
 - NumPy >= 1.23,<3 for array operations
 - setuptools >= 77,<85 (PEP 639 license metadata)
 - Dev extras: pytest, numpy, build, wheel, twine, cibuildwheel
@@ -124,6 +124,32 @@ cmm.begin()
 
 Use `docs/python-packaging-release.md` as the maintainer source for Python
 package PR validation, merge criteria, and production PyPI release steps.
+Both `ci-json-python` and `ci-latest-release` call the shared
+`.github/workflows/_build-python-wheels.yml` using Python 3.13 and
+cibuildwheel 3.4.0. Keep its seven lanes, 45 CPython 3.9-3.13 wheels, and
+installed-wheel `not parity` tests aligned for both callers. Windows ARM64
+Python 3.9/3.10 omit optional NumPy; other wheel targets install binary NumPy.
+Primary CI retains native parity and isolated sdist tests, and treats pytest
+exit code 5 (no tests collected) as failure. It sets `upload-wheels: false`
+and requires Windows parity tools in `out/vs2022-vcpkg/bin/Release` before
+testing. Keep the parity helper aligned with both unified `bin` and legacy
+`Tools` CMake layouts. It disables duplicate native wheel smokes with
+`run-wheel-smoke: false`;
+other native workflow callers retain the default smoke check. The release
+caller sets `upload-wheels: true` for explicitly named `iccdev-python-*`
+artifacts.
+Validate every lane's identifier inventory with
+`.github/scripts/validate-python-release-wheels.py --lane <lane-id>` alongside
+the wheel directory and `--identifiers` file. The lane contract must reject
+missing or foreign identifiers independently of the downloaded inventory;
+validate wheel metadata/tags, safe unique archive members, and complete
+canonical BSD-3-Clause license contents. Include release wheels in
+checksums/provenance. Do not publish PR artifacts.
+Keep wheel build jobs unprivileged, artifact downloads explicitly named, and
+PyPI publication separate until maintainers configure their account.
+Keep the workflow/artifact regression suites in the shared wheel workflow;
+they do not require native CTest targets. Native sanitizer validation remains
+separate from portable release-wheel testing.
 Python packaging PRs must pass `ci-json-python`, keep
 `python/pyproject.toml` and `python/iccdev/__init__.py` versions synchronized,
 and avoid committing generated `dist/`, `wheelhouse/`, build tree, virtual
