@@ -82,6 +82,61 @@ function(iccdev_add_regression_executable TARGET_NAME)
   add_dependencies(build-test-binaries "${TARGET_NAME}")
 endfunction()
 
+# Native extraction safety must run on Windows as well as Unix, without the
+# optional Nokia reader or the bash-backed carrier suite.
+if(TARGET iccHeifDump)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME iccdev.heif-output-safety
+      COMMAND "${Python3_EXECUTABLE}"
+        "${ICCDEV_REPO_ROOT}/.github/scripts/test_heif_output_safety.py"
+        --tool "$<TARGET_FILE:iccHeifDump>"
+        --corpus "${ICCDEV_REPO_ROOT}/.github/ci/tooling/heif/img")
+    set_tests_properties(iccdev.heif-output-safety PROPERTIES
+      TIMEOUT 120
+      LABELS "iccdev;heif;image;regression;issue-2831")
+    if(WIN32)
+      set(_heif_windows_env_mods
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccHeifDump>")
+      foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+        list(APPEND _heif_windows_env_mods
+          "PATH=path_list_prepend:${_runtime_path}")
+      endforeach()
+      set_tests_properties(iccdev.heif-output-safety PROPERTIES
+        ENVIRONMENT_MODIFICATION "${_heif_windows_env_mods}")
+    endif()
+    add_dependencies(check iccHeifDump)
+  else()
+    message(STATUS "Skipping iccdev.heif-output-safety: Python3 interpreter not found")
+  endif()
+endif()
+
+if(TARGET iccJpegDump)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME iccdev.jpegdump-inspection
+      COMMAND "${Python3_EXECUTABLE}"
+        "${ICCDEV_REPO_ROOT}/.github/scripts/test_jpegdump_inspection.py"
+        --tool "$<TARGET_FILE:iccJpegDump>")
+    set_tests_properties(iccdev.jpegdump-inspection PROPERTIES
+      TIMEOUT 120
+      LABELS "iccdev;jpeg;image;regression;issue-2685")
+    if(WIN32)
+      set(_jpeg_windows_env_mods
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccJpegDump>")
+      foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+        list(APPEND _jpeg_windows_env_mods
+          "PATH=path_list_prepend:${_runtime_path}")
+      endforeach()
+      set_tests_properties(iccdev.jpegdump-inspection PROPERTIES
+        ENVIRONMENT_MODIFICATION "${_jpeg_windows_env_mods}")
+    endif()
+    add_dependencies(check iccJpegDump)
+  else()
+    message(STATUS "Skipping iccdev.jpegdump-inspection: Python3 interpreter not found")
+  endif()
+endif()
+
 # Regression executables link ${TARGET_LIB_ICCPROFLIB}, functions and exported
 # global data alike. There used to be a second link target here,
 # ${ICCDEV_TEST_LIB_ICCPROFLIB}, which resolved to IccProfLib2-static on Windows
@@ -120,6 +175,7 @@ function(iccdev_add_check_dependencies)
       iccFromCube
       iccFromJson
       iccFromXml
+      iccHeifDump
       iccJpegDump
       iccPngDump
       iccProfilePlot
