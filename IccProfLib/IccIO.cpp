@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -69,6 +45,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "IccIO.h"
+#include "IccSignatureUtils.h"
 #include "IccUtil.h"
 #include <cstdlib>
 #include <memory.h>
@@ -211,6 +188,7 @@ size_t CIccIO::Read16(void *pBuf16, size_t nNum)
   icSwab16Array(pBuf16, nNum);
 #endif
 
+  ICC_TAINT_TRACE_BUFFER("io.read16", "destination-write", pBuf16, nNum, 2);
   return nNum;
 }
 
@@ -218,6 +196,8 @@ size_t CIccIO::Write16(void *pBuf16, size_t nNum)
 {
   if (!pBuf16)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write16", "source-read", pBuf16, nNum, 2);
 
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf16, nNum<<1)>>1;
@@ -260,6 +240,7 @@ size_t CIccIO::Read32(void *pBuf32, size_t nNum)
   icSwab32Array(pBuf32, nNum);
 #endif
 
+  ICC_TAINT_TRACE_BUFFER("io.read32", "destination-write", pBuf32, nNum, 4);
   return nNum;
 }
 
@@ -268,6 +249,8 @@ size_t CIccIO::Write32(void *pBuf32, size_t nNum)
 {
   if (!pBuf32)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write32", "source-read", pBuf32, nNum, 4);
 
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf32, nNum<<2)>>2;
@@ -301,6 +284,7 @@ size_t CIccIO::Read64(void *pBuf64, size_t nNum)
   icSwab64Array(pBuf64, nNum);
 #endif
 
+  ICC_TAINT_TRACE_BUFFER("io.read64", "destination-write", pBuf64, nNum, 8);
   return nNum;
 }
 
@@ -309,6 +293,8 @@ size_t CIccIO::Write64(void *pBuf64, size_t nNum)
 {
   if (!pBuf64)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write64", "source-read", pBuf64, nNum, 8);
 
 #ifndef ICC_BYTE_ORDER_LITTLE_ENDIAN
   return Write8(pBuf64, nNum<<3)>>3;
@@ -348,6 +334,8 @@ size_t CIccIO::ReadUInt8Float(void *pBufFloat, size_t nNum)
     ptr++;
   }
 
+  ICC_TAINT_TRACE_BUFFER("io.read_uint8_float", "destination-write",
+                         pBufFloat, i, sizeof(icFloatNumber));
   return i;
 }
 
@@ -355,6 +343,9 @@ size_t CIccIO::WriteUInt8Float(void *pBufFloat, size_t nNum)
 {
   if (!pBufFloat)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write_uint8_float", "source-read", pBufFloat,
+                         nNum, sizeof(icFloatNumber));
 
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt8Number tmp;
@@ -390,6 +381,8 @@ size_t CIccIO::ReadUInt16Float(void *pBufFloat, size_t nNum)
     ptr++;
   }
 
+  ICC_TAINT_TRACE_BUFFER("io.read_uint16_float", "destination-write",
+                         pBufFloat, i, sizeof(icFloatNumber));
   return i;
 }
 
@@ -397,6 +390,9 @@ size_t CIccIO::WriteUInt16Float(void *pBufFloat, size_t nNum)
 {
   if (!pBufFloat)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write_uint16_float", "source-read", pBufFloat,
+                         nNum, sizeof(icFloatNumber));
 
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt16Number tmp;
@@ -432,6 +428,8 @@ size_t CIccIO::ReadFloat16Float(void *pBufFloat, size_t nNum)
     ptr++;
   }
 
+  ICC_TAINT_TRACE_BUFFER("io.read_float16_float", "destination-write",
+                         pBufFloat, i, sizeof(icFloatNumber));
   return i;
 }
 
@@ -439,6 +437,9 @@ size_t CIccIO::WriteFloat16Float(void *pBufFloat, size_t nNum)
 {
   if (!pBufFloat)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write_float16_float", "source-read", pBufFloat,
+                         nNum, sizeof(icFloatNumber));
 
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icUInt16Number tmp;
@@ -457,8 +458,12 @@ size_t CIccIO::WriteFloat16Float(void *pBufFloat, size_t nNum)
 
 size_t CIccIO::ReadFloat32Float(void *pBufFloat, size_t nNum)
 {
-  if (sizeof(icFloat32Number)==sizeof(icFloatNumber))
-    return Read32(pBufFloat, nNum);
+  if (sizeof(icFloat32Number)==sizeof(icFloatNumber)) {
+    const size_t nRead = Read32(pBufFloat, nNum);
+    ICC_TAINT_TRACE_BUFFER("io.read_float32_float", "destination-write",
+                           pBufFloat, nRead, sizeof(icFloatNumber));
+    return nRead;
+  }
 
   if (!pBufFloat)
     return 0;
@@ -474,6 +479,8 @@ size_t CIccIO::ReadFloat32Float(void *pBufFloat, size_t nNum)
     ptr++;
   }
 
+  ICC_TAINT_TRACE_BUFFER("io.read_float32_float", "destination-write",
+                         pBufFloat, i, sizeof(icFloatNumber));
   return i;
 }
 
@@ -484,6 +491,9 @@ size_t CIccIO::WriteFloat32Float(void *pBufFloat, size_t nNum)
 
   if (!pBufFloat)
     return 0;
+
+  ICC_TAINT_TRACE_BUFFER("io.write_float32_float", "source-read", pBufFloat,
+                         nNum, sizeof(icFloatNumber));
 
   icFloatNumber *ptr = (icFloatNumber*)pBufFloat;
   icFloat32Number tmp;
@@ -662,7 +672,10 @@ size_t CIccFileIO::Read8(void *pBuf, size_t nNum)
   if (!m_fFile || !pBuf)
     return 0;
 
-  return fread(pBuf, 1, nNum, m_fFile);
+  const size_t nRead = fread(pBuf, 1, nNum, m_fFile);
+  ICC_TAINT_TRACE_MEMORY_CONTEXT("file.read8", "destination-write",
+                                 "external-input", pBuf, nRead);
+  return nRead;
 }
 
 
@@ -671,6 +684,8 @@ size_t CIccFileIO::Write8(void *pBuf, size_t nNum)
   if (!m_fFile || !pBuf)
     return 0;
 
+  ICC_TAINT_TRACE_MEMORY_CONTEXT("file.write8", "source-read",
+                                 "external-output", pBuf, nNum);
   return fwrite(pBuf, 1, nNum, m_fFile);
 }
 
@@ -950,7 +965,9 @@ size_t CIccMemIO::Read8(void *pBuf, size_t nNum)
       memcpy(pBuf, m_pData + m_nPos, nNum);
       m_nPos += nNum;
   }
-    return nNum;
+  ICC_TAINT_TRACE_MEMORY_CONTEXT("memory.read8", "destination-write",
+                                 "caller-buffer", pBuf, nNum);
+  return nNum;
 }
 
 
@@ -961,6 +978,8 @@ size_t CIccMemIO::Write8(void *pBuf, size_t nNum)
 
   nNum = __min((m_nAvail-m_nPos), nNum);
 
+  ICC_TAINT_TRACE_MEMORY_CONTEXT("memory.write8", "source-read",
+                                 "caller-buffer", pBuf, nNum);
   memcpy(m_pData + m_nPos, pBuf, nNum);
 
   m_nPos += nNum;

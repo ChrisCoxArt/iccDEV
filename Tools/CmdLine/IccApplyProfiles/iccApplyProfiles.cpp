@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2016 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -72,9 +48,15 @@
 
 #include <cstdio>
 #include <cstdlib>  // EXIT_FAILURE, used by the argument-contract guards in main()
+#include <cerrno>
+#include <chrono>
+#include <cstring>  // strcmp, used by the -h/--help contract guard in main()
+#include <ctime>
 #include <memory>
 #include <string>
+#include <vector>
 #include "IccCmm.h"
+#include "IccCmmThread.h"
 #include "IccUtil.h"
 #include "IccDefs.h"
 #include "IccConnect.h"
@@ -82,6 +64,10 @@
 #include "IccProfLibVer.h"
 #include "IccLibConnectVer.h"
 #include "IccCmdLineUtil.h"
+#ifdef ICCDEV_TELEMETRY
+#include "IccApplyTelemetry.h"
+#endif
+#include "IccSameFile.h"
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -95,6 +81,167 @@ static FILE* OpenWriteTextFile(const std::string& path)
   // codeql[cpp/path-injection]
   return icOpenRegularWriteTextFile(path.c_str());
 }
+
+#ifdef ICCDEV_TELEMETRY
+enum icTelemetryMode {
+  icTelemetryOff,
+  icTelemetryHuman,
+  icTelemetryJsonl
+};
+
+struct CIccApplyTelemetry {
+  CIccApplyTelemetry()
+    : m_mode(icTelemetryOff), m_file(nullptr), m_sequence(0),
+      m_startedEvent(false), m_terminalEvent(false) {}
+
+  ~CIccApplyTelemetry()
+  {
+    if (m_file && m_startedEvent && !m_terminalEvent) {
+      try {
+        Emit("run_failed", {
+          {"status", "tool_failure"},
+          {"exit_code", -1},
+          {"reason", "early_exit"},
+          {"completed_pixels", 0}
+        });
+      }
+      catch (...) {
+        // An allocation failure may also prevent writing the final receipt.
+      }
+    }
+    if (m_file)
+      fclose(m_file);
+  }
+
+  bool Open(const std::string& path)
+  {
+    if (path.empty())
+      return false;
+
+    m_file = icOpenNewRegularWriteTextFile(path.c_str());
+    if (!m_file) {
+      if (errno == EEXIST) {
+        fprintf(stderr, "Telemetry file already exists: '%s'\n",
+                icSanitizeConsoleText(path.c_str()).c_str());
+      }
+      else {
+        fprintf(stderr, "Unable to create telemetry file '%s'\n",
+                icSanitizeConsoleText(path.c_str()).c_str());
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool Emit(const char* event, json record)
+  {
+    if (m_mode != icTelemetryJsonl)
+      return true;
+
+    record["schema"] = "iccdev-apply-telemetry/v1";
+    record["event"] = event;
+    record["sequence"] = ++m_sequence;
+    record["timestamp_utc"] = TimestampUtc();
+    record["monotonic_elapsed_ms"] = ElapsedMs();
+
+    const std::string line = record.dump();
+    if (fwrite(line.data(), 1, line.size(), m_file) != line.size() ||
+        fputc('\n', m_file) == EOF || fflush(m_file)) {
+      fprintf(stderr, "Unable to write telemetry event '%s'\n", event);
+      return false;
+    }
+    if (!strcmp(event, "run_started"))
+      m_startedEvent = true;
+    else if (!strcmp(event, "run_completed") || !strcmp(event, "run_failed"))
+      m_terminalEvent = true;
+    return true;
+  }
+
+  long long ElapsedMs() const
+  {
+    const std::chrono::steady_clock::duration elapsed =
+      std::chrono::steady_clock::now() - m_started;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  }
+
+  static std::string TimestampUtc()
+  {
+    const std::time_t now = std::time(nullptr);
+    struct tm utc;
+#if defined(_WIN32)
+    if (gmtime_s(&utc, &now))
+      return std::string();
+#else
+    if (!gmtime_r(&now, &utc))
+      return std::string();
+#endif
+    char text[32];
+    if (!strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc))
+      return std::string();
+    return text;
+  }
+
+  icTelemetryMode m_mode;
+  FILE* m_file;
+  unsigned long long m_sequence;
+  bool m_startedEvent;
+  bool m_terminalEvent;
+  std::chrono::steady_clock::time_point m_started = std::chrono::steady_clock::now();
+};
+#endif
+
+#ifdef ICCDEV_TELEMETRY
+static bool ParseUnsignedMilliseconds(const char* value, unsigned long& parsed)
+{
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long candidate = strtoul(value, &end, 10);
+  if (errno || end == value || *end || !candidate || candidate > 3600000)
+    return false;
+  parsed = candidate;
+  return true;
+}
+#endif
+
+static bool ParseBandRows(const char* value, unsigned long& parsed)
+{
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long candidate = strtoul(value, &end, 10);
+  if (errno || end == value || *end || !candidate || candidate > 64 ||
+      strspn(value, "0123456789") != strlen(value))
+    return false;
+  parsed = candidate;
+  return true;
+}
+
+#ifdef ICCDEV_TELEMETRY
+static bool OutputPathMustBeNew(const std::string& path, const char* description)
+{
+#if !defined(_WIN32)
+  struct stat fileStatus;
+  if (!lstat(path.c_str(), &fileStatus)) {
+    fprintf(stderr, "%s already exists: '%s'\n", description,
+            icSanitizeConsoleText(path.c_str()).c_str());
+    return false;
+  }
+  if (errno != ENOENT) {
+    fprintf(stderr, "Unable to inspect %s '%s'\n", description,
+            icSanitizeConsoleText(path.c_str()).c_str());
+    return false;
+  }
+#else
+  FILE* existing = fopen(path.c_str(), "rb");
+  if (existing) {
+    fclose(existing);
+    fprintf(stderr, "%s already exists: '%s'\n", description,
+            icSanitizeConsoleText(path.c_str()).c_str());
+    return false;
+  }
+#endif
+  return true;
+}
+#endif
 
 static bool GetFloatRowByteCount(unsigned int nWidth, int nSamples, size_t& nBytes)
 {
@@ -141,6 +288,15 @@ static bool AddPixelBufSlack(size_t& nBytes)
   return true;
 }
 
+static bool MultiplySize(size_t nValue, size_t nCount, size_t& nResult)
+{
+  if (nCount && nValue > (size_t)-1 / nCount)
+    return false;
+
+  nResult = nValue * nCount;
+  return true;
+}
+
 static icFloatNumber UnitClip(icFloatNumber v)
 {
   if (std::isnan(v))
@@ -170,128 +326,380 @@ static icUInt16Number UnitClipToUInt16(icFloatNumber v)
 
 
 
-void Usage() 
+void Usage(FILE* stream) 
 {
-  printf("iccApplyProfiles built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
+  fprintf(stream, "iccApplyProfiles built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
 
-  printf("Usage: iccApplyProfiles {-threads N} -cfg config_file\n\n");
-  printf("  Optional: -threads [N] (use N worker threads; 0=hardware concurrency, 1=single-threaded)\n");
-  printf("  Optional: -cfg config_file (use JSON formatted configuration file to define apply options)\n\n");
+  fprintf(stream, "Usage: iccApplyProfiles {--quiet} {--threads N} --cfg config_file\n\n");
+  fprintf(stream, "  --version prints tool and linked-library versions only.\n");
+#ifdef ICCDEV_TELEMETRY
+  fprintf(stream, "  --verbose writes a resolved-operation receipt to stderr.\n");
+  fprintf(stream, "  --debug writes verbose receipt plus batch progress to stderr.\n");
+#ifdef ICC_APPLY_BATCH_TIMING
+  fprintf(stream, "  This build also logs batch start, completion, and elapsed time with --debug.\n");
+#endif
+  fprintf(stream, "  --telemetry=jsonl requires --telemetry-file and writes JSONL sidecar events.\n");
+  fprintf(stream, "  --telemetry-interval-ms N sets the minimum progress interval (default 1000 ms).\n");
+  fprintf(stream, "  --evidence-file writes the final immutable JSON receipt after output close.\n");
+  fprintf(stream, "  Legacy --evidence-json remains accepted as an alias for --evidence-file.\n\n");
+#endif
+  fprintf(stream, "  --quiet suppresses normal progress output.\n");
+  fprintf(stream, "  Global options may be combined in any order before --cfg or the alternate-form arguments.\n");
+  fprintf(stream, "  Optional: --threads [N] (use 0..%d worker threads; 0=hardware concurrency, 1=single-threaded)\n",
+         CIccThreadedCmm::GetMaxThreads());
+  fprintf(stream, "  Optional: --cfg config_file (use JSON formatted configuration file to define apply options)\n\n");
 
-  printf("Alt-Usage: iccApplyProfiles {-threads N} {-exportcfg config_file} src_tiff_file dst_tiff_file dst_sample_encoding dst_compression dst_planar dst_embed_icc interpolation {{-ENV:sig value} profile_file_path rendering_intent {-PCC connection_conditions_path}}\n\n");
-  printf("  Optional: -threads [N] (use N worker threads; 0=hardware concurrency, 1=single-threaded)\n");
-  printf("  Optional: -exportcfg config_file (create config_file based on rest of arguments)\n\n");
-  printf("  For dst_sample_encoding:\n");
-  printf("    0 - Same as src\n");
-  printf("    1 - icEncode8Bit\n");
-  printf("    2 - icEncode16Bit\n");
-  printf("    3 - icEncodeFloat\n\n");
+  fprintf(stream, "Alt-Usage: iccApplyProfiles {--threads N} {--exportcfg config_file} src_tiff_file dst_tiff_file dst_sample_encoding dst_compression dst_planar dst_embed_icc interpolation {{-ENV:sig value} profile_file_path rendering_intent {-PCC connection_conditions_path}}\n\n");
+  fprintf(stream, "  Optional: --threads [N] (use 0..%d worker threads; 0=hardware concurrency, 1=single-threaded)\n",
+         CIccThreadedCmm::GetMaxThreads());
+  fprintf(stream, "  Optional: --exportcfg config_file (create config_file based on rest of arguments)\n");
+  fprintf(stream, "  Legacy single-dash forms (-threads, -cfg, and -exportcfg) remain accepted.\n\n");
+  fprintf(stream, "  For dst_sample_encoding:\n");
+  fprintf(stream, "    0 - Same as src\n");
+  fprintf(stream, "    1 - icEncode8Bit\n");
+  fprintf(stream, "    2 - icEncode16Bit\n");
+  fprintf(stream, "    3 - icEncodeFloat\n\n");
 
-  printf("  For dst_compression:\n");
-  printf("    0 - No compression\n");
-  printf("    1 - LZW compression\n\n");
+  fprintf(stream, "  For dst_compression:\n");
+  fprintf(stream, "    0 - No compression\n");
+  fprintf(stream, "    1 - LZW compression\n\n");
 
-  printf("  For dst_planar:\n");
-  printf("    0 - Contig\n");
-  printf("    1 - Separation\n\n");
+  fprintf(stream, "  For dst_planar:\n");
+  fprintf(stream, "    0 - Contig\n");
+  fprintf(stream, "    1 - Separation\n\n");
 
-  printf("  For dst_embed_icc:\n");
-  printf("    0 - Do not Embed\n");
-  printf("    1 - Embed Last ICC\n\n");
+  fprintf(stream, "  For dst_embed_icc:\n");
+  fprintf(stream, "    0 - Do not Embed\n");
+  fprintf(stream, "    1 - Embed Last ICC\n\n");
 
-  printf("  For interpolation:\n");
-  printf("    0 - Linear\n");
-  printf("    1 - Tetrahedral\n\n");
+  fprintf(stream, "  For interpolation:\n");
+  fprintf(stream, "    0 - Linear\n");
+  fprintf(stream, "    1 - Tetrahedral\n\n");
 
-  printf("  For rendering_intent:\n");
-  printf("    0 - Perceptual\n");
-  printf("    1 - Relative\n");
-  printf("    2 - Saturation\n");
-  printf("    3 - Absolute\n");
-  printf("    10 - Perceptual without D2Bx/B2Dx\n");
-  printf("    11 - Relative without D2Bx/B2Dx\n");
-  printf("    12 - Saturation without D2Bx/B2Dx\n");
-  printf("    13 - Absolute without D2Bx/B2Dx\n");
-  printf("    20 - Preview Perceptual\n");
-  printf("    21 - Preview Relative\n");
-  printf("    22 - Preview Saturation\n");
-  printf("    23 - Preview Absolute\n");
-  printf("    30 - Gamut\n");
-  printf("    33 - Gamut Absolute\n");
-  printf("    40 - Perceptual with BPC\n");
-  printf("    41 - Relative Colorimetric with BPC\n");
-  printf("    42 - Saturation with BPC\n");
-  printf("    50 - BDRF Parameters\n");
-  printf("    60 - BDRF Direct\n");
-  printf("    70 - BDRF MCS Parameters\n");
-  printf("    80 - MCS connection\n");
-  printf("  +1000 - Use Luminance based PCS adjustment\n");
-  printf(" +10000 - Use V5 sub-profile if present\n");
+  fprintf(stream, "  For rendering_intent:\n");
+  fprintf(stream, "    0 - Perceptual\n");
+  fprintf(stream, "    1 - Relative\n");
+  fprintf(stream, "    2 - Saturation\n");
+  fprintf(stream, "    3 - Absolute\n");
+  fprintf(stream, "    10 - Perceptual without D2Bx/B2Dx\n");
+  fprintf(stream, "    11 - Relative without D2Bx/B2Dx\n");
+  fprintf(stream, "    12 - Saturation without D2Bx/B2Dx\n");
+  fprintf(stream, "    13 - Absolute without D2Bx/B2Dx\n");
+  fprintf(stream, "    20 - Preview Perceptual\n");
+  fprintf(stream, "    21 - Preview Relative\n");
+  fprintf(stream, "    22 - Preview Saturation\n");
+  fprintf(stream, "    23 - Preview Absolute\n");
+  fprintf(stream, "    30 - Gamut\n");
+  fprintf(stream, "    33 - Gamut Absolute\n");
+  fprintf(stream, "    40 - Perceptual with BPC\n");
+  fprintf(stream, "    41 - Relative Colorimetric with BPC\n");
+  fprintf(stream, "    42 - Saturation with BPC\n");
+  // #2262: the acronym was transposed, B-D-R-F -- ICC.2-2023 9.2.14-17 and
+  // 9.2.26-29 spell the tags brdfAToB0Tag..brdfDToB3Tag, and the library's own
+  // identifiers already agree (icXformLutBRDFParam, icSigBRDFDToB0Tag,
+  // CIccStructBRDF).  The same three lines carry the typo in iccApplyNamedCmm
+  // and iccApplyToLink and are corrected there too.
+  //
+  // The four codes also take a rendering intent in their units digit, which
+  // printing them as flat values said they did not: CIccXform::Create() indexes
+  // a four-entry tag array with nTagIntent in each of the
+  // icXformLutBRDFParam..icXformLutMCS cases, and the decode that feeds it
+  // falls through its type switch for 5..8, so "nIntent % 10" reaches the
+  // intent unchanged.  80 is qualified because it is the one code where that is
+  // only half true: icXformLutMCS offsets by nTagIntent on its MVIS/Output
+  // branch (MToS0..3, MToB0..3) but reads a single AToM0Tag for
+  // MultiplexIdentification/Input and a single MToA0Tag for MultiplexLink, so
+  // 80..83 are indistinguishable in the to-MCS direction.
+  //
+  // Written in the "NN + Intent" form iccApplyNamedCmm uses for its 10/20/40
+  // rows rather than enumerated in this screen's own style:
+  // spelling out 50..53, 60..63, 70..73 and 80..83 would add twelve lines to
+  // say the same thing, and this way the three tools' BRDF and MCS rows agree
+  // line for line -- nothing had ever compared them, which is how the same
+  // three transforms came to be named two different ways.
+  fprintf(stream, "    50 + Intent - BRDF Parameters\n");
+  fprintf(stream, "    60 + Intent - BRDF Direct\n");
+  fprintf(stream, "    70 + Intent - BRDF MCS Parameters\n");
+  fprintf(stream, "    80 + Intent - MCS connection (Intent applies to MToS/MToB only)\n");
+  fprintf(stream, "  +1000 - Use Luminance based PCS adjustment\n");
+  fprintf(stream, " +10000 - Use V5 sub-profile if present\n");
 }
 
 //===================================================
 
+// #2692: every file a run reads -- the source image, the --cfg document, each
+// profile in the chain with its PCC file, and search mode's pccWeights.  An
+// output naming any of them destroyed it: the source TIFF is still being read
+// when the output is created, a profile is re-read afterwards to be embedded,
+// and a PCC profile is opened for loading tags on demand.
+static bool OutputIsAnInput(const char *szOut, const CIccCfgImageApply &cfgApply,
+                            const std::string &cfgFile,
+                            const CIccCfgProfileArray &profiles,
+                            const CIccCfgPccWeightArray &pccWeights)
+{
+  if (icOutputIsInput(szOut, cfgApply.m_srcImgFile.c_str()) ||
+      icOutputIsInput(szOut, cfgFile.c_str()))
+    return true;
+
+  for (size_t i = 0; i < profiles.size(); i++) {
+    if (profiles[i] &&
+        (icOutputIsInput(szOut, profiles[i]->m_iccFile.c_str()) ||
+         icOutputIsInput(szOut, profiles[i]->m_pccFile.c_str())))
+      return true;
+  }
+  for (size_t i = 0; i < pccWeights.size(); i++) {
+    if (pccWeights[i] && icOutputIsInput(szOut, pccWeights[i]->m_pccPath.c_str()))
+      return true;
+  }
+  return false;
+}
+
 int main(int argc, const char** argv)
 {
   int minargs = 2;
-  if (argc < minargs) {
-    Usage();
+  bool bQuiet = false;
+#ifdef ICCDEV_TELEMETRY
+  bool bVerbose = false;
+  bool bDebug = false;
+  icTelemetryMode telemetryMode = icTelemetryOff;
+  std::string telemetryFile;
+  std::string evidenceFile;
+  unsigned long telemetryIntervalMs = 1000;
+#endif
+  bool bThreadArg = false;
+  int nThreadArg = 0;
+
+  // An explicit help request is the one invocation here that is not an error, so
+  // it prints on stdout and exits 0; every malformed form below prints on stderr
+  // and fails.  Once both paths print the same screen the stream is the only
+  // thing that separates them -- status alone cannot (#1514).
+  if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+    Usage(stdout);
     return 0;
+  }
+
+  if (argc == 2 && !strcmp(argv[1], "--version")) {
+    printf("iccApplyProfiles IccProfLib=" ICCPROFLIBVER
+           " IccLibConnect=" ICCLIBCONNECTVER "\n");
+    return 0;
+  }
+
+  while (argc > 1) {
+#ifdef ICCDEV_TELEMETRY
+    if (!strcmp(argv[1], "--verbose")) {
+      bVerbose = true;
+    }
+    else if (!strcmp(argv[1], "--debug")) {
+      bVerbose = true;
+      bDebug = true;
+    }
+#else
+    if (!strcmp(argv[1], "--verbose") || !strcmp(argv[1], "--debug") ||
+        !strncmp(argv[1], "--telemetry", 11) ||
+        !strncmp(argv[1], "--evidence-", 11)) {
+      fprintf(stderr, "Telemetry is not built; configure ICCDEV_ENABLE_TELEMETRY=ON\n");
+      return EXIT_FAILURE;
+    }
+    else
+#endif
+    if (!strcmp(argv[1], "--quiet")) {
+      bQuiet = true;
+    }
+    else if (!stricmp(argv[1], "--threads") || !stricmp(argv[1], "-threads")) {
+      if (argc < 3) {
+        fprintf(stderr, "Missing thread count for --threads\n");
+        return EXIT_FAILURE;
+      }
+
+      char *end = nullptr;
+      errno = 0;
+      long parsed = strtol(argv[2], &end, 10);
+      if (errno || end == argv[2] || *end || parsed < 0 ||
+          parsed > CIccThreadedCmm::GetMaxThreads()) {
+        printf("Invalid thread count '%s': expected 0..%d\n",
+               icSanitizeConsoleText(argv[2]).c_str(),
+               CIccThreadedCmm::GetMaxThreads());
+        return EXIT_FAILURE;
+      }
+      nThreadArg = (int)parsed;
+      bThreadArg = true;
+      argv += 2;
+      argc -= 2;
+      continue;
+    }
+#ifdef ICCDEV_TELEMETRY
+    else if (!strcmp(argv[1], "--telemetry=off")) {
+      telemetryMode = icTelemetryOff;
+    }
+    else if (!strcmp(argv[1], "--telemetry=human")) {
+      telemetryMode = icTelemetryHuman;
+      bVerbose = true;
+    }
+    else if (!strcmp(argv[1], "--telemetry=jsonl")) {
+      telemetryMode = icTelemetryJsonl;
+    }
+    else if (!strcmp(argv[1], "--telemetry-file")) {
+      if (argc < 3) {
+        fprintf(stderr, "Missing path for --telemetry-file\n");
+        return EXIT_FAILURE;
+      }
+      telemetryFile = argv[2];
+      argv += 2;
+      argc -= 2;
+      continue;
+    }
+    else if (!strcmp(argv[1], "--telemetry-interval-ms")) {
+      if (argc < 3 || !ParseUnsignedMilliseconds(argv[2], telemetryIntervalMs)) {
+        fprintf(stderr, "Invalid --telemetry-interval-ms: expected 1..3600000\n");
+        return EXIT_FAILURE;
+      }
+      argv += 2;
+      argc -= 2;
+      continue;
+    }
+    else if (!strcmp(argv[1], "--evidence-file") ||
+             !strcmp(argv[1], "--evidence-json")) {
+      if (argc < 3) {
+        fprintf(stderr, "Missing path for --evidence-file\n");
+        return EXIT_FAILURE;
+      }
+      evidenceFile = argv[2];
+      argv += 2;
+      argc -= 2;
+      continue;
+    }
+#endif
+    else {
+      break;
+    }
+    argv++;
+    argc--;
+  }
+
+#ifdef ICCDEV_TELEMETRY
+  if (telemetryMode == icTelemetryJsonl && telemetryFile.empty()) {
+    fprintf(stderr, "--telemetry=jsonl requires --telemetry-file\n");
+    return EXIT_FAILURE;
+  }
+  if (telemetryMode != icTelemetryJsonl && !telemetryFile.empty()) {
+    fprintf(stderr, "--telemetry-file requires --telemetry=jsonl\n");
+    return EXIT_FAILURE;
+  }
+#endif
+
+  if (argc < minargs) {
+    // #2405: this printed the usage screen on stdout and returned success, so a
+    // caller could not tell a real apply from a tool that had done nothing at
+    // all.  Name which way the invocation is malformed before the syntax block --
+    // a bare Usage() dump left the caller to diff their command against it --
+    // and fail like the two other Usage() error exits below, which return -1.
+    fprintf(stderr, "Missing arguments: expected at least %d, received %d.\n",
+            minargs - 1, argc > 0 ? argc - 1 : 0);
+    Usage(stderr);
+    return -1;
   }
 
   CIccCfgImageApply cfgApply;
   CIccCfgConnectOptions cfgConnect;
   CIccCfgProfileSequence cfgProfiles;
-  bool bThreadArg = false;
-  int nThreadArg = cfgConnect.m_nThreads;
+  // Only populated when connect.useSearch selects the spectral inverse-search
+  // CMM.  It is parsed from the "searchApply" block, the same object
+  // iccApplySearch reads, and carries the chain plus "initial" and
+  // "pccWeights".  In that mode the top-level profileSequence is not consulted,
+  // so cfgProfiles stays empty and the chain is read through m_profiles below.
+  CIccCfgSearchApply cfgSearch;
+  std::string cfgFile;   // the --cfg document, when there is one
 
-  if (argc > 3 && !stricmp(argv[1], "-threads")) {
-    nThreadArg = atoi(argv[2]);
-    if (nThreadArg < 0 || nThreadArg > 1024) {      // arbitrary upper limit
-      printf("Invalid thread count '%s'\n", argv[2]);
-      Usage();
-      return -1;
-    }
-    bThreadArg = true;
-    argv += 2;
-    argc -= 2;
-  }
-
-  if (argc > 2 && !stricmp(argv[1], "-cfg")) {
-    // Usage 1 is exactly "-cfg <path>"; every setting comes from the JSON file, so
+  if (argc > 2 && (!stricmp(argv[1], "--cfg") || !stricmp(argv[1], "-cfg"))) {
+    // Usage 1 is exactly "--cfg <path>"; every setting comes from the JSON file, so
     // there is nothing a further argument could mean. Anything beyond argv[2] was
     // silently discarded and the run still reported success, so a caller could not
     // tell an honoured argument list from an ignored one. Same defect and same
     // guard as the sibling tools: iccApplyNamedCmm (#1906) and iccApplySearch
     // (#2075). The argc test above has already established argc >= 3, so argv[2] is
     // readable here and only a longer list can reach this branch. Note argc is the
-    // count left after the optional "-threads N" pair above, which is why the
+    // count left after the optional "--threads N" pair above, which is why the
     // comparison is against 3 rather than the process-entry argc.
     if (argc != 3) {
-      printf("Unexpected extra arguments for -cfg\n");
+      printf("Unexpected extra arguments for --cfg\n");
       return EXIT_FAILURE;
     }
 
+    cfgFile = argv[2];
     json cfg;
     if (!loadJsonFrom(cfg, argv[2]) || !cfg.is_object()) {
-      printf("Unable to read configuration from '%s'\n", argv[2]);
+      printf("Unable to read configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
     }
 
     if (cfg.find("imageFiles") == cfg.end() || !cfgApply.fromJson(cfg["imageFiles"])) {
-      printf("Unable to parse imageFiles configuration from '%s'\n", argv[2]);
+      printf("Unable to parse imageFiles configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
     }
 
-    if (cfg.find("profileSequence") == cfg.end() || !cfgProfiles.fromJson(cfg["profileSequence"])) {
-      printf("Unable to parse profileSequence configuration from '%s'\n", argv[2]);
-      return -1;
-    }
-
+    // Parsed ahead of the chain because connect.useSearch decides which factory
+    // consumes profileSequence, and which sibling keys are meaningful.
     auto connectOptions = cfg.find("connect");
     if (connectOptions != cfg.end() && !cfgConnect.fromJson(*connectOptions)) {
-      printf("Unable to parse connect configuration from '%s'\n", argv[2]);
+      printf("Unable to parse connect configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
+    }
+
+    if (cfgConnect.m_bUseSearch) {
+      // A search chain lives in "searchApply", exactly as iccApplySearch spells
+      // it: profileSequence, initial and pccWeights inside one object.  The
+      // block therefore moves between the two tools verbatim, and there is only
+      // ever one place the chain is written -- a top-level profileSequence is
+      // the forward-mode spelling and is not consulted here.
+      if (cfg.find("searchApply") == cfg.end() || !cfgSearch.fromJson(cfg["searchApply"])) {
+        printf("Unable to parse searchApply configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
+        return -1;
+      }
+
+      // CIccCmmSearch::AddXform only accepts a source, an optional mid, and a
+      // destination profile.  Naming the rule here beats the library's
+      // downstream status codes: a 4th profile surfaces as an AddXform failure
+      // and a single profile as icCmmStatBadXform out of Begin().
+      const size_t nSearchProfiles = cfgSearch.m_profiles.size();
+      if (nSearchProfiles < 2 || nSearchProfiles > 3) {
+        printf("useSearch requires 2 or 3 profiles in profileSequence (found %u)\n",
+               (unsigned)nSearchProfiles);
+        return -1;
+      }
+
+      // A 3-profile search connects source->mid and mid->destination through
+      // the weighted PCC set; with none attached Begin() returns
+      // icCmmStatBadConnection instead of saying what is missing.
+      if (nSearchProfiles == 3 && cfgSearch.m_pccWeights.empty()) {
+        printf("useSearch with 3 profiles requires at least one pccWeights entry\n");
+        return -1;
+      }
+
+
+      // CIccCmmSearch::AddXform discards its pPcc argument, so a per-stage
+      // pccFile is inert everywhere except the last entry, which CreateSearch
+      // reads for the initial-destination chain.
+      for (size_t nStage = 0; nStage + 1 < nSearchProfiles; nStage++) {
+        const CIccCfgProfile* pStage = cfgSearch.m_profiles[nStage].get();
+        if (pStage && !pStage->m_pccFile.empty()) {
+          fprintf(stderr,
+                  "Warning - profileSequence[%u] pccFile is ignored under useSearch; "
+                  "use pccWeights instead\n", (unsigned)nStage);
+        }
+      }
+    }
+    else {
+      // Forward mode: the chain is the top-level profileSequence.
+      if (cfg.find("profileSequence") == cfg.end() || !cfgProfiles.fromJson(cfg["profileSequence"])) {
+        printf("Unable to parse profileSequence configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
+        return -1;
+      }
+      // Silently ignoring a searchApply block would let a config that reads
+      // like a search chain run as a forward one and still report success.
+      if (cfg.find("searchApply") != cfg.end()) {
+        printf("'searchApply' requires connect.useSearch to be true\n");
+        return -1;
+      }
     }
   }
   else {
@@ -300,7 +708,7 @@ int main(int argc, const char** argv)
     argv++;
     argc--;
 
-    if (argc > 2 && !stricmp(argv[0], "-exportcfg")) {
+    if (argc > 2 && (!stricmp(argv[0], "--exportcfg") || !stricmp(argv[0], "-exportcfg"))) {
       exportFile = argv[1];
       argv += 2;
       argc -= 2;
@@ -308,8 +716,8 @@ int main(int argc, const char** argv)
 
     int nArg = cfgApply.fromArgs(&argv[0], argc);
     if (!nArg) {
-      printf("Unable to parse configuration arguments\n");
-      Usage();
+      fprintf(stderr, "Unable to parse configuration arguments\n");
+      Usage(stderr);
       return -1;
     }
     argv += nArg;
@@ -317,8 +725,8 @@ int main(int argc, const char** argv)
 
     nArg = cfgProfiles.fromArgs(&argv[0], argc);
     if (!nArg) {
-      printf("Unable to parse profile sequence arguments\n");
-      Usage();
+      fprintf(stderr, "Unable to parse profile sequence arguments\n");
+      Usage(stderr);
       return -1;
     }
     // CIccCfgProfileSequence::fromArgs() consumes the profile group in pairs and
@@ -347,6 +755,10 @@ int main(int argc, const char** argv)
       cfgConnect.m_nThreads = nThreadArg;
 
     if (!exportFile.empty()) {
+      if (OutputIsAnInput(exportFile.c_str(), cfgApply, cfgFile,
+                          cfgConnect.m_bUseSearch ? cfgSearch.m_profiles : cfgProfiles.m_profiles,
+                          cfgSearch.m_pccWeights))
+        return -1;
       FILE* f = OpenWriteTextFile(exportFile);
       if (f) {
         json cfgJson;
@@ -364,17 +776,17 @@ int main(int argc, const char** argv)
 
         std::string jsonText = cfgJson.dump(1);
         if (fwrite(jsonText.c_str(), 1, jsonText.size(), f) != jsonText.size()) {
-          printf("Unable to write complete config file '%s'\n", exportFile.c_str());
+          printf("Unable to write complete config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
           fclose(f);
           return -1;
         }
         if (!icFlushAndClose(f)) {
-          printf("Unable to close config file '%s'\n", exportFile.c_str());
+          printf("Unable to close config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
           return -1;
         }
       }
       else {
-        printf("Unable to export config file '%s'\n", exportFile.c_str());
+        printf("Unable to export config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
         return -1;
       }
     }
@@ -382,6 +794,42 @@ int main(int argc, const char** argv)
 
   if (bThreadArg)
     cfgConnect.m_nThreads = nThreadArg;
+
+#ifdef ICCDEV_TELEMETRY
+  const CIccCfgProfileArray& reportProfiles =
+    cfgConnect.m_bUseSearch ? cfgSearch.m_profiles : cfgProfiles.m_profiles;
+
+  if ((!telemetryFile.empty() &&
+       OutputIsAnInput(telemetryFile.c_str(), cfgApply, cfgFile, reportProfiles,
+                       cfgSearch.m_pccWeights)) ||
+      (!evidenceFile.empty() &&
+       OutputIsAnInput(evidenceFile.c_str(), cfgApply, cfgFile, reportProfiles,
+                       cfgSearch.m_pccWeights)) ||
+      (!telemetryFile.empty() &&
+       icOutputPathsAlias(telemetryFile.c_str(), cfgApply.m_dstImgFile.c_str())) ||
+      (!evidenceFile.empty() &&
+       icOutputPathsAlias(evidenceFile.c_str(), cfgApply.m_dstImgFile.c_str())) ||
+      (!telemetryFile.empty() && !evidenceFile.empty() &&
+       icOutputPathsAlias(telemetryFile.c_str(), evidenceFile.c_str()))) {
+    fprintf(stderr, "Telemetry or evidence output aliases an input or another receipt\n");
+    return EXIT_FAILURE;
+  }
+  if ((telemetryMode == icTelemetryJsonl &&
+       !OutputPathMustBeNew(telemetryFile, "Telemetry file")) ||
+      (!evidenceFile.empty() &&
+       !OutputPathMustBeNew(evidenceFile, "Evidence file")))
+    return EXIT_FAILURE;
+
+  CIccApplyTelemetry telemetry;
+  telemetry.m_mode = telemetryMode;
+  if (telemetryMode == icTelemetryJsonl && !telemetry.Open(telemetryFile))
+    return EXIT_FAILURE;
+  if (telemetryMode == icTelemetryJsonl &&
+      icOutputPathsAlias(telemetryFile.c_str(), cfgApply.m_dstImgFile.c_str())) {
+    fprintf(stderr, "Telemetry file aliases transform output\n");
+    return EXIT_FAILURE;
+  }
+#endif
 
   int i, j, k;
   unsigned int sn, sen, photo, bps, dbps;
@@ -391,7 +839,7 @@ int main(int argc, const char** argv)
 
   //Open source image file and get information from it
   if (!SrcImg.Open(cfgApply.m_srcImgFile.c_str())) {
-    printf("\nFile [%s] cannot be opened.\n", cfgApply.m_srcImgFile.c_str());
+    printf("\nFile [%s] cannot be opened.\n", icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str());
     return -1;
   }
   sn = SrcImg.GetSamples();
@@ -437,17 +885,43 @@ int main(int argc, const char** argv)
   bool bHasSrcProfile = SrcImg.GetIccProfile(pSrcProfile, nSrcProfileLen);
 
   //Retrieve command line arguments
-  bool bCompress = cfgApply.m_dstCompression == icDstBoolFromSrc ? SrcImg.GetCompress() : (cfgApply.m_dstCompression != icDstBoolFalse);
-  bool bSeparation = cfgApply.m_dstPlanar == icDstBoolFromSrc ? SrcImg.GetPlanar() : (cfgApply.m_dstPlanar != icDstBoolFalse);
+  // "sameAsSource" has to compare the source's tag against the value that means
+  // "off", not convert that tag to bool.  COMPRESSION_NONE is 1 and
+  // PLANARCONFIG_CONTIG is 1, so GetCompress() and GetPlanar() are nonzero for
+  // every TIFF libtiff can open and both tests were constant true: a config
+  // asking to copy the source wrote LZW over an uncompressed image and separated
+  // planes over a contiguous one.  The request was not merely ignored, it was
+  // inverted, and the source's own value was never read.
+  //
+  // Create() maps these two booleans back onto LZW/NONE and SEPARATE/CONTIG
+  // (TiffImg.cpp:443-444), so "compressed" is the most the destination can say:
+  // a JPEG or Deflate source copies as compressed and is written as LZW.  That
+  // is the existing bool contract, not a new narrowing.
+  //
+  // bEmbed below is unaffected -- bHasSrcProfile is already a bool.
+  bool bCompress = cfgApply.m_dstCompression == icDstBoolFromSrc ? SrcImg.GetCompress() != COMPRESSION_NONE : (cfgApply.m_dstCompression != icDstBoolFalse);
+  bool bSeparation = cfgApply.m_dstPlanar == icDstBoolFromSrc ? SrcImg.GetPlanar() == PLANARCONFIG_SEPARATE : (cfgApply.m_dstPlanar != icDstBoolFalse);
   bool bEmbed = cfgApply.m_dstEmbedIcc == icDstBoolFromSrc ? bHasSrcProfile : (cfgApply.m_dstEmbedIcc != icDstBoolFalse);
 
 
   // Use embedded ICC from source image when first profile entry has no file path.
   unsigned char* pEmbedded = nullptr;
   unsigned int nEmbeddedLen = 0;
-  if (!cfgProfiles.m_profiles.empty() && cfgProfiles.m_profiles[0]->m_iccFile.empty()) {
+  // Whichever mode built it, this is the chain the run applies: forward mode
+  // fills cfgProfiles, search mode fills cfgSearch from the searchApply block.
+  const CIccCfgProfileArray& activeProfiles =
+    cfgConnect.m_bUseSearch ? cfgSearch.m_profiles : cfgProfiles.m_profiles;
+
+  if (!activeProfiles.empty() && activeProfiles[0]->m_iccFile.empty()) {
     if (!bHasSrcProfile) {
       printf("Source image doesn't have embedded profile!\n");
+#ifdef ICCDEV_TELEMETRY
+      telemetry.Emit("run_failed", {
+        {"status", "tool_failure"},
+        {"exit_code", -1},
+        {"reason", "source_embedded_profile_missing"}
+      });
+#endif
       return -1;
     }
     pEmbedded = pSrcProfile;
@@ -456,12 +930,15 @@ int main(int argc, const char** argv)
 
   std::string sConnectError;
   std::unique_ptr<CIccConnectCmm> pConnect(
-    CIccConnectCmm::CreateStandard(cfgProfiles, pEmbedded, nEmbeddedLen,
-                                   cfgConnect.m_nThreads, &sConnectError));
+    cfgConnect.m_bUseSearch
+      ? CIccConnectCmm::CreateSearch(cfgSearch, pEmbedded, nEmbeddedLen,
+                                     cfgConnect.m_nThreads, &sConnectError)
+      : CIccConnectCmm::CreateStandard(cfgProfiles, pEmbedded, nEmbeddedLen,
+                                       cfgConnect.m_nThreads, &sConnectError));
 
   if (!pConnect) {
     if (!sConnectError.empty())
-      printf("Error - %s\n", sConnectError.c_str());
+      printf("Error - %s\n", icSanitizeConsoleText(sConnectError.c_str()).c_str());
     else
       printf("Error - Unable to begin profile application - Possibly invalid or incompatible profiles\n");
     return -1;
@@ -469,10 +946,48 @@ int main(int argc, const char** argv)
 
   CIccCmm* pTheCmm = pConnect->GetCmm();
   const bool bUseRowApply = cfgConnect.m_nThreads != 1;
+#ifdef ICCDEV_TELEMETRY
+  const CIccThreadedCmm* pThreadedCmm =
+    dynamic_cast<const CIccThreadedCmm*>(pTheCmm);
+  const int effectiveThreads =
+    pThreadedCmm ? pThreadedCmm->GetNumThreads() : 1;
+#endif
+#ifdef ICCDEV_TELEMETRY
+  const unsigned int inputWidth = SrcImg.GetWidth();
+  const unsigned int inputHeight = SrcImg.GetHeight();
+
+  if (telemetryMode == icTelemetryJsonl) {
+    json started = {
+      {"tool", "iccApplyProfiles"},
+      {"tool_version", ICCPROFLIBVER},
+      {"library_versions", {
+        {"IccProfLib", ICCPROFLIBVER},
+        {"IccLibConnect", ICCLIBCONNECTVER}
+      }},
+      {"config_file", cfgFile.empty() ? json(nullptr) : json(cfgFile)},
+      {"input", cfgApply.m_srcImgFile},
+      {"output", cfgApply.m_dstImgFile},
+      {"requested_threads", cfgConnect.m_nThreads},
+      {"effective_threads", effectiveThreads},
+      {"execution_mode", bUseRowApply ? "threaded-row-batch" : "single-pixel"}
+    };
+    if (!telemetry.Emit("run_started", started))
+      return EXIT_FAILURE;
+  }
+  if (bVerbose && !bQuiet) {
+    fprintf(stderr, "[%s] iccApplyProfiles: started input=%s output=%s requested_threads=%d effective_threads=%d mode=%s\n",
+            CIccApplyTelemetry::TimestampUtc().c_str(),
+            icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str(),
+            icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str(),
+            cfgConnect.m_nThreads,
+            effectiveThreads,
+            bUseRowApply ? "threaded-row-batch" : "single-pixel");
+  }
+#endif
 
   // Set last_path to the last profile's file for downstream embed logic.
-  if (!cfgProfiles.m_profiles.empty())
-    last_path = cfgProfiles.m_profiles.back()->m_iccFile.c_str();
+  if (!activeProfiles.empty())
+    last_path = activeProfiles.back()->m_iccFile.c_str();
 
   //Get and validate the source color space from the Cmm.
   icColorSpaceSignature SrcspaceSig = pTheCmm->GetSourceSpace();
@@ -483,14 +998,14 @@ int main(int argc, const char** argv)
     //Allow color management to ignore extra samples when non extra samples match samples in profile
     if (sen != 0) {
       if (nSrcSamples != (int)(sn - sen)) {
-        printf("Number of non-extra samples %u in image[%s] doesn't match device samples %d in first profile\n", sn - sen, cfgApply.m_srcImgFile.c_str(), nSrcSamples);
+        printf("Number of non-extra samples %u in image[%s] doesn't match device samples %d in first profile\n", sn - sen, icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str(), nSrcSamples);
         return -1;
       }
       else
         nSrcSamples = sn;
     }
     else {
-      printf("Number of samples %u in image[%s] doesn't match device samples %d in first profile\n", sn, cfgApply.m_srcImgFile.c_str(), nSrcSamples);
+      printf("Number of samples %u in image[%s] doesn't match device samples %d in first profile\n", sn, icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str(), nSrcSamples);
       return -1;
     }
   }
@@ -540,15 +1055,45 @@ int main(int argc, const char** argv)
   unsigned long sbpp = (nSrcSamples * bps + 7) / 8;
   unsigned long dbpp = (nDestSamples * dbps  + 7)/ 8;
 
+  // #2692: the output must not be any of this run's inputs, checked before
+  // DstImg.Create() truncates it.
+  if (OutputIsAnInput(cfgApply.m_dstImgFile.c_str(), cfgApply, cfgFile, activeProfiles,
+                      cfgSearch.m_pccWeights))
+    return -1;
+
   //Open up output image using information from SrcImg and theCmm
   // GetXRes()/GetYRes() are taken from the source, so its RESOLUTIONUNIT has to come
   // with them; without it a centimetre-based source produced an inch-defaulted output
   // and the physical size shifted by 2.54x.  Same defect as iccSpecSepToTiff, because
   // both tools reach it through the same shared CTiffImg::Create() (#2220).
-  if (!DstImg.Create(cfgApply.m_dstImgFile.c_str(), SrcImg.GetWidth(), SrcImg.GetHeight(), dbps, photo, nDestSamples, nExtraSamples, SrcImg.GetXRes(), SrcImg.GetYRes(), bCompress, bSeparation, SrcImg.GetResolutionUnit())) {
-    printf("Unable to create Tiff file - '%s'\n", cfgApply.m_dstImgFile.c_str());
+  CIccFileIO existingOutput;
+  const bool outputExisted = existingOutput.Open(cfgApply.m_dstImgFile.c_str(), "rb");
+  if (outputExisted)
+    existingOutput.Close();
+  if (!DstImg.Create(cfgApply.m_dstImgFile.c_str(), SrcImg.GetWidth(), SrcImg.GetHeight(), dbps, photo, nDestSamples, nExtraSamples, SrcImg.GetXRes(), SrcImg.GetYRes(), bCompress, bSeparation, SrcImg.GetResolutionUnit(),
+                     cfgApply.m_dstTileWidth, cfgApply.m_dstTileHeight, cfgApply.m_dstBigTiff)) {
+    printf("Unable to create Tiff file - '%s'\n", icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str());
+    DstImg.Close();
+    if (!outputExisted && DstImg.WasOutputOpened() &&
+        remove(cfgApply.m_dstImgFile.c_str()) != 0 && errno != ENOENT)
+      fprintf(stderr, "Unable to discard failed TIFF output '%s'\n",
+              icSanitizeConsoleText(cfgApply.m_dstImgFile).c_str());
     return -1;
   }
+  struct OutputCleanup {
+    CTiffImg &image;
+    const std::string &path;
+    bool keep = false;
+    ~OutputCleanup()
+    {
+      if (!keep) {
+        image.Close();
+        if (remove(path.c_str()) != 0 && errno != ENOENT)
+          fprintf(stderr, "Unable to discard partial TIFF output '%s'\n",
+                  icSanitizeConsoleText(path).c_str());
+      }
+    }
+  } outputCleanup{DstImg, cfgApply.m_dstImgFile};
 
   //Embed the last profile into output image as needed
   if (bEmbed && last_path) {
@@ -585,12 +1130,57 @@ int main(int argc, const char** argv)
 
   icFloatNumber *pSrcRowBuf = nullptr;
   icFloatNumber *pDstRowBuf = nullptr;
+  unsigned int nRowsPerApply = 1;
   if (bUseRowApply) {
+    size_t nSrcFloatRowBytes = 0;
+    size_t nDstFloatRowBytes = 0;
+
+    if (!GetFloatRowByteCount(SrcImg.GetWidth(), nSrcColorSamples, nSrcFloatRowBytes) ||
+        !GetFloatRowByteCount(SrcImg.GetWidth(), nDestSamples, nDstFloatRowBytes) ||
+        nSrcFloatRowBytes > (size_t)-1 - nDstFloatRowBytes) {
+      printf("Invalid row buffer size!\n");
+      free(pSBuf);
+      free(pDBuf);
+      return -1;
+    }
+
+    // Keep the combined float working set near 4 MiB and cap the batch at 64
+    // rows.  This gives narrow images enough pixels to engage the worker pool
+    // without allowing tall, high-channel images to request unbounded memory.
+    const size_t nTargetBatchBytes = 4u * 1024u * 1024u;
+    const size_t nCombinedRowBytes = nSrcFloatRowBytes + nDstFloatRowBytes;
+    size_t nBatchRows = nCombinedRowBytes ? nTargetBatchBytes / nCombinedRowBytes : 1;
+    if (nBatchRows < 1)
+      nBatchRows = 1;
+    if (nBatchRows > 64)
+      nBatchRows = 64;
+    const char* bandRowsEnv = getenv("ICC_APPLY_PROFILES_BAND_ROWS");
+    if (bandRowsEnv && *bandRowsEnv) {
+      unsigned long requestedRows = 0;
+      if (!ParseBandRows(bandRowsEnv, requestedRows)) {
+        fprintf(stderr, "Invalid ICC_APPLY_PROFILES_BAND_ROWS: expected 1..64\n");
+        free(pSBuf);
+        free(pDBuf);
+        return EXIT_FAILURE;
+      }
+      if (nBatchRows > requestedRows)
+        nBatchRows = requestedRows;
+    }
+    else if (cfgConnect.m_bUseSearch && nBatchRows > 16) {
+      // Search is expensive per pixel. Commit TIFF rows and emit progress
+      // between short calls instead of running a whole small image in one call.
+      nBatchRows = 16;
+    }
+    if (SrcImg.GetWidth() && nBatchRows > UINT32_MAX / SrcImg.GetWidth())
+      nBatchRows = UINT32_MAX / SrcImg.GetWidth();
+    if (!nBatchRows)
+      nBatchRows = 1;
+    nRowsPerApply = (unsigned int)nBatchRows;
+
     size_t nSrcRowBytes = 0;
     size_t nDstRowBytes = 0;
-
-    if (!GetFloatRowByteCount(SrcImg.GetWidth(), nSrcColorSamples, nSrcRowBytes) ||
-        !GetFloatRowByteCount(SrcImg.GetWidth(), nDestSamples, nDstRowBytes) ||
+    if (!MultiplySize(nSrcFloatRowBytes, nRowsPerApply, nSrcRowBytes) ||
+        !MultiplySize(nDstFloatRowBytes, nRowsPerApply, nDstRowBytes) ||
         !AddPixelBufSlack(nSrcRowBytes) ||
         !AddPixelBufSlack(nDstRowBytes)) {
       printf("Invalid row buffer size!\n");
@@ -610,11 +1200,129 @@ int main(int argc, const char** argv)
       return -1;
     }
   }
+#ifdef ICCDEV_TELEMETRY
+  const unsigned long long pixelsPerApply =
+    (unsigned long long)inputWidth * nRowsPerApply;
+  const unsigned int totalBatches =
+    inputHeight / nRowsPerApply +
+    (inputHeight % nRowsPerApply ? 1 : 0);
+
+  if (telemetryMode == icTelemetryJsonl &&
+      !telemetry.Emit("transform_ready", {
+        {"input_width", inputWidth},
+        {"input_height", inputHeight},
+        {"input_bits_per_sample", bps},
+        {"source_samples", nSrcSamples},
+        {"destination_samples", nDestSamples},
+        {"requested_threads", cfgConnect.m_nThreads},
+        {"effective_threads", effectiveThreads},
+        {"execution_mode", bUseRowApply ? "threaded-row-batch" : "single-pixel"},
+        {"rows_per_apply", nRowsPerApply},
+        {"pixels_per_apply", pixelsPerApply},
+        {"total_batches", totalBatches},
+        {"source_row_buffer_bytes", SrcImg.GetBytesPerLine()},
+        {"destination_row_buffer_bytes", DstImg.GetBytesPerLine()}
+      }))
+    return EXIT_FAILURE;
+#endif
 
   //Allocate pixel buffers for performing encoding transformations
   CIccPixelBuf SrcPixel(nSrcSamples+16), DestPixel(nDestSamples+16), Pixel(icIntMax(nSrcSamples, nDestSamples)+16);
   int lastPer = -1;
   int curper;
+#ifdef ICCDEV_TELEMETRY
+  long long lastStructuredProgressMs = -1;
+  long long lastHumanProgressMs = -1;
+
+  auto emitProgress = [&](unsigned int completedRows) -> bool {
+    const bool wantsStructured = telemetryMode == icTelemetryJsonl;
+    const bool wantsHuman = (bDebug || telemetryMode == icTelemetryHuman) && !bQuiet;
+    if (!wantsStructured && !wantsHuman)
+      return true;
+
+    const long long elapsedMs = telemetry.ElapsedMs();
+    const bool emitStructured = wantsStructured &&
+      (lastStructuredProgressMs < 0 ||
+       elapsedMs - lastStructuredProgressMs >= (long long)telemetryIntervalMs ||
+       completedRows == inputHeight);
+    const bool emitHuman = wantsHuman &&
+      (lastHumanProgressMs < 0 ||
+       elapsedMs - lastHumanProgressMs >= (long long)telemetryIntervalMs ||
+       completedRows == inputHeight);
+    if (!emitStructured && !emitHuman)
+      return true;
+
+    const unsigned long long completedPixels =
+      (unsigned long long)completedRows * inputWidth;
+    const unsigned long long totalPixels =
+      (unsigned long long)inputWidth * inputHeight;
+    const double percentComplete = totalPixels ?
+      (double)completedPixels * 100.0 / (double)totalPixels : 100.0;
+    const bool hasMeasuredRate = elapsedMs > 0 && completedPixels > 0;
+    const double throughputPixelsPerSecond = hasMeasuredRate ?
+      (double)completedPixels * 1000.0 / (double)elapsedMs : 0.0;
+    json estimatedRemainingMs = nullptr;
+    json estimatedTotalMs = nullptr;
+    if (completedPixels >= totalPixels)
+      estimatedRemainingMs = 0;
+    if (hasMeasuredRate) {
+      estimatedTotalMs = (long long)((double)elapsedMs * (double)totalPixels /
+                                     (double)completedPixels);
+      if (completedPixels < totalPixels) {
+        estimatedRemainingMs =
+          (long long)((double)elapsedMs * (double)(totalPixels - completedPixels) /
+                      (double)completedPixels);
+      }
+    }
+    if (emitStructured) {
+      lastStructuredProgressMs = elapsedMs;
+      if (!telemetry.Emit("progress", {
+            {"completed_rows", completedRows},
+            {"total_rows", inputHeight},
+            {"completed_pixels", completedPixels},
+            {"total_pixels", totalPixels},
+            {"percent_complete", percentComplete},
+            {"elapsed_ms", elapsedMs},
+            {"throughput_pixels_per_second", throughputPixelsPerSecond},
+            {"estimated_remaining_ms", estimatedRemainingMs},
+            {"estimated_total_ms", estimatedTotalMs},
+            {"requested_threads", cfgConnect.m_nThreads},
+            {"effective_threads", effectiveThreads},
+            {"execution_mode", bUseRowApply ? "threaded-row-batch" : "single-pixel"},
+            {"rows_per_apply", nRowsPerApply},
+            {"completed_batches", completedRows / nRowsPerApply +
+                                  (completedRows % nRowsPerApply ? 1 : 0)},
+            {"total_batches", totalBatches}
+          }))
+        return false;
+    }
+    if (emitHuman) {
+      lastHumanProgressMs = elapsedMs;
+      const std::string timestamp = CIccApplyTelemetry::TimestampUtc();
+      if (estimatedTotalMs.is_number_integer()) {
+        fprintf(stderr,
+                "[%s] iccApplyProfiles: progress rows=%u/%u pixels=%llu/%llu percent=%.3f elapsed_ms=%lld throughput_pixels_per_second=%.3f eta_ms=%lld estimated_total_ms=%lld requested_threads=%d effective_threads=%d mode=%s\n",
+                timestamp.c_str(), completedRows, inputHeight, completedPixels,
+                totalPixels, percentComplete, elapsedMs, throughputPixelsPerSecond,
+                estimatedRemainingMs.is_number_integer() ?
+                  estimatedRemainingMs.get<long long>() : -1,
+                estimatedTotalMs.get<long long>(), cfgConnect.m_nThreads,
+                effectiveThreads,
+                bUseRowApply ? "threaded-row-batch" : "single-pixel");
+      }
+      else {
+        fprintf(stderr,
+                "[%s] iccApplyProfiles: progress rows=%u/%u pixels=%llu/%llu percent=%.3f elapsed_ms=%lld throughput_pixels_per_second=%.3f eta_ms=%s estimated_total_ms=unavailable requested_threads=%d effective_threads=%d mode=%s\n",
+                timestamp.c_str(), completedRows, inputHeight, completedPixels,
+                totalPixels, percentComplete, elapsedMs, throughputPixelsPerSecond,
+                estimatedRemainingMs.is_number_integer() ? "0" : "unavailable",
+                cfgConnect.m_nThreads, effectiveThreads,
+                bUseRowApply ? "threaded-row-batch" : "single-pixel");
+      }
+    }
+    return true;
+  };
+#endif
 
   // Boundary rule (per Max Derhak): TIFF pixel values use a *device encoding*
   // regardless of color space. Integer formats map linearly to [0, 1] via
@@ -688,38 +1396,120 @@ int main(int argc, const char** argv)
     return true;
   };
 
-  //Read each line
+  //Read and apply each line, batching adjacent rows for threaded CMMs.
   bool bApplySuccess = true;
-  for (i=0; i<(int)SrcImg.GetHeight(); i++) {
-    if (!SrcImg.ReadLine(pSBuf)) {
-      printf("Error reading line %d from Tiff file - '%s'\n", i, cfgApply.m_srcImgFile.c_str());
-      bApplySuccess = false;
-      break;
-    }
+  for (i=0; i<(int)SrcImg.GetHeight();) {
     if (bUseRowApply) {
-      for (sptr=pSBuf, j=0; j<(int)SrcImg.GetWidth(); j++, sptr+=sbpp) {
-        if (!decodePixel(pSrcRowBuf + j * nSrcColorSamples, sptr)) {
-          free(pSBuf);
-          free(pDBuf);
-          free(pSrcRowBuf);
-          free(pDstRowBuf);
-          return -1;
+      unsigned int nBatchRows = nRowsPerApply;
+      const unsigned int nRemainingRows = SrcImg.GetHeight() - (unsigned int)i;
+      if (nBatchRows > nRemainingRows)
+        nBatchRows = nRemainingRows;
+
+      for (unsigned int nRow = 0; nRow < nBatchRows; nRow++) {
+        if (!SrcImg.ReadLine(pSBuf)) {
+          printf("Error reading line %u from Tiff file - '%s'\n",
+                 (unsigned int)i + nRow, icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str());
+          bApplySuccess = false;
+          break;
+        }
+
+        icFloatNumber *pSrcFloatRow =
+          pSrcRowBuf + (size_t)nRow * SrcImg.GetWidth() * nSrcColorSamples;
+        for (sptr=pSBuf, j=0; j<(int)SrcImg.GetWidth(); j++, sptr+=sbpp) {
+          if (!decodePixel(pSrcFloatRow + j * nSrcColorSamples, sptr)) {
+            free(pSBuf);
+            free(pDBuf);
+            free(pSrcRowBuf);
+            free(pDstRowBuf);
+            return -1;
+          }
         }
       }
+      if (!bApplySuccess)
+        break;
 
-      pTheCmm->Apply(pDstRowBuf, pSrcRowBuf, SrcImg.GetWidth());
+      const icUInt32Number nBatchPixels =
+        (icUInt32Number)(SrcImg.GetWidth() * nBatchRows);
+#ifdef ICC_APPLY_BATCH_TIMING
+      std::chrono::steady_clock::time_point batchStarted;
+      if (bDebug && !bQuiet)
+        batchStarted = std::chrono::steady_clock::now();
+      if (bDebug && !bQuiet)
+        fprintf(stderr, "[%s] iccApplyProfiles: batch_started rows=%d-%u pixels=%u\n",
+                CIccApplyTelemetry::TimestampUtc().c_str(), i,
+                (unsigned int)i + nBatchRows - 1, nBatchPixels);
+#endif
+      icStatusCMM applyStatus =
+        pTheCmm->Apply(pDstRowBuf, pSrcRowBuf, nBatchPixels);
+#ifdef ICC_APPLY_BATCH_TIMING
+      if (bDebug && !bQuiet) {
+        const auto batchMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - batchStarted).count();
+        fprintf(stderr, "[%s] iccApplyProfiles: batch_completed rows=%d-%u pixels=%u elapsed_ms=%lld status=%d\n",
+                CIccApplyTelemetry::TimestampUtc().c_str(), i,
+                (unsigned int)i + nBatchRows - 1, nBatchPixels,
+                (long long)batchMs, (int)applyStatus);
+      }
+#endif
+      if (applyStatus != icCmmStatOk) {
+        printf("Profile application failed for lines %d-%u (status %d).\n", i,
+               (unsigned int)i + nBatchRows - 1, (int)applyStatus);
+        bApplySuccess = false;
+        break;
+      }
 
-      for (dptr=pDBuf, j=0; j<(int)SrcImg.GetWidth(); j++, dptr+=dbpp) {
-        if (!encodePixel(dptr, pDstRowBuf + j * nDestSamples)) {
-          free(pSBuf);
-          free(pDBuf);
-          free(pSrcRowBuf);
-          free(pDstRowBuf);
-          return -1;
+      for (unsigned int nRow = 0; nRow < nBatchRows; nRow++) {
+        icFloatNumber *pDstFloatRow =
+          pDstRowBuf + (size_t)nRow * SrcImg.GetWidth() * nDestSamples;
+        for (dptr=pDBuf, j=0; j<(int)SrcImg.GetWidth(); j++, dptr+=dbpp) {
+          if (!encodePixel(dptr, pDstFloatRow + j * nDestSamples)) {
+            free(pSBuf);
+            free(pDBuf);
+            free(pSrcRowBuf);
+            free(pDstRowBuf);
+            return -1;
+          }
+        }
+
+        if (!DstImg.WriteLine(pDBuf)) {
+          printf("Error writing line %u to Tiff file - '%s'\n",
+                 (unsigned int)i + nRow, icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str());
+          bApplySuccess = false;
+          break;
+        }
+
+        curper = static_cast<int>((static_cast<float>(i + nRow + 1) * 100.0f) /
+                                  static_cast<float>(SrcImg.GetHeight()));
+#ifdef ICCDEV_TELEMETRY
+        if (!bQuiet && !bDebug && telemetry.m_mode != icTelemetryHuman &&
+            curper != lastPer) {
+#else
+        if (!bQuiet && curper != lastPer) {
+#endif
+          printf("\r%d%%", curper);
+          lastPer = curper;
         }
       }
+#ifdef ICCDEV_TELEMETRY
+      if (!emitProgress((unsigned int)i + nBatchRows)) {
+        bApplySuccess = false;
+        break;
+      }
+#endif
+      if (!bApplySuccess)
+        break;
+
+      i += nBatchRows;
+      continue;
     }
     else {
+      if (!SrcImg.ReadLine(pSBuf)) {
+        printf("Error reading line %d from Tiff file - '%s'\n", i,
+               icSanitizeConsoleText(cfgApply.m_srcImgFile.c_str()).c_str());
+        bApplySuccess = false;
+        break;
+      }
+
       for (sptr=pSBuf, dptr=pDBuf, j=0; j<(int)SrcImg.GetWidth(); j++, sptr+=sbpp, dptr+=dbpp) {
         if (!decodePixel(SrcPixel, sptr)) {
           free(pSBuf);
@@ -730,7 +1520,13 @@ int main(int argc, const char** argv)
         }
 
         //Use CMM to convert SrcPixel to DestPixel
-        pTheCmm->Apply(DestPixel, SrcPixel);
+        icStatusCMM applyStatus = pTheCmm->Apply(DestPixel, SrcPixel);
+        if (applyStatus != icCmmStatOk) {
+          printf("Profile application failed at pixel %d on line %d (status %d).\n",
+                 j, i, (int)applyStatus);
+          bApplySuccess = false;
+          break;
+        }
 
         if (!encodePixel(dptr, DestPixel)) {
           free(pSBuf);
@@ -742,9 +1538,12 @@ int main(int argc, const char** argv)
       }
     }
 
+    if (!bApplySuccess)
+      break;
+
     //Output the converted pixels to the destination image
     if (!DstImg.WriteLine(pDBuf)) {
-      printf("Error writing line %d to Tiff file - '%s'\n", i, cfgApply.m_dstImgFile.c_str());
+      printf("Error writing line %d to Tiff file - '%s'\n", i, icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str());
       bApplySuccess = false;
       break;
     }
@@ -752,12 +1551,29 @@ int main(int argc, const char** argv)
     //Display status of how much we have accomplished
     curper = static_cast<int>((static_cast<float>(i + 1) * 100.0f) /
                               static_cast<float>(SrcImg.GetHeight()));
-    if (curper !=lastPer) {
+#ifdef ICCDEV_TELEMETRY
+    if (!bQuiet && !bDebug && telemetry.m_mode != icTelemetryHuman &&
+        curper != lastPer) {
+#else
+    if (!bQuiet && curper != lastPer) {
+#endif
       printf("\r%d%%", curper);
       lastPer = curper;
     }
+#ifdef ICCDEV_TELEMETRY
+    if (!emitProgress((unsigned int)i + 1)) {
+      bApplySuccess = false;
+      break;
+    }
+#endif
+    i++;
   }
-  printf("\n");
+#ifdef ICCDEV_TELEMETRY
+  if (!bQuiet && !bDebug && telemetry.m_mode != icTelemetryHuman)
+#else
+  if (!bQuiet)
+#endif
+    printf("\n");
 
   //Clean everything up by closeing files and freeing buffers
   SrcImg.Close();
@@ -767,7 +1583,121 @@ int main(int argc, const char** argv)
   free(pSrcRowBuf);
   free(pDstRowBuf);
 
-  DstImg.Close();
+  bool outputFinalizeFailed = !DstImg.Close();
+#ifdef ICCDEV_TELEMETRY
+  if (bApplySuccess && !outputFinalizeFailed) {
+    CTiffImg verifiedOutput;
+    if (!verifiedOutput.Open(cfgApply.m_dstImgFile.c_str()) ||
+        verifiedOutput.GetWidth() != inputWidth ||
+        verifiedOutput.GetHeight() != inputHeight)
+      outputFinalizeFailed = true;
+  }
+#endif
+  if (bApplySuccess && outputFinalizeFailed) {
+    fprintf(stderr, "Unable to finalize TIFF output '%s'\n",
+            icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str());
+    bApplySuccess = false;
+  }
+  // A later telemetry or evidence sidecar error must not discard a complete TIFF.
+  const bool outputFinalized = bApplySuccess;
 
+#ifdef ICCDEV_TELEMETRY
+  std::string outputDigest;
+  const bool needOutputDigest =
+    bApplySuccess && (telemetryMode == icTelemetryJsonl || !evidenceFile.empty());
+  const bool hasOutputDigest = needOutputDigest &&
+    icSha256File(cfgApply.m_dstImgFile.c_str(), outputDigest);
+  if (needOutputDigest && !hasOutputDigest) {
+    fprintf(stderr, "Unable to hash TIFF output '%s'\n",
+            icSanitizeConsoleText(cfgApply.m_dstImgFile.c_str()).c_str());
+    bApplySuccess = false;
+  }
+  if (bApplySuccess && telemetryMode == icTelemetryJsonl &&
+      !telemetry.Emit("output_closed", {
+        {"output", cfgApply.m_dstImgFile},
+        {"output_digest", hasOutputDigest ? json(outputDigest) : json(nullptr)},
+        {"elapsed_ms", telemetry.ElapsedMs()}
+      }))
+    bApplySuccess = false;
+
+  const long long elapsedMs = telemetry.ElapsedMs();
+  const unsigned long long completedPixels =
+    (unsigned long long)i * inputWidth;
+  const double throughputPixelsPerSecond =
+    elapsedMs > 0 ? (double)completedPixels * 1000.0 / (double)elapsedMs : 0.0;
+  bool evidenceWriteFailed = false;
+  if (bApplySuccess && !evidenceFile.empty()) {
+    FILE* evidence = icOpenNewRegularWriteTextFile(evidenceFile.c_str());
+    if (!evidence) {
+      fprintf(stderr, "Unable to create evidence file '%s'\n",
+              icSanitizeConsoleText(evidenceFile.c_str()).c_str());
+      bApplySuccess = false;
+      evidenceWriteFailed = true;
+    }
+    else {
+      json receipt = {
+        {"schema", "iccdev-apply-evidence/v1"},
+        {"tool", "iccApplyProfiles"},
+        {"status", "success"},
+        {"input", cfgApply.m_srcImgFile},
+        {"output", cfgApply.m_dstImgFile},
+        {"output_digest", hasOutputDigest ? json(outputDigest) : json(nullptr)},
+        {"requested_threads", cfgConnect.m_nThreads},
+        {"effective_threads", effectiveThreads},
+        {"execution_mode", bUseRowApply ? "threaded-row-batch" : "single-pixel"},
+        {"rows_per_apply", nRowsPerApply},
+        {"pixels_per_apply", pixelsPerApply},
+        {"total_batches", totalBatches},
+        {"completed_pixels", completedPixels},
+        {"total_pixels", (unsigned long long)inputWidth * inputHeight},
+        {"elapsed_ms", elapsedMs},
+        {"throughput_pixels_per_second", throughputPixelsPerSecond}
+      };
+      const std::string text = receipt.dump(2) + "\n";
+      const bool wrote = fwrite(text.data(), 1, text.size(), evidence) == text.size();
+      const bool closed = icFlushAndClose(evidence);
+      if (!wrote || !closed) {
+        fprintf(stderr, "Unable to write evidence file '%s'\n",
+                icSanitizeConsoleText(evidenceFile.c_str()).c_str());
+        bApplySuccess = false;
+        evidenceWriteFailed = true;
+      }
+    }
+  }
+
+  if (telemetryMode == icTelemetryJsonl &&
+      !telemetry.Emit(bApplySuccess ? "run_completed" : "run_failed", {
+        {"status", bApplySuccess ? "success" : "tool_failure"},
+        {"exit_code", bApplySuccess ? 0 : -1},
+        {"reason", outputFinalizeFailed ? json("output_finalize_failed") :
+          (needOutputDigest && !hasOutputDigest) ? json("output_digest_failed") :
+          evidenceWriteFailed ? json("evidence_write_failed") : json(nullptr)},
+        {"completed_rows", i},
+        {"total_rows", inputHeight},
+        {"requested_threads", cfgConnect.m_nThreads},
+        {"effective_threads", effectiveThreads},
+        {"rows_per_apply", nRowsPerApply},
+        {"pixels_per_apply", pixelsPerApply},
+        {"total_batches", totalBatches},
+        {"completed_pixels", completedPixels},
+        {"total_pixels", (unsigned long long)inputWidth * inputHeight},
+        {"elapsed_ms", elapsedMs},
+        {"throughput_pixels_per_second", throughputPixelsPerSecond}
+      }))
+    bApplySuccess = false;
+
+  if (bVerbose && !bQuiet) {
+    fprintf(stderr,
+            "[%s] iccApplyProfiles: completed status=%s elapsed_ms=%lld throughput_pixels_per_second=%.3f completed_pixels=%llu total_pixels=%llu requested_threads=%d effective_threads=%d mode=%s\n",
+            CIccApplyTelemetry::TimestampUtc().c_str(),
+            bApplySuccess ? "success" : "tool_failure", elapsedMs,
+            throughputPixelsPerSecond, completedPixels,
+            (unsigned long long)inputWidth * inputHeight,
+            cfgConnect.m_nThreads, effectiveThreads,
+            bUseRowApply ? "threaded-row-batch" : "single-pixel");
+  }
+#endif
+
+  outputCleanup.keep = outputFinalized;
   return bApplySuccess ? 0 : -1;
 }

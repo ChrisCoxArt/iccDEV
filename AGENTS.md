@@ -13,24 +13,83 @@ shares one source of truth. Update rules here, not in the mirrors.
 
 - Check `git --no-pager status --short --branch` before edits.
 - Prefer focused changes with exact repros and regression coverage.
-- Keep documentation links Doxygen-safe: if a Markdown link points outside the Doxygen INPUT tree, use an explicit HTML anchor instead of a Markdown reference so generated docs stay warning-free.
+- Keep documentation links Doxygen-safe: if a Markdown link points outside the
+  Doxygen INPUT tree, use an explicit HTML anchor instead of a Markdown reference
+  so generated docs stay warning-free. Before handing off documentation changes,
+  run the bounded graph-light Doxygen check in
+  `docs/documentation-maintenance.md` and require an empty
+  `docs/generated/doxygen-warnings.log`. Time is valuable: reserve full graph
+  generation for release packaging or graph changes, not routine prose edits.
+  Keep `HAVE_DOT=YES` for checked-in diagrams; leave CTest implementation and
+  fixtures outside the generated package. Do not add generated output to Git.
 - Use 2-space C++ indentation, K&R braces, `m_` members, and return-value errors.
 - Exit 1-127 is graceful failure. Exit 128+ is signal termination.
 - Use sanitizer builds for bug hunting; see `.github/instructions/build-system.instructions.md`.
 - Add the nearest regression test for behavior fixes.
-- Every new or relocated C/C++ source or header must retain the complete ICC
-  Software License block used by adjacent files; abbreviated, placeholder, or
-  omitted license text is a blocking defect.
+- For legacy packed intent decoding and named-color overprint behavior, keep
+  `iccApplyNamedCmm` and `iccApplySearch` coverage aligned with
+  `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`,
+  `.github/scripts/iccdev-applysearch-cli-args-regression.sh`, and
+  `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`.
+- Before the first automated review, record a `base...HEAD` contract matrix for
+  every changed cross-cutting surface: producer, consumer, build/runtime
+  behavior, platform or toolchain boundary, CI trigger, dependency owner, and
+  local evidence. A later update still requires the complete contract matrix,
+  not a delta-only review. Any newly found blocker returns the branch to
+  branch-only grooming before another review.
+- Every new or relocated ICC-owned C/C++ source or header must retain the
+  complete BSD-3-Clause notice derived from `LICENSE.md`; run
+  `.github/scripts/check-license-notices.py` before review. Abbreviated,
+  placeholder, or omitted notices are blocking defects. Preserve third-party
+  and generated-file attribution as directed by their provenance.
 - For MCP runtime checks, validate every Docker image variant against its
   discovered capabilities. Do not hard-code a total tool count.
+- The published unified container is a native `linux/amd64` and `linux/arm64`
+  manifest. Build and smoke each platform before publishing a tag; Apple
+  Silicon Docker hosts must select `linux/arm64` without emulation.
+- Python CI and rolling-release wheels share `_build-python-wheels.yml`
+  between `ci-json-python` and `ci-latest-release`, with Python 3.13 driving
+  cibuildwheel 3.4.0 for all seven platform lanes. Keep installed-wheel tests
+  and the Windows ARM64 Python 3.9/3.10 NumPy exception aligned. Primary CI
+  disables shared wheel artifact upload and fails on empty test collection; release
+  CI enables explicitly named artifact intake validated by
+  `.github/scripts/validate-python-release-wheels.py` with an independent
+  `--lane` inventory, complete license checks, checksums, and provenance;
+  PyPI publication uses explicit `pypi_packages` selection on the manual
+  `ci-latest-release.yml` workflow. Keep `iccdev` and `iccdev-mcp` staging,
+  trusted-publisher identities, outcomes, and post-publication smoke tests
+  separate. Require complete package inventories, dual checksums, release
+  attestations, the protected `release` environment, and OIDC publishing.
+  Validate downloaded release wheels with `--release` to require all 45
+  targets without CI identifier files. Require RECORD file coverage, secure
+  hashes, and sizes before attestation; ZIP CRCs alone do not prove this contract.
+- Rolling-release MCP artifacts are a separate universal wheel and sdist,
+  validated by `.github/scripts/validate-mcp-release-package.py`. Keep the
+  Windows/Linux source, installed wheel, and installed sdist checks in the
+  `mcp-package` job. Prove parent/child imports and console stdio/REST behavior
+  with `iccdev-mcp-package-smoke.py`; do not infer installed behavior from
+  editable installs. Preserve the `iccdev_mcp` namespace and optional native
+  capability failures. MCP distributions participate in checksums/provenance;
+  publish them through the same protected trusted-publishing workflow without
+  combining the MCP package contract with the compiled-wheel inventory.
+- MATLAB public entry points that require arguments must provide actionable
+  bare-invocation errors pinned by `matlab/tests/test_usage_guidance.m`.
+  Interactive examples must show visible UI defaults first; label hidden or
+  headless options as automation-only. Shape errors must explain row semantics
+  and include copy/paste-ready single-item and batch examples.
 
 ## Navigation
 
 | Need | File |
 |------|------|
 | Build, test, style, CI | `.github/copilot-instructions.md` |
+| Apple mobile static cores and smoke app | `docs/build.md` |
+| Manual iOS example app helpers | `examples/ios-apply-preview/README.md`, `examples/ios-benchapply/README.md`, `examples/ios-clut-editor/README.md`, `.github/skills/ios-manual-examples/SKILL.md` |
+| iOS CLUT editor POC | `examples/ios-clut-editor/README.md`, `.github/skills/ios-clut-editor/SKILL.md` |
 | AVX2 CLUT diagnostics and optimization handoff | `docs/avx2-clut-diagnostics.md` |
 | Pull request preparation and handoff | `docs/pre-pr-security-cycle.md` |
+| Maintainer local Git/devenv defaults | `docs/linear-stack-workflow.md` |
+| ClusterFuzzLite integration | `.github/ci/cfl/README.md`, `.github/skills/clusterfuzzlite/SKILL.md` |
 | Pre-PR security skill | `.github/skills/pre-pr-security-cycle/SKILL.md` |
 | Pre-PR security prompt | `.github/prompts/pre-pr-security-cycle.prompt.md` |
 | Stacked PR and fast-lane workflow | `.github/skills/stacked-pr-fast-lane/SKILL.md` |
@@ -38,11 +97,17 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Code-review bug hunting | `.github/prompts/code-review-hunting.prompt.md` |
 | Regression bisect workflow | `.github/prompts/bisect-regression.prompt.md` |
 | Unified maintainer container | `docs/regression-container.md` |
+| Memcheck, Helgrind, DRD, Massif, and Callgrind | `docs/valgrind-analysis.md`, `.github/skills/valgrind-analysis/SKILL.md` |
 | Regression container prompt | `.github/prompts/regression-container-maintainer.prompt.md` |
 | Maintainer CTest selection and CI budget | `.github/skills/maintainer-ci-ctest/SKILL.md` |
+| ICC.2 spectral, bi-spectral, and MCS XML QA | `docs/xml-spec-qa.md`, `.github/skills/icc2-xml-spec-qa/SKILL.md` |
 | New CLI tool onboarding | `.github/prompts/add-new-tool.prompt.md` |
+| Manual iOS examples | `.github/prompts/ios-manual-examples.prompt.md` |
+| iOS CLUT editor planning | `.github/prompts/ios-clut-editor.prompt.md` |
 | Contributor onboarding | `.github/prompts/contributor-onboarding.prompt.md` |
 | Apply-path throughput benchmark | `Tools/CmdLine/IccBenchApply/Readme.md` |
+| HEIF ICC carrier build and QA | `.github/workflows/ci-nokia-heif-icc-smoke.yml`, `.github/ci/tooling/heif/Readme.md`, `.github/skills/heif-icc-qa/SKILL.md` |
+| libpng iCCP fault build and QA | `.github/workflows/ci-libpng-iccp-smoke.yml`, `.github/ci/tooling/libpng/Readme.md`, `.github/skills/libpng-iccp-qa/SKILL.md` |
 | Security repro | `.github/prompts/reproduce-security-issue.prompt.md` |
 | iccSpecSepToTiff QA | `.github/skills/specsep-qa/SKILL.md` |
 | IIS ISAPI endpoint QA | `.github/skills/iis-isapi-qa/SKILL.md` |
@@ -51,17 +116,20 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Workflow hardening | `.github/instructions/workflow-governance.instructions.md` |
 | Maintainer label system | `docs/label-system.md` |
 | Label triage prompt | `.github/prompts/maintainer-label-triage.prompt.md` |
+| Label triage audit agent | `.github/agents/maintainer-label-triage.agent.md` |
 | Testing details | `.github/instructions/testing.instructions.md` |
 | Python bindings | `.github/instructions/python-bindings.instructions.md` |
 | MATLAB MEX bindings | `.github/instructions/matlab-mex.instructions.md` |
-| MATLAB build and QA | `docs/matlab-bindings.md` |
-| MATLAB binding tests | `.github/skills/matlab-bindings-test/SKILL.md` |
+| MATLAB MEX code review | `.github/instructions/matlab-code-review.instructions.md` |
+| MATLAB build, IccJSON conversion, and QA | `docs/matlab-bindings.md` |
+| MATLAB binding and IccJSON tests | `.github/skills/matlab-bindings-test/SKILL.md` |
 | MATLAB binding debug | `.github/prompts/debug-matlab-bindings.prompt.md` |
 | Python binding tests | `.github/skills/python-bindings-test/SKILL.md` |
 | WASM build tests | `.github/skills/wasm-build-test/SKILL.md` |
 | MCP subprocess debug | `.github/prompts/debug-mcp-subprocess.prompt.md` |
 | Python/Cython debug | `.github/prompts/debug-python-bindings.prompt.md` |
 | Documentation maintenance | `docs/documentation-maintenance.md` |
+| PCS adjustment placement (`CIccPcsXform` refactor) | `docs/pcs-adjustment-placement.md` |
 
 ## CFL Harness Scope
 
@@ -70,13 +138,36 @@ in-process targets are the intentional exceptions: consume only public headers,
 compile the engine sources as separate translation units, and never include a
 CLI implementation or call `processLuts()`.
 
-| target | consumes | covers |
+| group | targets | covers |
 | --- | --- | --- |
-| `icc_profilevisualize_fuzzer` | `IccVizModel.hpp` | the data-first model: `Enumerate`, `RenderGraph`, `RenderRaster` |
-| `icc_writerserialize_fuzzer` | `MiniPDF.hpp`, `MiniSVG.hpp`, `MiniTIFF.hpp` | the serialization layer the model feeds (#2116) |
+| `core` | `profileparse`, `cmmapply`, `profilevisualize`, `writerserialize` | profile parsing, bounded CMM application, visualization, and serialization |
+| `formats` | `xmlparse`, `jsonparse`, `connectconfig` | XML/JSON profile parsing and IccConnect configuration round trips |
+| `assessment` | `pawgreport` | in-memory PAWG assessment and compression verdicts |
 
 Keep them separate rather than folding serialization into the model target, so
 a crash stays attributable to one layer.
+
+The official ClusterFuzzLite lane builds all eight in-process targets above.
+Keep its `address`, `undefined`, and `memory` builds separate, pass all compiler
+and linker instrumentation through the OSS-Fuzz environment, require matching
+Clang 21 or 22 compilers across AFL, CFL, and ClusterFuzzLite, and keep the
+workflow manual plus branch-push-only until maintainers broaden that policy.
+The ClusterFuzzLite memory build must bootstrap the pinned instrumented libc++
+and libc++abi, reject libstdc++ or another libc++ at runtime, and replay the
+pinned #2687 artifact before fuzzing. A report crossing an uninstrumented C++
+runtime boundary is not attributable to iccDEV.
+
+Keep `cmmapply` controls outside the ICC header: an optional three-byte trailer
+selects direction, intent, and interpolation without corrupting the encoded
+profile size. Keep at least one schema-shaped IccConnect configuration seed in
+`.github/ci/test-data`, use the dedicated config dictionary, and preserve
+round-trip coverage for top-level and nested `CIccCfg*` objects.
+
+Temporary CFL MSan workarounds live as individual issue patches under
+`.github/ci/fuzz-patches/cfl`. The default fuzz build attempts every patch and
+continues after drift or prior integration; `--strict` is only for maintaining
+the patch inventory. Retire one issue patch at a time after its normal source
+fix lands.
 
 An in-process target that needs a CLUT raster also needs a corpus that still
 contains one. `max_seed_bytes` and libFuzzer's `max_len` both removed the only
@@ -88,7 +179,7 @@ under `.github/ci/test-data` is a hard error rather than a silent prune. Raise
 inputs -- they are independent gates. Validate with
 
 ```bash
-cfl/build.sh --targets profilevisualize,writerserialize --seconds 30
+.github/ci/cfl/build.sh --targets profilevisualize,writerserialize --seconds 30
 ```
 
 ## WASM Scope
@@ -113,7 +204,7 @@ Runtime AVX2 dispatch is limited to 15 outputs. Require
 `output_vector_match=True` for every benchmark row.
 
 For Linux evidence collection, configure a separate Release build with
-`ICCDEV_ENABLE_PERF_MONITORING=ON` and use
+`ICCDEV_ENABLE_TELEMETRY=ON` and use
 `.github/scripts/iccdev-clut-profile.sh`. The script writes timing
 distributions, hardware-counter CSVs, syscall summaries, and optional
 FlameGraph inputs; keep profiling and source-coverage builds separate from

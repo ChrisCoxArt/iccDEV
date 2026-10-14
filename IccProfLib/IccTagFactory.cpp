@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -132,6 +108,19 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigBRDFDToB1Tag, "brdfDToB1Tag"},
   {icSigBRDFDToB2Tag, "brdfDToB2Tag"},
   {icSigBRDFDToB3Tag, "brdfDToB3Tag"},
+  // ICC.2-2023 9.2.18-25 (#2564).  Until these had entries, GetTagSigName returned NULL
+  // for them, so iccDumpProfile listed each as "Unknown 'bBA0'" and iccToXml wrote a
+  // <PrivateTag TagSignature="bBA0">.  A document written that way still reads: a name
+  // lookup misses on "PrivateTag", so the XML reader takes the TagSignature attribute
+  // and the JSON reader takes a PrivateTag_N entry's "sig" member instead.
+  {icSigBRDFBToA0Tag, "brdfBToA0Tag"},
+  {icSigBRDFBToA1Tag, "brdfBToA1Tag"},
+  {icSigBRDFBToA2Tag, "brdfBToA2Tag"},
+  {icSigBRDFBToA3Tag, "brdfBToA3Tag"},
+  {icSigBRDFBToD0Tag, "brdfBToD0Tag"},
+  {icSigBRDFBToD1Tag, "brdfBToD1Tag"},
+  {icSigBRDFBToD2Tag, "brdfBToD2Tag"},
+  {icSigBRDFBToD3Tag, "brdfBToD3Tag"},
   {icSigSurfaceMapTag, "surfaceMapTag"},
   {icSigBToA0Tag, "BToA0Tag"},
   {icSigBToA1Tag, "BToA1Tag"},
@@ -158,6 +147,24 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigDToB1Tag, "DToB1Tag"},
   {icSigDToB2Tag, "DToB2Tag"},
   {icSigDToB3Tag, "DToB3Tag"},
+  // ICC.2-2023 9.2.61-76 (#2564).  The 9.2.63 heading misprints the name as
+  // "directionalfAToB2Tag"; the pattern of its 15 siblings is taken instead.
+  {icSigDirectionalAToB0Tag, "directionalAToB0Tag"},
+  {icSigDirectionalAToB1Tag, "directionalAToB1Tag"},
+  {icSigDirectionalAToB2Tag, "directionalAToB2Tag"},
+  {icSigDirectionalAToB3Tag, "directionalAToB3Tag"},
+  {icSigDirectionalBToA0Tag, "directionalBToA0Tag"},
+  {icSigDirectionalBToA1Tag, "directionalBToA1Tag"},
+  {icSigDirectionalBToA2Tag, "directionalBToA2Tag"},
+  {icSigDirectionalBToA3Tag, "directionalBToA3Tag"},
+  {icSigDirectionalBToD0Tag, "directionalBToD0Tag"},
+  {icSigDirectionalBToD1Tag, "directionalBToD1Tag"},
+  {icSigDirectionalBToD2Tag, "directionalBToD2Tag"},
+  {icSigDirectionalBToD3Tag, "directionalBToD3Tag"},
+  {icSigDirectionalDToB0Tag, "directionalDToB0Tag"},
+  {icSigDirectionalDToB1Tag, "directionalDToB1Tag"},
+  {icSigDirectionalDToB2Tag, "directionalDToB2Tag"},
+  {icSigDirectionalDToB3Tag, "directionalDToB3Tag"},
   {icSigGamutTag, "gamutTag"},
   {icSigGamutBoundaryDescription0Tag, "gamutBoundaryDescription0Tag"},
   {icSigGamutBoundaryDescription1Tag, "gamutBoundaryDescription1Tag"},
@@ -176,6 +183,9 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigHToS3Tag, "HToS3Tag"},
   {icSigLuminanceTag, "luminanceTag"},
   {icSigMeasurementTag, "measurementTag"},
+  // ICC.2-2023 9.2.91-92 (#2564).
+  {icSigMeasurementInfoTag, "measurementInfoTag"},
+  {icSigMeasurementInputInfoTag, "measurementInputInfoTag"},
   {icSigMediaBlackPointTag, "mediaBlackPointTag"},
   {icSigMediaWhitePointTag, "mediaWhitePointTag"},
   {icSigMToA0Tag, "MToA0Tag"},
@@ -187,6 +197,8 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigMToS1Tag, "MToS1Tag"},
   {icSigMToS2Tag, "MToS2Tag"},
   {icSigMToS3Tag, "MToS3Tag"},
+  // ICC.2-2023 8.10 (#2562): a v5 NamedColor profile requires namedColorTag.
+  {icSigNamedColorTag, "namedColorTag"},
   {icSigNamedColor2Tag, "namedColor2Tag"},
   {icSigPreview0Tag, "preview0Tag"},
   {icSigPreview1Tag, "preview1Tag"},
@@ -195,6 +207,8 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigProfileDescriptionTag, "profileDescriptionTag"},
   {icSigProfileSequenceDescTag, "profileSequenceDescTag"},
   {icSigProfileSequceIdTag, "profileSequenceIdentifierTag"},
+  // ICC.2-2023 9.2.107 (#2564).
+  {icSigProfileSequenceInformationTag, "profileSequenceInformationTag"},
   {icSigPs2CRD0Tag, "ps2CRD0Tag"},
   {icSigPs2CRD1Tag, "ps2CRD1Tag"},
   {icSigPs2CRD2Tag, "ps2CRD2Tag"},
@@ -228,6 +242,8 @@ icSigNamePair g_icTagNameTable[] = {
   {icSigSpectralWhitePointTag, "spectralWhitePointTag"},
   {icSigCustomToStandardPccTag, "customToStandardPccTag"},
   {icSigStandardToCustomPccTag, "standardToCustomPccTag"},
+  // ICC.2-2023 9.2.110 (#2564).
+  {icSigSourcePccTag, "sourcePccTag"},
   {icSigColorEncodingParamsTag, "colorEncodingParamsTag"},
   {icSigColorSpaceNameTag, "colorSpaceNameTag"},
   {icSigReferenceNameTag, "referenceNameTag"},

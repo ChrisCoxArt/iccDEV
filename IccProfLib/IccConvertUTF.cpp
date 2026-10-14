@@ -327,19 +327,39 @@ icUtfConversionResult icConvertUTF16toUTF8 (const UTF16** sourceStart, const UTF
           --source; /* return to the illegal value itself */
           result = sourceIllegal;
           break;
+        } else {
+          /* #2511: lenient mode used to fall out of this if-chain with ch still
+             holding the lone high surrogate, and the byte-count ladder below
+             encoded it as three bytes (U+D83D -> ED A0 BD).  That is CESU-8,
+             not UTF-8: surrogate code points have no UTF-8 encoding, libxml2
+             refuses the XML that iccToXml wrote from it, and this file's own
+             isLegalUTF8String() rejects it.  Lenient mode now substitutes
+             U+FFFD, which is what it already does in icConvertUTF32toUTF16
+             and icConvertUTF8toUTF16.  source is NOT advanced past ch2, so the
+             unit after a lone high surrogate is decoded on its own next time
+             round -- a valid pair straight after one still comes out intact.
+             Strict mode is unchanged (the arm above), and so is the trailing
+             case below: a high surrogate that ends the buffer is reported as
+             sourceExhausted and dropped, which yields well-formed output. */
+          ch = UNI_REPLACEMENT_CHAR;
         }
       } else { /* We don't have the 16 bits following the high surrogate. */
         --source; /* return to the high surrogate */
         result = sourceExhausted;
         break;
       }
-    } else if (flags == strictConversion) {
+    } else if (ch >= UNI_SUR_LOW_START && ch <= UNI_SUR_LOW_END) {
       /* UTF-16 surrogate values are illegal in UTF-32 */
-      if (ch >= UNI_SUR_LOW_START && ch <= UNI_SUR_LOW_END) {
+      if (flags == strictConversion) {
         --source; /* return to the illegal value itself */
         result = sourceIllegal;
         break;
       }
+      /* #2511: a lone low surrogate -- one not preceded by a high surrogate,
+         which the pairing arm above would have consumed -- is substituted
+         the same way.  This arm used to be reachable only in strict mode, so
+         lenient mode encoded the surrogate as CESU-8 exactly as above. */
+      ch = UNI_REPLACEMENT_CHAR;
     }
     /* Figure out how many bytes the result will require */
     if (ch < (UTF32)0x80) {	     bytesToWrite = 1;
@@ -394,19 +414,22 @@ icUtfConversionResult icConvertUTF16toUTF8 (const UTF16* source, const UTF16* so
           --source; /* return to the illegal value itself */
           result = sourceIllegal;
           break;
+        } else {
+          ch = UNI_REPLACEMENT_CHAR; /* #2511: see the pointer overload above */
         }
       } else { /* We don't have the 16 bits following the high surrogate. */
         --source; /* return to the high surrogate */
         result = sourceExhausted;
         break;
       }
-    } else if (flags == strictConversion) {
+    } else if (ch >= UNI_SUR_LOW_START && ch <= UNI_SUR_LOW_END) {
       /* UTF-16 surrogate values are illegal in UTF-32 */
-      if (ch >= UNI_SUR_LOW_START && ch <= UNI_SUR_LOW_END) {
+      if (flags == strictConversion) {
         --source; /* return to the illegal value itself */
         result = sourceIllegal;
         break;
       }
+      ch = UNI_REPLACEMENT_CHAR; /* #2511: see the pointer overload above */
     }
     /* Figure out how many bytes the result will require */
     if (ch < (UTF32)0x80) {	     bytesToWrite = 1;
@@ -445,6 +468,37 @@ icUtfConversionResult icConvertUTF16toUTF8 (const UTF16* source, const UTF16* so
 * available.
 * If presented with a length > 4, this returns false.  The Unicode
 * definition of UTF-8 goes up to 4-byte sequences.
+*
+* #2435: every arm needs BOTH bounds.  The case 2 arm below tests only the
+* upper bound (a > 0xBF); the generic lower bound lives in default:, which the
+* four named arms bypass.  0xE0 and 0xF0 tighten the lower bound to 0xA0 and
+* 0x90, so they imply a >= 0x80 and were correct by accident.  0xED and 0xF4
+* only tightened the UPPER bound and then broke, leaving no lower bound at all
+* -- a second byte of 0x00..0x7F, never a continuation byte, was accepted
+* after either lead.
+*
+* Measured against an RFC 3629 reference over every sequence this function can
+* be asked about: for each of the 256 lead bytes, every combination of the
+* trailing bytes its RFC length implies, 84,942,541 sequences.  Before:
+* 532,480 accepted that RFC 3629 rejects -- 128*64 for ED and 128*64*64 for
+* F4 -- and none rejected that it accepts.  After: zero in both directions.
+*
+* (#2435's issue body says 528,320.  That count came from a harness that
+* builds NUL-terminated strings, so it could not present 0x00 as a second
+* byte and missed 64 ED and 4096 F4 sequences.  This function takes a pointer
+* and a length, and a profile's text tag is a byte range, so the NUL cases are
+* reachable and the larger figure is the right one.)
+*
+* The accepted values were not merely wrong characters: ED 01 80 decoded to
+* U+B040 and F4 01 80 80 to U+81000, which is above U+10FFFF and not a Unicode
+* scalar value at all.  icConvertUTF8toUTF16 emitted it as a surrogate pair,
+* so the OUTPUT was not well-formed UTF-16 either.
+*
+* This rationale lives here rather than beside the code it explains because
+* CodeQL's cpp/long-switch measures a case by the raw line distance to the next
+* case label -- comments and blank lines included -- so 26 lines of it inside
+* case 2 tripped the 30-line threshold on their own, with no code change.
+* (code-scanning alert 2368; not issue #2368, which is unrelated.)
 */
 
 static Boolean isLegalUTF8(const UTF8 *source, int length)
@@ -459,13 +513,14 @@ static Boolean isLegalUTF8(const UTF8 *source, int length)
     case 3: if ((a = (*--srcptr)) < 0x80 || a > 0xBF) return false;
       [[fallthrough]];
     case 2: if ((a = (*--srcptr)) > 0xBF) return false;
-
+      /* #2435: the per-lead arms carry the lower bound this line omits; the
+       * rationale and the measurement are above the function. */
       switch (*source) {
             /* no fall-through in this inner switch */
         case 0xE0: if (a < 0xA0) return false; break;
-        case 0xED: if (a > 0x9F) return false; break;
+        case 0xED: if (a < 0x80 || a > 0x9F) return false; break;
         case 0xF0: if (a < 0x90) return false; break;
-        case 0xF4: if (a > 0x8F) return false; break;
+        case 0xF4: if (a < 0x80 || a > 0x8F) return false; break;
         default:   if (a < 0x80) return false;
       }
       [[fallthrough]];
@@ -699,6 +754,12 @@ icUtfConversionResult icConvertUTF32toUTF8 (const UTF32** sourceStart, const UTF
         break;
       }
     }
+    /* Lenient mode still passes a surrogate through here as three bytes,
+       unlike icConvertUTF16toUTF8 since #2511.  No iccDEV code calls this
+       function any more.  The dictType text that used to reach it, through
+       icWCharToUtf8() where wchar_t is 32 bits, holds UTF-16 code units, and
+       it arrived here as two lone surrogates per character above U+FFFF.  It
+       now goes through icConvertUTF16toUTF8 on every platform (#2526). */
     /*
     * Figure out how many bytes the result will require. Turn any
     * illegally large UTF32 things (> Plane 17) into replacement chars.

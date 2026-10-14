@@ -9,58 +9,34 @@ Copyright:  (c) see ICC Software License
 */
 
 /*
-* The ICC Software License, Version 0.2
-*
-*
-* Copyright (c) 2003-2023 The International Color Consortium. All rights 
-* reserved.
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, are permitted provided that the following conditions
-* are met:
-*
-* 1. Redistributions of source code must retain the above copyright
-*    notice, this list of conditions and the following disclaimer. 
-*
-* 2. Redistributions in binary form must reproduce the above copyright
-*    notice, this list of conditions and the following disclaimer in
-*    the documentation and/or other materials provided with the
-*    distribution.
-*
-* 3. In the absence of prior written permission, the names "ICC" and "The
-*    International Color Consortium" must not be used to imply that the
-*    ICC organization endorses or promotes products derived from this
-*    software.
-*
-*
-* THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
-* WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-* OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-* DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
-* ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-* SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-* LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-* USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-* OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-* SUCH DAMAGE.
-* ====================================================================
-*
-* This software consists of voluntary contributions made by many
-* individuals on behalf of the The International Color Consortium. 
-*
-*
-* Membership in the ICC is encouraged when this software is used for
-* commercial purposes. 
-*
-*  
-* For more information on The International Color Consortium, please
-* see <http://www.color.org/>.
-*  
-* 
-*/
-
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // ===========================================================================
 // declarations
 // ===========================================================================
@@ -506,14 +482,24 @@ MyChild::MyChild(wxMDIParentFrame *parent, const wxString& title, CIccProfile *p
 	sizerTop->Add(sizerBox, wxSizerFlags().Expand().Border(wxALL, 5));
 
 	wxSizer *sizerBtn = new wxBoxSizer(wxHORIZONTAL);
-    // Both reports re-read the profile from disk by path rather than using
-    // m_pIcc, so neither is available for a profile shown without a path.
-    if (!profilePath.IsEmpty()) {
-        if (IsRoundTripable(pIcc)) {
-  		    sizerBtn->Add(new wxButton(m_panel, ID_ROUND_TRIP, _("&Round Trip Report")), wxSizerFlags().Border(wxRIGHT, 5));
-        }
-        sizerBtn->Add(new wxButton(m_panel, ID_VALIDATE_PROFILE, _("&Validate Profile")), wxSizerFlags().Border(wxRIGHT, 5));
+  wxSize reportButtonSize = wxDefaultSize;
+#ifdef __WXOSX__
+  // wxDefaultSize enters SwiftUI sizing during an active AppKit commit on
+  // macOS 26. Use a DPI-scaled native control size for these fixed labels.
+  reportButtonSize = m_panel->FromDIP(wxSize(160, 30));
+#endif
+  // Both reports re-read the profile from disk by path rather than using
+  // m_pIcc, so neither is available for a profile shown without a path.
+  if (!profilePath.IsEmpty()) {
+    if (IsRoundTripable(pIcc)) {
+      sizerBtn->Add(new wxButton(m_panel, ID_ROUND_TRIP, _("&Round Trip Report"),
+                                wxDefaultPosition, reportButtonSize),
+                    wxSizerFlags().Border(wxRIGHT, 5));
     }
+    sizerBtn->Add(new wxButton(m_panel, ID_VALIDATE_PROFILE, _("&Validate Profile"),
+                              wxDefaultPosition, reportButtonSize),
+                  wxSizerFlags().Border(wxRIGHT, 5));
+  }
 
 	sizerTop->Add(sizerBtn, wxSizerFlags().Right());
 
@@ -535,9 +521,11 @@ MyChild::MyChild(wxMDIParentFrame *parent, const wxString& title, CIccProfile *p
 	m_tagsCtrl->InsertColumn(4, _("Size"), wxLIST_FORMAT_RIGHT, 100);
     m_tagsCtrl->InsertColumn(5, _("Padding"), wxLIST_FORMAT_RIGHT, 100);
 
-	// don't allow frame to get smaller than what the sizers tell it and also set
-	// the initial size as calculated by the sizers
-	sizerTop->SetSizeHints( this );
+  // The macOS frame already has fixed initial and minimum dimensions. Asking
+  // AppKit to refit it here opens a Core Animation transaction during commit.
+#ifndef __WXOSX__
+  sizerTop->SetSizeHints(this);
+#endif
 
 	m_panel->SetSizer(sizerTop);
 

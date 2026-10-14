@@ -2,11 +2,12 @@
   "name": "iccdev",
   "version": "2.3.2.3",
   "description": "Developer tools for ICC color profiles",
-  "builtin-baseline": "eae1680538b86f962455c27abca2aad0dc304a4d",
+  "builtin-baseline": "04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4",
   "dependencies": [
     "vcpkg-cmake",
     "vcpkg-cmake-config",
     "libpng",
+    "libheif",
     "wxwidgets",
     "tiff",
     "libxml2",
@@ -15,5 +16,11 @@
     "libjpeg-turbo",
     "zlib"
   ],
-  "overrides": []
+  "overrides": [
+    {
+      "name": "libiconv",
+      "version": "1.18",
+      "port-version": 0
+    }
+  ]
 }

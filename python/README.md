@@ -11,33 +11,42 @@ ICC color profile library, built with [Cython](https://cython.org/).
 - **Thread-safe apply** - create per-thread apply handles for concurrent use
 - **NumPy zero-copy** - `apply_ndarray()` for high-performance bulk transforms
 - **CLI-backed conversion helpers** - XML/JSON/blob conversion, profile dump,
-  and round-trip diagnostics aligned with the native iccDEV tools
+  round-trip diagnostics, and HEIF ICC inspection aligned with the native iccDEV tools
 - **Pythonic API** - context managers, enums, exceptions, type hints (PEP 561)
 - **Exception hierarchy** - `IccError` -> `IccProfileError`, `IccCmmError`
 - **Immutable headers** - `IccProfileHeader` as hashable NamedTuple with computed properties
 
 ## Installation
 
-## Current Status
-
-The `iccdev` package is in alpha development.  Until release automation
-publishes signed wheels to PyPI, install from this branch or from a local
-checkout for validation:
+The alpha `iccdev` package is published on
+<a href="https://pypi.org/project/iccdev/">PyPI</a>. Install the core package
+on a supported CPython 3.9-3.13 platform:
 
 ```bash
-pip install "git+https://github.com/InternationalColorConsortium/iccDEV.git@pip-install-iccdev#subdirectory=python"
+python -m pip install iccdev
 ```
 
-### From PyPI (after production release)
+For the NumPy examples below, install the optional extra:
 
 ```bash
-pip install iccdev
+python -m pip install "iccdev[numpy]"
 ```
 
-After the first production package release, this installs a pre-built wheel (no
-compiler needed) or builds from source if no wheel matches your platform.
-IccProfLib is bundled in source distributions; no external ICC library install
-is required.
+PyPI currently publishes binary wheels, not a source distribution. If no
+compatible wheel is available, install from the repository or a local checkout.
+This compiles the extension, so a C++17 compiler is required:
+
+```bash
+python -m pip install "iccdev[numpy] @ git+https://github.com/InternationalColorConsortium/iccDEV.git#subdirectory=python"
+```
+
+Rolling [Latest Build releases](https://github.com/InternationalColorConsortium/iccDEV/releases/latest)
+also provide exact-tag wheel URLs for reproducible installation. `cp313` means
+CPython 3.13; `win_amd64` is Windows x64, `win_arm64` is Windows ARM64, and
+macOS wheels identify `x86_64`, `arm64`, or `universal2`. Linux provides
+`manylinux` for glibc and `musllinux` for musl on x86_64/aarch64. Wheels
+contain the core library and type stubs; CLI-backed helpers still need the
+native tool bundle.
 
 ### From source (development)
 
@@ -61,7 +70,7 @@ The core `IccProfile` and `IccCmm` APIs do not require iccDEV command-line
 tools at runtime. The XML, JSON, dump, and round-trip helper functions are
 CLI-backed; set `ICCDEV_TOOLS_DIR`, `ICCDEV_BUILD_DIR`, or `PATH` so Python can
 find `iccToXml`, `iccFromXml`, `iccToJson`, `iccFromJson`, `iccDumpProfile`,
-and `iccRoundTrip`.
+`iccRoundTrip`, and `iccHeifDump`.
 
 Source distributions require Cython at build time.  The project intentionally
 does not ship a generated `_iccdev.cpp`; reproducible builds regenerate the C++
@@ -75,7 +84,7 @@ checkout also has a pre-built `ICCDEV_BUILD_DIR`.
 - Python >= 3.9
 - C++17 compiler (MSVC, GCC, or Clang) - only for source builds
 - NumPy >= 1.23,<3 (optional, for `apply_ndarray()`)
-- Cython >= 3.0,<3.2 - only for source distribution builds
+- Cython >= 3.0,<3.4 - only for source distribution builds
 
 ## Quick Start
 
@@ -125,6 +134,7 @@ json_text = iccdev.icc_to_json(xml_blob)
 json_blob = iccdev.icc_from_json(json_text)
 print(iccdev.dump_profile(json_blob))
 print(iccdev.round_trip("sRGB.icc"))
+print(iccdev.heif_dump("image.heic"))
 ```
 
 ## Exception Handling
@@ -196,6 +206,7 @@ except iccdev.IccCmmError as exc:
 | `icc_from_json(json)` | Convert JSON text/path/object to ICC profile bytes using `iccFromJson` |
 | `dump_profile(profile, mode="ALL")` | Run `iccDumpProfile` for an ICC path or bytes |
 | `round_trip(profile)` | Run `iccRoundTrip` for an ICC path or bytes |
+| `heif_dump(image, output_dir=None)` | Report HEIF ICC properties and optionally extract raw profiles |
 | `find_tool(tool)` | Resolve a supported iccDEV command-line tool |
 | `available_tools()` | Return discovered CLI-backed helper tools |
 
@@ -382,4 +393,4 @@ Works with mypy, pyright, and IDE autocompletion.
 
 ## License
 
-BSD 3-Clause - same as the parent RefIccMAX project. See [LICENSE.md](../LICENSE.md).
+BSD 3-Clause - same as the parent RefIccMAX project. See [LICENSE.md](LICENSE.md).

@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // Regression: IccPawgReport compression-path measurement (S14, issue #1775).
 //
 // Follow-up to #1774/#1723: the PAWG report classified tags by *signature* and
@@ -18,6 +47,9 @@
 //
 // Exit code 0 = pass, 1 = a case regressed.
 #include "PawgReport.h"
+
+#include "IccIO.h"
+#include "IccProfile.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -62,6 +94,105 @@ static std::vector<uint8_t> makeProfile(uint32_t tagSig, uint32_t typeSig, uint3
   if (dataFlag)
     putU32BE(b, tagOffset + 8, dataFlag);            // [type][reserved][flags]
   return b;
+}
+
+// Build a structurally readable profile whose A2B0 tag uses a forbidden text
+// type. ValidateIccProfile() returns a CIccProfile plus a critical status, so
+// this pins AssessPawgFromMemory() to library status rather than nullness.
+static std::vector<uint8_t> makeCriticalParsedProfile()
+{
+  std::vector<uint8_t> b(156, 0);
+  putU32BE(b, 0, (uint32_t)b.size());
+  putU32BE(b, 8, 0x04400000u);                     // ICC v4.4
+  putU32BE(b, 12, 0x6d6e7472u);                    // 'mntr'
+  putU32BE(b, 16, 0x52474220u);                    // 'RGB '
+  putU32BE(b, 20, 0x58595a20u);                    // 'XYZ '
+  putU32BE(b, 36, 0x61637370u);                    // 'acsp'
+  putU32BE(b, 68, 0x0000f6d6u);                    // D50 X
+  putU32BE(b, 72, 0x00010000u);                    // D50 Y
+  putU32BE(b, 76, 0x0000d32du);                    // D50 Z
+  putU32BE(b, 128, 1);                             // tag count
+  putU32BE(b, 132, 0x41324230u);                   // 'A2B0'
+  putU32BE(b, 136, 144);                           // tag data offset
+  putU32BE(b, 140, 12);                            // tag data size
+  putU32BE(b, 144, kText);                         // forbidden 'text' type
+  b[152] = 'x';
+  return b;
+}
+
+// Build a v5 DToB0 profile with an mpet tag whose one-element position table
+// is truncated. The library must reject it outright, yielding no profile.
+static std::vector<uint8_t> makeMalformedMpeProfile()
+{
+  std::vector<uint8_t> b(160, 0);
+  putU32BE(b, 0, (uint32_t)b.size());
+  putU32BE(b, 8, 0x05000000u);                     // ICC v5
+  putU32BE(b, 12, 0x6d6e7472u);                    // 'mntr'
+  putU32BE(b, 16, 0x52474220u);                    // 'RGB '
+  putU32BE(b, 20, 0x58595a20u);                    // 'XYZ '
+  putU32BE(b, 36, 0x61637370u);                    // 'acsp'
+  putU32BE(b, 68, 0x0000f6d6u);                    // D50 X
+  putU32BE(b, 72, 0x00010000u);                    // D50 Y
+  putU32BE(b, 76, 0x0000d32du);                    // D50 Z
+  putU32BE(b, 128, 1);                             // tag count
+  putU32BE(b, 132, 0x44324230u);                   // 'D2B0'
+  putU32BE(b, 136, 144);                           // tag data offset
+  putU32BE(b, 140, 16);                            // tag data size
+  putU32BE(b, 144, 0x6d706574u);                   // 'mpet'
+  putU32BE(b, 152, 0x00030003u);                   // 3 input, 3 output
+  putU32BE(b, 156, 1);                             // one element, no position
+  return b;
+}
+
+static void initProfileHeader(std::vector<uint8_t> &b, uint32_t version)
+{
+  putU32BE(b, 0, (uint32_t)b.size());
+  putU32BE(b, 8, version);
+  putU32BE(b, 12, 0x6d6e7472u);                    // 'mntr'
+  putU32BE(b, 16, 0x52474220u);                    // 'RGB '
+  putU32BE(b, 20, 0x58595a20u);                    // 'XYZ '
+  putU32BE(b, 36, 0x61637370u);                    // 'acsp'
+  putU32BE(b, 68, 0x0000f6d6u);                    // D50 X
+  putU32BE(b, 72, 0x00010000u);                    // D50 Y
+  putU32BE(b, 76, 0x0000d32du);                    // D50 Z
+}
+
+// Two individually readable unknown tags partially overlap. Each begins with
+// its own type signature; only the nested tag-table layout is non-compliant.
+static std::vector<uint8_t> makeEmbeddedOverlapProfile()
+{
+  std::vector<uint8_t> embedded(172, 0);
+  initProfileHeader(embedded, 0x05000000u);
+  putU32BE(embedded, 128, 2);
+  putU32BE(embedded, 132, 0x70727631u);            // 'prv1'
+  putU32BE(embedded, 136, 160);
+  putU32BE(embedded, 140, 8);
+  putU32BE(embedded, 144, 0x70727632u);            // 'prv2'
+  putU32BE(embedded, 148, 164);
+  putU32BE(embedded, 152, 8);
+  putU32BE(embedded, 160, 0x74413031u);            // 'tA01'
+  putU32BE(embedded, 164, 0x74423032u);            // 'tB02'
+  putU32BE(embedded, 168, 0);
+
+  std::vector<uint8_t> outer(152 + embedded.size(), 0);
+  initProfileHeader(outer, 0x05000000u);
+  putU32BE(outer, 128, 1);
+  putU32BE(outer, 132, 0x49434335u);               // 'ICC5'
+  putU32BE(outer, 136, 144);
+  putU32BE(outer, 140, (uint32_t)(8 + embedded.size()));
+  putU32BE(outer, 144, 0x49434370u);               // 'ICCp'
+  std::copy(embedded.begin(), embedded.end(), outer.begin() + 152);
+  return outer;
+}
+
+static CIccMemIO *makeMemIo(std::vector<uint8_t> &data)
+{
+  CIccMemIO *io = new CIccMemIO;
+  if (!io->Attach((icUInt8Number *)data.data(), data.size(), false)) {
+    delete io;
+    return nullptr;
+  }
+  return io;
 }
 
 static bool contains(const std::string &s, const char *needle)
@@ -114,6 +245,57 @@ int main()
   // --- Controls: uncompressed tags must read as the empty case ----------------
   checkUncompressed(makeProfile(0x63707274u /*'cprt'*/, kText, 0), "text control");
   checkUncompressed(makeProfile(0x64657363u /*'desc'*/, kData, 0), "plain data ctrl");
+
+  // --- Full in-memory assessment must honor critical library status ----------
+  {
+    std::vector<uint8_t> critical = makeCriticalParsedProfile();
+    std::string report;
+    icValidateStatus status = icValidateOK;
+    CIccProfile *profile = ValidateIccProfile(critical.data(),
+                                              (icUInt32Number)critical.size(),
+                                              report, status);
+    CHECK(profile != nullptr);
+    CHECK(status == icValidateCriticalError);
+    delete profile;
+    CHECK(AssessPawgFromMemory(critical.data(), critical.size()) == 1);
+  }
+
+  // A malformed mpet payload has no partially parsed profile to carry a
+  // critical validation status. The assessment must still fail closed.
+  {
+    std::vector<uint8_t> malformed = makeMalformedMpeProfile();
+    std::string report;
+    icValidateStatus status = icValidateOK;
+    CIccProfile *profile = ValidateIccProfile(malformed.data(),
+                                              (icUInt32Number)malformed.size(),
+                                              report, status);
+    CHECK(profile == nullptr);
+    CHECK(status == icValidateCriticalError);
+    CHECK(AssessPawgFromMemory(malformed.data(), malformed.size()) == 1);
+  }
+
+  // Both embedded-profile paths must reject layout aliasing before per-tag
+  // validation can obscure the cause: Read() fully loads, Attach() defers.
+  {
+    std::vector<uint8_t> overlap = makeEmbeddedOverlapProfile();
+    CIccProfile fullyRead;
+    CIccMemIO *io = makeMemIo(overlap);
+    CHECK(io != nullptr);
+    if (io) {
+      CHECK(!fullyRead.Read(io));
+      delete io;
+    }
+  }
+  {
+    std::vector<uint8_t> overlap = makeEmbeddedOverlapProfile();
+    CIccProfile deferred;
+    CIccMemIO *io = makeMemIo(overlap);
+    CHECK(io != nullptr);
+    if (io) {
+      CHECK(deferred.Attach(io));
+      CHECK(deferred.FindTag((icSignature)0x49434335u) == nullptr);
+    }
+  }
 
   // --- Robustness: a too-small / header-only buffer must not crash ------------
   {

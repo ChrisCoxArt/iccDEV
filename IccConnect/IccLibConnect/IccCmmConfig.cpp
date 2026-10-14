@@ -10,53 +10,33 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
  ////////////////////////////////////////////////////////////////////// 
  // HISTORY:
  //
@@ -454,6 +434,8 @@ void CIccCfgImageApply::reset()
   m_dstCompression = icDstBoolTrue;
   m_dstPlanar = icDstBoolFalse;
   m_dstEmbedIcc = icDstBoolTrue;
+  m_dstTileWidth = m_dstTileHeight = 0;
+  m_dstBigTiff = false;
 }
 
 int CIccCfgImageApply::fromArgs(const char** args, int nArg, bool bReset)
@@ -563,6 +545,34 @@ bool CIccCfgImageApply::fromJson(json j, bool bReset)
     return false;
   if (j.contains("dstEmbedIcc") && !jsonToValue(j["dstEmbedIcc"], m_dstEmbedIcc))
     return false;
+  unsigned int width = m_dstTileWidth, height = m_dstTileHeight;
+  for (const char *key : {"dstTileWidth", "dstTileHeight"}) {
+    if (j.contains(key)) {
+      const json &value = j[key];
+      if (!value.is_number())
+        return false;
+      // JSON Schema integers include 16.0 and 1.6e1. Every uint32 value is
+      // exactly representable as double; validate before the narrowing cast.
+      const double dimension = value.get<double>();
+      if (!std::isfinite(dimension) || dimension < 0 || dimension > UINT32_MAX ||
+          std::floor(dimension) != dimension)
+        return false;
+      if (key == std::string("dstTileWidth"))
+        width = static_cast<unsigned int>(dimension);
+      else
+        height = static_cast<unsigned int>(dimension);
+    }
+  }
+  if ((width == 0) != (height == 0) ||
+      (width && (width % 16 || height % 16)))
+    return false;
+  if (j.contains("dstBigTiff")) {
+    if (!j["dstBigTiff"].is_boolean())
+      return false;
+    m_dstBigTiff = j["dstBigTiff"].get<bool>();
+  }
+  m_dstTileWidth = width;
+  m_dstTileHeight = height;
 
   return true;
 }
@@ -580,6 +590,12 @@ void CIccCfgImageApply::toJson(json& j) const
   setDstBool(j, "dstCompression", m_dstCompression);
   setDstBool(j, "dstPlanar", m_dstPlanar);
   setDstBool(j, "dstEmbedIcc", m_dstEmbedIcc);
+  if (m_dstTileWidth) {
+    j["dstTileWidth"] = m_dstTileWidth;
+    j["dstTileHeight"] = m_dstTileHeight;
+  }
+  if (m_dstBigTiff)
+    j["dstBigTiff"] = true;
 }
 
 CIccCfgConnectOptions::CIccCfgConnectOptions()
@@ -590,6 +606,7 @@ CIccCfgConnectOptions::CIccCfgConnectOptions()
 void CIccCfgConnectOptions::reset()
 {
   m_nThreads = 1;
+  m_bUseSearch = false;
 }
 
 bool CIccCfgConnectOptions::fromJson(json j, bool bReset)
@@ -611,6 +628,13 @@ bool CIccCfgConnectOptions::fromJson(json j, bool bReset)
     m_nThreads = nThreads;
   }
 
+  if (j.find("useSearch") != j.end()) {
+    bool bUseSearch = m_bUseSearch;
+    if (!jsonToValue(j["useSearch"], bUseSearch))
+      return false;
+    m_bUseSearch = bUseSearch;
+  }
+
   return true;
 }
 
@@ -618,6 +642,10 @@ void CIccCfgConnectOptions::toJson(json& j) const
 {
   if (m_nThreads != 1)
     j["threads"] = m_nThreads;
+  // Emitted only when set so -exportcfg output stays byte-identical for the
+  // forward-chain configs that predate this option.
+  if (m_bUseSearch)
+    j["useSearch"] = m_bUseSearch;
 }
 
 CIccCfgCreateLink::CIccCfgCreateLink()
@@ -1158,7 +1186,17 @@ int CIccCfgProfileSequence::fromArgs(const char** args, int nArg, bool bReset)
       if (nIntent > (int)icAbsoluteColorimetric)
         return 0;
       
-      if (nType < (int)icXformLutMinimum || nType > (int)icXformLutMaximum)
+      // Only the upper bound is testable, and unlike the identically spelled check
+      // in iccApplyToLink it is genuinely live here: this decode strips "% 1000"
+      // rather than "% 100", so nType carries the hundreds column and spans 0..99.
+      // Measured on master: "130" resolves to icXformLutNamedDevice and "140" is
+      // refused by this very comparison.  The lower half cannot fire -- nType is
+      // "abs(...) / 10", never negative -- so it is dropped for the same reason
+      // #2267 dropped the intent lower bounds two lines up.  CodeQL did not raise
+      // this one the way it raised those: cpp/constant-comparison cannot see through
+      // abs(), so it had to be found by set-diffing the four copies of the check by
+      // hand (#2270).
+      if (nType > (int)icXformLutMaximum)
         return 0;
 
       pProf->m_intent = (icRenderingIntent)nIntent;
@@ -1168,6 +1206,25 @@ int CIccCfgProfileSequence::fromArgs(const char** args, int nArg, bool bReset)
       args += 2;
       nArg -= 2;
       nUsed += 2;
+    }
+    else {
+      // -ENV: pairs apply to the profile that follows them.  The loop is only
+      // entered with at least one pair left, so reaching this branch means -ENV:
+      // pairs consumed the rest of the arguments and there is no profile.  The
+      // entry was appended anyway, below, without ever receiving a file or a
+      // rendering intent (#2140).  Environment variables with no transform to
+      // apply them to are not a profile sequence, so refuse the command line --
+      // as the -ENV: parse above already does for a malformed name, and for the
+      // same reason: accepting it accepts a command line that does not mean what
+      // it says.  Refusing on the argument count, not the file name, keeps
+      // -embedded working: it legitimately leaves the file name empty in the
+      // block above.
+      //
+      // The refusal was first written as an "if (nArg < 2) return 0" guard ahead
+      // of that block, which made the block's own test always true
+      // (cpp/constant-comparison, code-scanning alert 2424).  It belongs here,
+      // where one test serves both paths.
+      return 0;
     }
 
     if (nArg >= 2 && !stricmp(args[0], "-PCC")) {
@@ -1342,6 +1399,20 @@ int CIccCfgSearchApply::fromArgs(const char** args, int nArg, bool bReset)
     }
 
     if (nArg >= 2) {
+      // The same rule when -ENV: pairs are followed by -INIT.  -INIT ends the
+      // profile list, but it is only recognised at the top of this loop, before
+      // any -ENV: pairs are consumed; after them it reached the decode below as a
+      // file name.  "-ENV:abcd 1.0 -INIT 1" was accepted with a profile entry
+      // whose file was the literal string "-INIT", and the initializer the caller
+      // asked for was never applied.  -INIT takes an intent and no environment
+      // variables, so the pairs have nothing to apply to: refuse, as the else
+      // branch does.  Reaching here with -INIT next can only mean -ENV: pairs came
+      // first, since the top of the loop breaks on it otherwise.  The test reads
+      // args[0], so it sits inside the argument-count branch rather than ahead of
+      // it, where an -ENV: run that consumed every remaining argument would leave
+      // nothing to read.
+      if (!stricmp(args[0], "-INIT"))
+        return 0;
 
       pProf->m_iccFile = args[0];
       if (bFirst) {
@@ -1428,7 +1499,17 @@ int CIccCfgSearchApply::fromArgs(const char** args, int nArg, bool bReset)
       if (nIntent > (int)icAbsoluteColorimetric)
         return 0;
       
-      if (nType < (int)icXformLutMinimum || nType > (int)icXformLutMaximum)
+      // Only the upper bound is testable, and unlike the identically spelled check
+      // in iccApplyToLink it is genuinely live here: this decode strips "% 1000"
+      // rather than "% 100", so nType carries the hundreds column and spans 0..99.
+      // Measured on master: "130" resolves to icXformLutNamedDevice and "140" is
+      // refused by this very comparison.  The lower half cannot fire -- nType is
+      // "abs(...) / 10", never negative -- so it is dropped for the same reason
+      // #2267 dropped the intent lower bounds two lines up.  CodeQL did not raise
+      // this one the way it raised those: cpp/constant-comparison cannot see through
+      // abs(), so it had to be found by set-diffing the four copies of the check by
+      // hand (#2270).
+      if (nType > (int)icXformLutMaximum)
         return 0;
 
       pProf->m_intent = (icRenderingIntent)nIntent;
@@ -1438,6 +1519,25 @@ int CIccCfgSearchApply::fromArgs(const char** args, int nArg, bool bReset)
       args += 2;
       nArg -= 2;
       nUsed += 2;
+    }
+    else {
+      // -ENV: pairs apply to the profile that follows them.  The loop is only
+      // entered with at least one pair left, so reaching this branch means -ENV:
+      // pairs consumed the rest of the arguments and there is no profile.  The
+      // entry was appended anyway, below, without ever receiving a file or a
+      // rendering intent (#2140).  Environment variables with no transform to
+      // apply them to are not a profile sequence, so refuse the command line --
+      // as the -ENV: parse above already does for a malformed name, and for the
+      // same reason: accepting it accepts a command line that does not mean what
+      // it says.  Refusing on the argument count, not the file name, keeps
+      // -embedded working: it legitimately leaves the file name empty in the
+      // block above.
+      //
+      // The refusal was first written as an "if (nArg < 2) return 0" guard ahead
+      // of that block, which made the block's own test always true
+      // (cpp/constant-comparison, code-scanning alert 2423).  It belongs here,
+      // where one test serves both paths.
+      return 0;
     }
 
     if (nArg >= 2 && !stricmp(args[0], "-PCC")) {
@@ -1503,7 +1603,17 @@ int CIccCfgSearchApply::fromArgs(const char** args, int nArg, bool bReset)
     if (nIntent > (int)icAbsoluteColorimetric)
       return 0;
       
-    if (nType < (int)icXformLutMinimum || nType > (int)icXformLutMaximum)
+    // Only the upper bound is testable, and unlike the identically spelled check
+    // in iccApplyToLink it is genuinely live here: this decode strips "% 1000"
+    // rather than "% 100", so nType carries the hundreds column and spans 0..99.
+    // Measured on master: "130" resolves to icXformLutNamedDevice and "140" is
+    // refused by this very comparison.  The lower half cannot fire -- nType is
+    // "abs(...) / 10", never negative -- so it is dropped for the same reason
+    // #2267 dropped the intent lower bounds two lines up.  CodeQL did not raise
+    // this one the way it raised those: cpp/constant-comparison cannot see through
+    // abs(), so it had to be found by set-diffing the four copies of the check by
+    // hand (#2270).
+    if (nType > (int)icXformLutMaximum)
       return 0;
 
     m_intentInitial = (icRenderingIntent)nIntent;
@@ -1624,6 +1734,14 @@ void CIccCfgSearchApply::toJsonInit(json &j) const
 
 bool CIccCfgSearchApply::fromJsonInit(json j)
 {
+  // An absent "initial" key yields a null value here.  The initial-destination
+  // block is optional: CIccConnectCmm::CreateSearch guards every use of it
+  // behind isInitialized(), and CIccCmmSearch::Begin() handles a null initial
+  // profile.  Rejecting the absent key made a search config that does not want
+  // a reverse-search starting point unparseable.
+  if (j.is_null())
+    return true;
+
   if (!j.is_object())
     return false;
 
@@ -1828,25 +1946,164 @@ static bool ParseNextNumber(icFloatNumber& num, icChar** text)
 
 //===================================================
 
-static bool ParseName(icChar* pName, icChar* pString)
+static int HexDigit(icChar c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+// #2439: the '{ "name" }' tokens are the only text toLegacy() writes that
+// fromLegacy() reads back, so what lands in a config *file* has to survive the
+// trip. icSanitizeConsoleText() cannot carry it: that helper is deliberately
+// lossy because it is written for a terminal -- it escapes every non-ASCII
+// codepoint and leaves a literal backslash alone, so a name holding U+00FC and
+// the six characters \u00FC both encode to the same six characters, and neither
+// reads back. Measured on 764fc176: a profile colour named Gr<U+00FC>n applied
+// through iccApplyNamedCmm wrote { "Gr\u00FCn" }, and feeding that token back
+// in failed the lookup with "Profile application failed."
+//
+// This encoder escapes only what the format or the written file cannot take:
+//
+//   \ and "     framing. The backslash has to be spelled for any escape to be
+//               decodable; the quote goes out as \x22 so that ParseName()'s
+//               terminator scan cannot match inside the name.
+//   C0, DEL, C1 control codepoints. #2406 keeps these out of text iccDEV emits
+//               and no colour name legitimately carries one. C1 is escaped as
+//               its two UTF-8 bytes, which re-form the codepoint exactly.
+//   ill-formed  UTF-8, one byte at a time, so a mangled name cannot leave a
+//               file whose meaning depends on the reader.
+//
+// Everything else -- printable ASCII and every printable non-ASCII codepoint --
+// is written as its own bytes. An ordinary ASCII name is therefore byte-for-byte
+// what it is today, and a non-ASCII one now round-trips exactly.
+static std::string EncodeCfgName(const std::string& name)
+{
+  static const icChar hex[] = "0123456789ABCDEF";
+  std::string out;
+  // Walked by length, not to the first NUL. m_name reaches toLegacy() from
+  // readers other than fromLegacy() -- the JSON and IT8 paths -- and one of
+  // those can hand over a name with an embedded NUL, which c_str() would end the
+  // token at. It is escaped like any other C0 byte instead. icDecodeUtf8() below
+  // still reads through a NUL-terminated buffer, so a truncated sequence at the
+  // end of the string fails validation rather than running off it.
+  const unsigned char* base = (const unsigned char*)name.c_str();
+  const unsigned char* end = base + name.size();
+  const unsigned char* p = base;
+
+  while (p < end) {
+    unsigned char ch = *p;
+    int nEscape = 0;
+
+    if (ch == '\\') {
+      out += "\\\\";
+      p++;
+      continue;
+    }
+
+    // A double quote falls through to the \xNN escape below rather than being
+    // spelled \", so that no raw '"' byte can appear inside a token at all.
+    // ParseName() finds the end of the token with strstr(..., "\" }"), which
+    // knows nothing about escapes: with a \" spelling, a colour name containing
+    // '" }' matched at its OWN escaped quote and came back truncated. Measured
+    // on the first cut of this fix -- A" }B encoded to A\" }B and decoded to A\.
+    // \x22 leaves the terminator scan only one thing it can match.
+    if (ch != '"' && ch >= 0x20 && ch < 0x7f) {
+      out += (icChar)ch;
+      p++;
+      continue;
+    }
+
+    if (ch >= 0x80) {
+      unsigned int cp = 0;
+      int len = icDecodeUtf8(p, &cp);
+
+      if (len > 1 && p + len <= end) {
+        // C1 is spelled C2 80..C2 9F in UTF-8 and a terminal still acts on it,
+        // so it is escaped like C0. Every other well-formed codepoint keeps its
+        // own bytes -- that is what makes the round trip exact.
+        if (cp < 0x80u || cp > 0x9fu) {
+          out.append((const icChar*)p, (size_t)len);
+          p += len;
+          continue;
+        }
+        nEscape = len;
+      }
+      // A byte that is not a well-formed lead, or a sequence that would run past
+      // the end. Fall through and escape a single byte, so an invalid lead
+      // cannot swallow what follows.
+    }
+
+    if (!nEscape)
+      nEscape = 1;
+
+    while (nEscape--) {
+      out += "\\x";
+      out += hex[(*p >> 4) & 0xf];
+      out += hex[*p & 0xf];
+      p++;
+    }
+  }
+
+  return out;
+}
+
+static bool ParseName(std::string& name, const icChar* pString)
 {
   if (strncmp(pString, "{ \"", 3))
     return false;
 
-  const icChar* ptr = strstr(pString, "\" }");
+  // #2439: search from past the opening quote, not from the start of the line.
+  // strstr() from pString matches the '{ "' prefix's OWN quote whenever the name
+  // begins with ' }' -- the terminator was then found BEFORE the name started,
+  // ptr < p, the decode loop never ran and fromLegacy() dropped the row with no
+  // diagnostic. Measured on 764fc176 with a colour named ' }B'.
+  const icChar* p = pString + 3;
+  const icChar* ptr = strstr(p, "\" }");
 
   if (!ptr)
     return false;
 
-  icUInt32Number nNameLen = (icUInt32Number)(ptr - (pString + 3));
+  // #2439: decode into a std::string. This used to strncpy() the token into a
+  // caller-supplied icChar[256] with a length taken straight from the token, so
+  // any legacy config file carrying a name of 256 characters or more wrote past
+  // that buffer: ASan reports a stack-buffer-overflow in ParseName for both
+  // `iccApplyNamedCmm <file> 0 0 <profile> 1` and the iccApplySearch equivalent
+  // (CWE-787). It was reachable from the tool's own output -- a colour named
+  // with 43 accented characters is 86 bytes in, but 258 characters back out
+  // under the console escaping this function used to be handed. A larger buffer
+  // would only move the boundary, so there is no buffer.
+  name.clear();
 
-  if (!nNameLen)
-    return false;
+  while (p < ptr) {
+    if (*p == '\\' && p + 1 < ptr) {
+      icChar esc = p[1];
 
-  strncpy(pName, pString + 3, nNameLen);
-  pName[nNameLen] = '\0';
+      if (esc == '\\') {
+        name += esc;
+        p += 2;
+        continue;
+      }
 
-  return true;
+      if (esc == 'x' && p + 3 < ptr) {
+        int hi = HexDigit(p[2]), lo = HexDigit(p[3]);
+
+        if (hi >= 0 && lo >= 0) {
+          name += (icChar)((hi << 4) | lo);
+          p += 4;
+          continue;
+        }
+      }
+      // Not an escape EncodeCfgName() emits. Keep both characters, so a name
+      // that already contained a backslash -- a path spelled into a colour name,
+      // say -- reads exactly as it did before #2439.
+    }
+
+    name += *p++;
+  }
+
+  return !name.empty();
 }
 
 
@@ -1899,22 +2156,35 @@ bool CIccCfgColorData::fromLegacy(const char* filename, bool bReset)
     delete[] tempBuf;
     return false;
   }
-  char SrcNameBuf[256];
   int nSrcSamples = icGetSpaceSamples(m_srcSpace);
   CIccPixelBuf Pixel(nSrcSamples + 16);
 
+  // #2439: a line longer than tempBufSize makes getline() set failbit without
+  // reaching eof, and failbit is sticky -- every later getline() then returns
+  // immediately having extracted nothing, so `while (!eof())` spins forever.
+  // Measured on 764fc176: a 30000-character name is exit 124 under any timeout
+  // (CWE-835), the same shape as #2414 and #2442 in the sibling tools. Reading
+  // the stream state after each getline() ends the loop instead; a clean EOF sets
+  // failbit too, on the final zero-character read, so this also covers the
+  // ordinary exit and does not need eof() to be consulted separately.
   while (!InputData.eof()) {
     CIccCfgDataEntryPtr data(new CIccCfgDataEntry());
 
     //Are names coming is as an input?
     if (m_srcSpace == icSigNamedData) {
       InputData.getline(tempBuf, tempBufSize);
-      if (!ParseName(SrcNameBuf, tempBuf))
+      if (InputData.fail())
+        break;
+
+      // #2439: the fixed icChar[256] this used to fill is gone -- the token
+      // carries its own length and nothing bounded it.
+      if (!ParseName(data->m_name, tempBuf))
         continue;
 
-      data->m_name = SrcNameBuf;
-
-      icChar* numptr = strstr(tempBuf, "\" }");
+      // #2439: from tempBuf + 3 for the same reason ParseName() does -- these two
+      // scans have to agree on where the name ended, or the tint is read out of
+      // the middle of the name.
+      icChar* numptr = strstr(tempBuf + 3, "\" }");
       if (numptr)
         numptr += 3;
 
@@ -1926,6 +2196,9 @@ bool CIccCfgColorData::fromLegacy(const char* filename, bool bReset)
     else { //pixel sample data coming in as input
 
       InputData.getline(tempBuf, tempBufSize);
+      if (InputData.fail())
+        break;
+
       if (!ParseNumbers(Pixel, tempBuf, nSamples))
         continue;
 
@@ -2311,6 +2584,19 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
            icWriteString(f, tempBuf);
   };
 
+  // #2439: same text, two sinks, two encoders. A named file is read back by
+  // fromLegacy(), so its name tokens need EncodeCfgName(), which is reversible.
+  // icOpenRegularWriteFile() hands back stdout for an empty filename, and stdout
+  // may be a terminal, so that case stays on the console escaping #2406/#2420
+  // put there. A redirected stdout keeps the console spelling too: the FILE* is
+  // still stdout, and guessing from isatty() would make the bytes iccDEV writes
+  // depend on how the caller invoked it. Ask for a file if you want to read it
+  // back.
+  const bool bToFile = (f != stdout);
+  auto nameToken = [bToFile](const std::string& sName)->std::string {
+    return bToFile ? EncodeCfgName(sName) : icSanitizeConsoleText(sName);
+  };
+
   std::string out;
   snprintf(tempBuf, tempSize, "%s\t; ", icGetColorSig(tempBuf2, tempSize, m_space, false));
   out = tempBuf;
@@ -2334,6 +2620,10 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
 
   fprintf(f, ";Source data is after semicolon\n");
   
+  // #2439: the ';' lines below stay on icSanitizeConsoleText() on purpose.
+  // ParseName() rejects them and fromLegacy() skips them, so they are comments
+  // no reader decodes -- lossy-but-safe is the right trade for text whose only
+  // consumer is a person looking at the file.
   fprintf(f, "\n;Profiles applied\n");
   for (auto pIter = profiles.begin(); pIter != profiles.end(); pIter++) {
     CIccCfgProfile* pProf = pIter->get();
@@ -2360,7 +2650,7 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
     }
 
     if (pData->m_name.size() != size_t(0)) {
-      fprintf(f, "{ \"%s\" }\t;", icSanitizeConsoleText(pData->m_name).c_str() );
+      fprintf(f, "{ \"%s\" }\t;", nameToken(pData->m_name).c_str() );
     }
     else {
       for (size_t i = 0; i < pData->m_values.size(); i++) {
@@ -2370,7 +2660,7 @@ bool CIccCfgColorData::toLegacy(const char* filename, const CIccCfgProfileArray 
     }
 
     if (pData->m_srcName.size() != size_t(0)) {
-      fprintf(f,"{ \"%s\" }", icSanitizeConsoleText(pData->m_srcName).c_str());
+      fprintf(f,"{ \"%s\" }", nameToken(pData->m_srcName).c_str());
       // Echo the tint the caller supplied (m_srcValues[0]).  We used to
       // suppress this when the tint was exactly 1.0, but that hid a
       // value the caller had explicitly written -- the

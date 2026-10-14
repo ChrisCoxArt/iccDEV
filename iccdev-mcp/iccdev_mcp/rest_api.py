@@ -1,6 +1,6 @@
 """REST API layer for iccdev-mcp.
 
-Mirrors all 26 MCP tools as HTTP endpoints using Starlette.
+Mirrors MCP tools as HTTP endpoints using Starlette.
 Each endpoint delegates to the same function backing the MCP tool,
 ensuring MCP and REST always return identical results.
 
@@ -42,6 +42,7 @@ except ImportError:
     HAS_UVICORN = False
 
 from iccdev_mcp import __version__, cli_tools, profiles
+from iccdev_mcp.server import NativeBindingsUnavailable
 
 # Maximum upload size: 20 MB
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -60,6 +61,7 @@ _FILE_KINDS = {
     "tiff": ("*.tif", "*.tiff", "*.TIF", "*.TIFF"),
     "jpeg": ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG"),
     "png": ("*.png", "*.PNG"),
+    "heif": ("*.heif", "*.heic", "*.avif", "*.HEIF", "*.HEIC", "*.AVIF"),
     "cube": ("*.cube", "*.CUBE"),
 }
 
@@ -308,29 +310,30 @@ const TOOL_GROUPS = [
   { title: 'Status', tools: ['health', 'tools', 'profiles', 'enum_spaces'] },
   { title: 'Python native', tools: ['inspect_header', 'profile_summary', 'validate_profile', 'sig_to_str', 'color_transform', 'roundtrip_delta'] },
   { title: 'ICC profile CLI', tools: ['dump_profile', 'pawg_report', 'to_xml', 'to_json', 'roundtrip'] },
-  { title: 'Image and conversion CLI', tools: ['tiff_dump', 'jpeg_dump', 'png_dump', 'from_xml', 'from_json', 'from_cube'] },
+  { title: 'Image and conversion CLI', tools: ['tiff_dump', 'jpeg_dump', 'png_dump', 'heif_dump', 'from_xml', 'from_json', 'from_cube'] },
   { title: 'Advanced CLI', tools: ['apply_profiles', 'apply_named_cmm', 'create_link', 'v5_to_v4', 'spec_sep', 'apply_search'] },
   { title: 'File management', tools: ['upload'] }
 ];
 const TOOLS = {
   health: { label: 'Health', method: 'GET', path: '/api/health', desc: 'Server status, Python binding availability, and CLI discovery.', fields: [] },
-  tools: { label: 'Tool discovery', method: 'GET', path: '/api/tools', desc: 'List the 26 MCP tools plus REST-only utility routes exposed by iccdev-mcp.', fields: [] },
+  tools: { label: 'Tool discovery', method: 'GET', path: '/api/tools', desc: 'List MCP tools plus REST-only utility routes exposed by iccdev-mcp.', fields: [] },
   profiles: { label: 'Profile browser', method: 'GET', path: '/api/profiles', desc: 'List bundled or configured ICC profiles by Testing/ directory and filename.', fields: [{ name: 'directory', label: 'Directory', type: 'profile_directory', kind: 'profile' }, { name: 'filename', label: 'Filename', type: 'testing_file', kind: 'profile', directoryField: 'directory' }] },
   enum_spaces: { label: 'Enum color spaces', method: 'GET', path: '/api/enum-spaces', desc: 'List Python ColorSpace enum values.', fields: [] },
   inspect_header: { label: 'Inspect header', method: 'GET', path: '/api/inspect-header', desc: 'Read ICC profile header fields with computed names.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   profile_summary: { label: 'Profile summary', method: 'GET', path: '/api/profile-summary', desc: 'Compact Python-native profile classification and routing metadata.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   validate_profile: { label: 'Validate profile', method: 'GET', path: '/api/validate-profile', desc: 'Validate an ICC profile in memory and return its native status and report.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   sig_to_str: { label: 'Signature to string', method: 'GET', path: '/api/sig-to-str', desc: 'Decode a 32-bit ICC signature integer.', fields: [{ name: 'sig', label: 'Signature integer', type: 'number', value: '1380401696', required: true }] },
-  color_transform: { label: 'Color transform', method: 'POST', path: '/api/color-transform', desc: 'Apply a Python-native CMM transform between compatible RGB display profiles. Overprint, high-channel, named-color, and calculator test profiles may reject the default 3-channel pixel input with BadXform.', fields: [{ name: 'src_profile', label: 'Source profile', type: 'profile', required: true, prefer: 'rgb_transform' }, { name: 'dst_profile', label: 'Destination profile', type: 'profile', required: true, prefer: 'rgb_transform' }, { name: 'pixels', label: 'Pixels JSON', type: 'json', value: '[[0.5,0.4,0.3]]', required: true }, { name: 'rendering_intent', label: 'Rendering intent', type: 'select', value: 'perceptual', options: ['perceptual', 'relative', 'saturation', 'absolute'] }, { name: 'interpolation', label: 'Interpolation', type: 'select', value: 'tetrahedral', options: ['tetrahedral', 'linear'] }] },
-  roundtrip_delta: { label: 'Roundtrip delta', method: 'POST', path: '/api/roundtrip-delta', desc: 'Measure Python-native round-trip delta for profile pixels.', fields: [{ name: 'profile', label: 'ICC profile', type: 'profile', required: true }, { name: 'pixels', label: 'Pixels JSON', type: 'json', value: '[[0.5,0.4,0.3]]', required: true }, { name: 'rendering_intent', label: 'Rendering intent', type: 'select', value: 'perceptual', options: ['perceptual', 'relative', 'saturation', 'absolute'] }] },
+  color_transform: { label: 'Color transform', method: 'POST', path: '/api/color-transform', desc: 'Apply the native IccProfLib CMM between compatible profiles. Requires the separate compiled iccdev Python bindings.', fields: [{ name: 'src_profile', label: 'Source profile', type: 'profile', required: true, prefer: 'rgb_transform' }, { name: 'dst_profile', label: 'Destination profile', type: 'profile', required: true, prefer: 'rgb_transform' }, { name: 'pixels', label: 'Pixels JSON', type: 'json', value: '[[0.5,0.4,0.3]]', required: true }, { name: 'rendering_intent', label: 'Rendering intent', type: 'select', value: 'perceptual', options: ['perceptual', 'relative', 'saturation', 'absolute'] }, { name: 'interpolation', label: 'Interpolation', type: 'select', value: 'tetrahedral', options: ['tetrahedral', 'linear'] }] },
+  roundtrip_delta: { label: 'Roundtrip channel distance', method: 'POST', path: '/api/roundtrip-delta', desc: 'Measure native device to PCS to device Euclidean channel distance (not CIE Delta E). Requires compiled iccdev Python bindings.', fields: [{ name: 'profile', label: 'ICC profile', type: 'profile', required: true }, { name: 'pixels', label: 'Pixels JSON', type: 'json', value: '[[0.5,0.4,0.3]]', required: true }, { name: 'rendering_intent', label: 'Rendering intent', type: 'select', value: 'perceptual', options: ['perceptual', 'relative', 'saturation', 'absolute'] }] },
   dump_profile: { label: 'Dump profile', method: 'GET', path: '/api/dump', desc: 'Run iccDumpProfile with documented validation, verbosity, and tag options.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }, { name: 'validate', label: 'Validate (-v)', type: 'select', value: 'true', options: ['true', 'false'] }, { name: 'verbosity', label: 'Verbosity', type: 'number', value: '100' }, { name: 'tag', label: 'Tag', type: 'text', value: 'ALL' }] },
   pawg_report: { label: 'PAWG report', method: 'GET', path: '/api/pawg-report', desc: 'Run iccPawgReport security, conformance, and quality checklist.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   to_xml: { label: 'ICC to XML', method: 'GET', path: '/api/to-xml', desc: 'Run iccToXml.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   to_json: { label: 'ICC to JSON', method: 'GET', path: '/api/to-json', desc: 'Run iccToJson.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }] },
   roundtrip: { label: 'Round-trip test', method: 'GET', path: '/api/roundtrip', desc: 'Run iccRoundTrip with rendering intent and MPE/LUT selection.', fields: [{ name: 'path', label: 'ICC profile', type: 'profile', required: true }, { name: 'intent', label: 'Rendering intent', type: 'select', value: '1', options: ['0', '1', '2', '3'] }, { name: 'use_mpe', label: 'Use MPE', type: 'select', value: '0', options: ['0', '1'] }] },
-  tiff_dump: { label: 'TIFF dump', method: 'GET', path: '/api/tiff-dump', desc: 'Run iccTiffDump on a TIFF image.', fields: [{ name: 'path', label: 'TIFF path', type: 'testing_file', kind: 'tiff', required: true }] },
+  tiff_dump: { label: 'TIFF dump', method: 'GET', path: '/api/tiff-dump', desc: 'Inspect TIFF metadata or inventory main-chain IFDs without decoding pixels. Leave IFD blank when listing.', fields: [{ name: 'path', label: 'TIFF path', type: 'testing_file', kind: 'tiff', required: true }, { name: 'ifd', label: 'IFD index (optional)', type: 'text' }, { name: 'list_directories', label: 'List directories', type: 'select', value: 'false', options: ['false', 'true'] }, { name: 'evidence_json', label: 'JSON evidence', type: 'select', value: 'false', options: ['false', 'true'] }] },
   jpeg_dump: { label: 'JPEG dump', method: 'GET', path: '/api/jpeg-dump', desc: 'Run iccJpegDump on a JPEG image.', fields: [{ name: 'path', label: 'JPEG path', type: 'testing_file', kind: 'jpeg', required: true }] },
   png_dump: { label: 'PNG dump', method: 'GET', path: '/api/png-dump', desc: 'Run iccPngDump on a PNG image.', fields: [{ name: 'path', label: 'PNG path', type: 'testing_file', kind: 'png', required: true }] },
+  heif_dump: { label: 'HEIF dump', method: 'GET', path: '/api/heif-dump', desc: 'Run iccHeifDump on a HEIF, HEIC, or AVIF image.', fields: [{ name: 'path', label: 'HEIF, HEIC, or AVIF path', type: 'testing_file', kind: 'heif', required: true }] },
   from_xml: { label: 'XML to ICC', method: 'POST', path: '/api/from-xml', desc: 'Run iccFromXml on an XML file and return an ICC blob as base64.', fields: [{ name: 'xml_path', label: 'XML path', type: 'testing_file', kind: 'xml', required: true }] },
   from_json: { label: 'JSON to ICC', method: 'POST', path: '/api/from-json', desc: 'Run iccFromJson on a JSON file and return an ICC blob as base64.', fields: [{ name: 'json_path', label: 'JSON path', type: 'testing_file', kind: 'json', required: true }] },
   from_cube: { label: 'Cube to ICC', method: 'POST', path: '/api/from-cube', desc: 'Run iccFromCube on a .cube LUT.', fields: [{ name: 'cube_path', label: '.cube path', type: 'testing_file', kind: 'cube', required: true }] },
@@ -338,7 +341,7 @@ const TOOLS = {
   apply_named_cmm: { label: 'Apply named CMM', method: 'POST', path: '/api/apply-named-cmm', desc: 'Run iccApplyNamedCmm with config args.', fields: [{ name: 'config_args', label: 'Config args JSON array', type: 'json', value: '[]', required: true }] },
   create_link: { label: 'Create device link', method: 'POST', path: '/api/create-link', desc: 'Create a device link from profile paths.', fields: [{ name: 'profiles', label: 'Profiles JSON array', type: 'json', value: '[]', required: true }] },
   v5_to_v4: { label: 'V5 display to V4', method: 'POST', path: '/api/v5-to-v4', desc: 'Convert v5 display and observer profiles to v4.', fields: [{ name: 'display_profile', label: 'Display profile', type: 'profile', required: true }, { name: 'observer_profile', label: 'Observer profile', type: 'profile', required: true }] },
-  spec_sep: { label: 'Spectral separation', method: 'POST', path: '/api/spec-sep', desc: 'Run iccSpecSepToTiff.', fields: [{ name: 'reflectance_profile', label: 'Reflectance profile', type: 'profile', required: true }, { name: 'colorant_profile', label: 'Colorant profile', type: 'profile', required: true }, { name: 'illuminant_profiles', label: 'Illuminant profiles JSON array', type: 'json', value: '[]' }] },
+  spec_sep: { label: 'Combine spectral TIFFs', method: 'POST', path: '/api/spec-sep', desc: 'Combine numbered grayscale TIFF files; the literal prefix plus each channel number names an input.', fields: [{ name: 'input_prefix', label: 'Literal channel filename prefix', type: 'text', required: true }, { name: 'start', label: 'First channel', type: 'number', value: '1', required: true }, { name: 'end', label: 'Last channel', type: 'number', value: '10', required: true }, { name: 'increment', label: 'Channel increment', type: 'number', value: '1', required: true }, { name: 'compress', label: 'Compression (0=none, 1=LZW)', type: 'number', value: '0' }, { name: 'planar', label: 'Planar (0=interleaved, 1=separate)', type: 'number', value: '0' }, { name: 'profile', label: 'Optional matching ICC profile', type: 'profile' }, { name: 'tile_width', label: 'Tile width (0=strips)', type: 'number', value: '0' }, { name: 'tile_height', label: 'Tile height (0=strips)', type: 'number', value: '0' }, { name: 'bigtiff', label: 'BigTIFF', type: 'select', valueType: 'boolean', value: 'false', options: ['false', 'true'] }] },
   apply_search: { label: 'Apply search', method: 'POST', path: '/api/apply-search', desc: 'Run iccApplySearch with config args.', fields: [{ name: 'config_args', label: 'Config args JSON array', type: 'json', value: '[]', required: true }] },
   upload: { label: 'Upload file', method: 'UPLOAD', path: '/api/upload', desc: 'Upload ICC, image, XML, JSON, or cube input for follow-up tool calls.', fields: [{ name: 'file', label: 'File', type: 'file', required: true }] }
 };
@@ -399,6 +402,7 @@ function fieldValue(field) {
   if (!el) return null;
   if (field.type === 'json') return parseJsonField(el.value, field.label);
   if (field.type === 'number') return Number(el.value);
+  if (field.valueType === 'boolean') return el.value === 'true';
   if (field.type === 'file') return el.files[0] || null;
   if (field.type === 'profile_file' || field.type === 'testing_file') return el.value;
   return el.value;
@@ -855,6 +859,8 @@ API_TOOLS = [
      "description": "JPEG metadata and embedded ICC", "type": "cli"},
     {"name": "png_dump", "method": "GET", "path": "/api/png-dump",
      "description": "PNG metadata and embedded ICC", "type": "cli"},
+    {"name": "heif_dump", "method": "GET", "path": "/api/heif-dump",
+     "description": "HEIF, HEIC, and AVIF metadata and embedded ICC", "type": "cli"},
     {"name": "from_cube", "method": "POST", "path": "/api/from-cube",
      "description": ".cube LUT to ICC profile", "type": "cli"},
     {"name": "apply_profiles", "method": "POST", "path": "/api/apply-profiles",
@@ -866,7 +872,7 @@ API_TOOLS = [
     {"name": "v5_to_v4", "method": "POST", "path": "/api/v5-to-v4",
      "description": "v5 DspObs to v4 conversion", "type": "cli"},
     {"name": "spec_sep", "method": "POST", "path": "/api/spec-sep",
-     "description": "Spectral separation", "type": "cli"},
+     "description": "Combine numbered grayscale TIFF channels", "type": "cli"},
     {"name": "apply_search", "method": "POST", "path": "/api/apply-search",
      "description": "Search-based color transform", "type": "cli"},
 ]
@@ -886,7 +892,7 @@ async def api_health(request: Request) -> JSONResponse:
     tools_info = cli_tools.discover_tools()
 
     try:
-        import iccdev
+        from iccdev_mcp import _native as iccdev
         python_api = True
         validation_api = getattr(
             iccdev,
@@ -897,12 +903,15 @@ async def api_health(request: Request) -> JSONResponse:
         python_api = False
         validation_api = False
 
+    from iccdev_mcp.server import _transform_available
+
     return _json({
         "ok": True,
         "server": "iccdev-mcp",
         "version": __version__,
         "python_api_available": python_api,
         "validation_api_available": validation_api,
+        "transform_api_available": _transform_available(),
         "cli_tools": {
             "available": tools_info["available"],
             "missing": tools_info["missing"],
@@ -1011,6 +1020,8 @@ async def api_color_transform(request: Request) -> JSONResponse:
         from iccdev_mcp.server import color_transform
         result = color_transform(src, dst, pixels, intent, interp)
         return _json(result)
+    except NativeBindingsUnavailable as e:
+        return _error(str(e), 503)
     except ImportError:
         return _error("iccdev Python package not installed", 503)
     except FileNotFoundError as e:
@@ -1042,6 +1053,8 @@ async def api_roundtrip_delta(request: Request) -> JSONResponse:
         from iccdev_mcp.server import roundtrip_delta
         result = roundtrip_delta(profile_path, pixels, intent)
         return _json(result)
+    except NativeBindingsUnavailable as e:
+        return _error(str(e), 503)
     except ImportError:
         return _error("iccdev Python package not installed", 503)
     except FileNotFoundError as e:
@@ -1318,13 +1331,24 @@ async def api_from_json(request: Request) -> JSONResponse:
 
 
 async def api_tiff_dump(request: Request) -> JSONResponse:
-    """GET /api/tiff-dump?path= -- TIFF metadata and embedded ICC."""
+    """GET /api/tiff-dump -- selected IFD metadata or directory inventory."""
     path = request.query_params.get("path", "")
     if not path:
         return _error("Missing required parameter: path")
     try:
         resolved = profiles.resolve_profile_path(path)
-        result = cli_tools.run_tiff_dump(str(resolved))
+        ifd_text = request.query_params.get("ifd", "")
+        if ifd_text and (not ifd_text.isascii() or not ifd_text.isdecimal()):
+            return _error("ifd must be an integer in 0..4095")
+        flags = []
+        for name in ("list_directories", "evidence_json"):
+            value = request.query_params.get(name, "false")
+            if value not in ("true", "false"):
+                return _error(f"{name} must be true or false")
+            flags.append(value == "true")
+        result = cli_tools.run_tiff_dump(
+            str(resolved), int(ifd_text) if ifd_text else None, *flags,
+        )
         return _json(result)
     except FileNotFoundError as e:
         return _error(str(e), 404)
@@ -1359,6 +1383,23 @@ async def api_png_dump(request: Request) -> JSONResponse:
     try:
         resolved = profiles.resolve_profile_path(path)
         result = cli_tools.run_png_dump(str(resolved))
+        return _json(result)
+    except FileNotFoundError as e:
+        return _error(str(e), 404)
+    except ValueError as e:
+        return _error(str(e), 400)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+async def api_heif_dump(request: Request) -> JSONResponse:
+    """GET /api/heif-dump?path= -- HEIF, HEIC, or AVIF metadata and ICC."""
+    path = request.query_params.get("path", "")
+    if not path:
+        return _error("Missing required parameter: path")
+    try:
+        resolved = profiles.resolve_profile_path(path)
+        result = cli_tools.run_heif_dump(str(resolved))
         return _json(result)
     except FileNotFoundError as e:
         return _error(str(e), 404)
@@ -1552,35 +1593,27 @@ async def api_v5_to_v4(request: Request) -> JSONResponse:
 
 
 async def api_spec_sep(request: Request) -> JSONResponse:
-    """POST /api/spec-sep -- Spectral separation to TIFF."""
+    """POST /api/spec-sep -- combine numbered single-channel TIFFs."""
     body = await _json_body(request)
     if isinstance(body, JSONResponse):
         return body
 
-    reflectance = body.get("reflectance_profile", "")
-    colorant = body.get("colorant_profile", "")
-    illuminants = body.get("illuminant_profiles", [])
-
-    if not reflectance or not colorant:
-        return _error(
-            "Missing required fields: reflectance_profile, colorant_profile"
-        )
+    required = ("input_prefix", "start", "end", "increment")
+    if any(name not in body for name in required):
+        return _error("Missing required fields: input_prefix, start, end, increment")
+    if any(name in body for name in
+           ("reflectance_profile", "colorant_profile", "illuminant_profiles")):
+        return _error("Use numbered TIFF input_prefix and channel range, not separation profiles")
 
     try:
-        resolved_ref = _resolve_input(reflectance)
-        resolved_col = _resolve_input(colorant)
-        resolved_illum = None
-        if illuminants:
-            if not isinstance(illuminants, list):
-                return _error("illuminant_profiles must be a list")
-            resolved_illum = _resolve_inputs(illuminants)
-
         fd, tmp_output = tempfile.mkstemp(suffix=".tif")
         os.close(fd)
         try:
             result = cli_tools.run_spec_sep_to_tiff(
-                str(resolved_ref), str(resolved_col),
-                tmp_output, resolved_illum
+                body["input_prefix"], tmp_output, body["start"], body["end"],
+                body["increment"], body.get("compress", 0), body.get("planar", 0),
+                body.get("profile"), body.get("tile_width", 0),
+                body.get("tile_height", 0), body.get("bigtiff", False),
             )
             if result["returncode"] == 0 and Path(tmp_output).exists():
                 result["output_base64"] = base64.b64encode(
@@ -1679,6 +1712,7 @@ def _build_routes() -> list:
         Route("/api/tiff-dump", api_tiff_dump, methods=["GET"]),
         Route("/api/jpeg-dump", api_jpeg_dump, methods=["GET"]),
         Route("/api/png-dump", api_png_dump, methods=["GET"]),
+        Route("/api/heif-dump", api_heif_dump, methods=["GET"]),
         Route("/api/from-cube", api_from_cube, methods=["POST"]),
         Route("/api/apply-profiles", api_apply_profiles, methods=["POST"]),
         Route("/api/apply-named-cmm", api_apply_named_cmm, methods=["POST"]),

@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2023 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 //////////////////////////////////////////////////////////////////////
 // HISTORY:
 //
@@ -79,6 +55,7 @@
 #include "IccMpeSpectral.h"
 #include "IccUtil.h"
 #include "IccProfLibVer.h"
+#include "IccFileUtil.h"
 #include <memory>
 
 
@@ -133,16 +110,24 @@ int main(int argc, char* argv[])
     return 0;
   }
 
+  // #2414: all three operands are echoed by the twelve diagnostics below, so a
+  // path carrying terminal control sequences reached the console verbatim
+  // (#2406).  Sanitized once here; ReadIccProfile/SaveIccProfile still get the
+  // real paths.
+  std::string dspName = icSanitizeConsoleText(argv[1]);
+  std::string pccName = icSanitizeConsoleText(argv[2]);
+  std::string outName = icSanitizeConsoleText(argv[3]);
+
   CIccProfileSharedPtr dspIcc( ReadIccProfile(argv[1], true) );
 
   if (!dspIcc) {
-    printf("Unable to parse '%s'\n", argv[1]);
+    printf("Unable to parse '%s'\n", dspName.c_str());
     return -2;
   }
 
   if (dspIcc->m_Header.version < icVersionNumberV5 ||
     dspIcc->m_Header.deviceClass != icSigDisplayClass) {
-    printf("%s is not a V5 display profile\n", argv[1]);
+    printf("%s is not a V5 display profile\n", dspName.c_str());
     return -2;
   }
 
@@ -150,14 +135,14 @@ int main(int argc, char* argv[])
   // matrix/TRC profile built from three (1,0,0)/(0,1,0)/(0,0,1) primaries below,
   // so a non-RGB data colour space cannot be honoured.
   if (dspIcc->m_Header.colorSpace != icSigRgbData) {
-    printf("%s is not an RGB display profile (data colour space must be 'RGB ')\n", argv[1]);
+    printf("%s is not an RGB display profile (data colour space must be 'RGB ')\n", dspName.c_str());
     return -2;
   }
 
   CIccTagMultiProcessElement* pTagIn = (CIccTagMultiProcessElement*)dspIcc->FindTagOfType(icSigAToB1Tag, icSigMultiProcessElementType);
 
   if (!pTagIn) {
-    printf("%s doesn't have an AToB1Tag of type mulitProcessElementType\n", argv[1]);
+    printf("%s doesn't have an AToB1Tag of type mulitProcessElementType\n", dspName.c_str());
     return -2;
   }
 
@@ -170,14 +155,14 @@ int main(int argc, char* argv[])
         curveMpe->GetType()!= icSigCurveSetElemType ||
       ((matrixMpe = pTagIn->GetElement(1))==nullptr) ||
         matrixMpe->GetType()!=icSigEmissionMatrixElemType) {
-    printf("%s doesn't have a spectral emission AToB1Tag\n", argv[1]);
+    printf("%s doesn't have a spectral emission AToB1Tag\n", dspName.c_str());
     return -2;
   }
 
   CIccProfileSharedPtr pccIcc( ReadIccProfile(argv[2]) );
 
   if (!pccIcc) {
-    printf("Unable to parse '%s'\n", argv[2]);
+    printf("Unable to parse '%s'\n", pccName.c_str());
     return -2;
   }
 
@@ -185,7 +170,7 @@ int main(int argc, char* argv[])
   // ICC spec carries as a ColorSpace-class ('spac') profile (subclass 'pcc ').
   if (pccIcc->m_Header.version < icVersionNumberV5 ||
     pccIcc->m_Header.deviceClass != icSigColorSpaceClass) {
-    printf("%s is not a V5 observer (ColorSpace-class PCC) profile\n", argv[2]);
+    printf("%s is not a V5 observer (ColorSpace-class PCC) profile\n", pccName.c_str());
     return -2;
   }
 
@@ -204,12 +189,12 @@ int main(int argc, char* argv[])
     pTagC2S->NumOutputChannels() != 3 ||
     !pTagSvcn->getObserver(obsRange) ||
     !obsRange.steps) {
-    printf("%s doesn't have Profile Connection Conditions (observer + customToStandardPcc)\n", argv[2]);
+    printf("%s doesn't have Profile Connection Conditions (observer + customToStandardPcc)\n", pccName.c_str());
     return -2;
   }
 
   if (!pTagIn->Begin(icElemInterpLinear, dspIcc.get(), pccIcc.get())) {
-    printf("bad tagIn in %s\n", argv[1]);
+    printf("bad tagIn in %s\n", dspName.c_str());
     return -2;
   }
 
@@ -222,7 +207,7 @@ int main(int argc, char* argv[])
   auto mtxApply = applyIter->ptr;
 
   if (!pTagC2S->Begin(icElemInterpLinear, pccIcc.get())) {
-    printf("bad transform c2s in %s\n", argv[2]);
+    printf("bad transform c2s in %s\n", pccName.c_str());
     return -2;
   }
   
@@ -324,11 +309,11 @@ int main(int argc, char* argv[])
   pIcc->AttachTag(icSigMediaWhitePointTag, whiteXYZ); // pointer ownership is passed to the profile
 
   if (!SaveIccProfile(argv[3], pIcc)) {
-    printf("Unable to create %s\n", argv[3]);
+    printf("Unable to create %s\n", outName.c_str());
     delete pIcc;
     return -1;
   }
-  printf("%s successfully created\n", argv[3]);
+  printf("%s successfully created\n", outName.c_str());
   delete pIcc;
 
   return 0;

@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -195,20 +171,28 @@ bool icValidTagPos(const icPositionNumber& pos, size_t nTagHeaderSize, size_t nT
 * Args:
 *  pos1 - first positionNumber
 *  pos2 - second positionNumber
-*  bAllowSame - allow to positions to cover the same area
+*  bAllowSame - allow the two positions to start at the same offset, i.e.
+*               to reference the same data
 *
 * Return:
-*  true if v1 is near v2 within range
+*  true if the ranges are disjoint, or start at the same offset and
+*  bAllowSame is set
 ******************************************************************************
 */
 bool icValidOverlap(const icPositionNumber& pos1, const icPositionNumber &pos2, bool bAllowSame)
 {
+  // Disjoint ranges never conflict.
   if ((icUInt64Number)pos1.offset + pos1.size <= (icUInt64Number)pos2.offset ||
       (icUInt64Number)pos1.offset >= (icUInt64Number)pos2.offset + pos2.size)
     return true;
 
-// TODO - double check this logic!
-  if ( (bAllowSame && pos1.offset == pos2.offset) || pos1.size == pos2.size)
+  // Overlapping ranges are acceptable only when bAllowSame is set and they
+  // start at the same offset, i.e. reference the same data.
+  //
+  // #2731: this also accepted any two overlapping ranges of equal size,
+  // whatever their offsets and even with bAllowSame false (the "TODO - double
+  // check this logic!" that stood here).
+  if (bAllowSame && pos1.offset == pos2.offset)
     return true;
 
   return false;
@@ -701,11 +685,18 @@ icFloat16Number ICCPROFLIB_API icFtoF16(icFloat32Number num)
 {
   icUInt16Number rv;
   icUInt16Number rvsgn, rvexp, rvmnt;
-  icUInt32Number flt, *fltp, fltsgn, fltexp, fltmnt;
+  icUInt32Number flt, fltsgn, fltexp, fltmnt;
   int exp;
 
-  fltp = (icUInt32Number*)&num;
-  flt = *fltp;
+  // The bit pattern is copied out instead of being read through an
+  // icUInt32Number lvalue aimed at the float argument. num is a float object,
+  // and a wide-integer load of it is undefined -- the same defect #1948 fixed
+  // in CIccIO::Write16/32/64, reported here by cppcheck as invalidPointerCast
+  // (#2504). icF16toF above already returns its result through memcpy; only
+  // this direction was left punning, so it inherits the twin's idiom rather
+  // than a new one.
+  static_assert(sizeof(flt) == sizeof(num), "icFloat32Number must match icUInt32Number width for icFtoF16");
+  memcpy(&flt, &num, sizeof(flt));
   if (!(flt & 0x7FFFFFFF)) {
     rv = (icUInt16Number) (flt >> 16);
   } else { 
@@ -801,7 +792,7 @@ icUInt8Number icABtoU8(icFloatNumber num)
   icFloatNumber v = num + 128.0f;
   
   if (std::isnan(num))
-    return 128.0f;
+    return 128;
   else if (v<0)
     return 0;
   else if (v>255)
@@ -1435,6 +1426,7 @@ icUInt32Number icGetSpaceSamples(icColorSpaceSignature sig)
   case icSigLuvData:
   case icSigYCbCrData:
   case icSigYxyData:
+  case icSigLmsData:
   case icSigRgbData:
   case icSigHsvData:
   case icSigHlsData:
@@ -1490,6 +1482,39 @@ icUInt32Number icGetSpectralSpaceSamples(const icHeader *pHdr)
     return icGetSpaceSamples((icColorSpaceSignature)pHdr->spectralPCS);
   else
     return icGetSpaceSamples(pHdr->pcs);
+}
+
+/**
+ ******************************************************************************
+ * Name: icGetDataSpaceSamples
+ *
+ * Purpose: Number of samples on the A side of a profile's AToBx/DToBx
+ *  transforms, as the tag validators expect it.
+ *
+ *  Normally that is the data colour space.  ICC.2-2023 7.2.8 lets an abstract
+ *  profile's data colour space be zero: "If set to zero the spectral PCS
+ *  signature and spectral range fields shall be used to define the A side of
+ *  the transform."  The validators used icGetSpaceSamples(colorSpace) there
+ *  and expected 0 inputs, so once CIccProfile::CheckHeader() accepted the zero
+ *  field (#2725) a conforming profile was refused at its AToB0/DToB0 tag
+ *  instead.
+ *
+ * Args:
+ *  pHdr - profile header
+ *
+ * Return:
+ *  The A-side sample count.
+ ******************************************************************************
+ */
+icUInt32Number icGetDataSpaceSamples(const icHeader *pHdr)
+{
+  if (pHdr->version >= icVersionNumberV5 &&
+      pHdr->deviceClass == icSigAbstractClass &&
+      pHdr->colorSpace == icSigNoColorData &&
+      pHdr->spectralPCS)
+    return icGetSpaceSamples((icColorSpaceSignature)pHdr->spectralPCS);
+
+  return icGetSpaceSamples(pHdr->colorSpace);
 }
 
 icUInt8Number icGetStorageTypeBytes(icUInt16Number nStorageType)
@@ -1705,6 +1730,14 @@ const icChar *CIccInfo::GetTechnologySigName(icTechnologySignature sig)
   case icSigAMDisplay:
     return "AMDisplay";
 
+  // ICC.1:2022 Table 29 rows that never reached the enum, so every list below keyed
+  // off it silently omitted them and GetSigName() reported "Unknown 'LCD '" (#2101).
+  case icSigLCDDisplay:
+    return "LCDDisplay";
+
+  case icSigOLEDDisplay:
+    return "OLEDDisplay";
+
   case icSigPhotoCD:
     return "PhotoCD";
 
@@ -1722,6 +1755,24 @@ const icChar *CIccInfo::GetTechnologySigName(icTechnologySignature sig)
 
   case icSigFlexography:
     return "Flexography";
+
+  // The motion picture and digital cinema rows arrived with ICC.1 v4.3 and were never
+  // added here, so CIccTagSignature::Validate accepted them as compliant while every
+  // caller of GetSigName() -- iccDumpProfile among them -- reported them as
+  // "Unknown 'mpfs'" and so on.  Naming them is what makes the two agree (#2101).
+  case icSigMotionPictureFilmScanner:
+    return "MotionPictureFilmScanner";
+
+  case icSigMotionPictureFilmRecorder:
+    return "MotionPictureFilmRecorder";
+
+  case icSigDigitalMotionPictureCamera:
+    return "DigitalMotionPictureCamera";
+
+  // Named by the enum's value, not by the mnemonic ICC.1 prints beside it; see the
+  // SPEC-ISSUE #2101 note at icProfileHeader.h's icSigDigitalCinemaProjector.
+  case icSigDigitalCinemaProjector:
+    return "DigitalCinemaProjector";
 
   default:
     return GetUnknownName(sig);
@@ -1796,6 +1847,9 @@ const icChar *CIccInfo::GetColorSpaceSigName(icColorSpaceSignature sig)
 
   case icSigYxyData:
     return "YxyData";
+
+  case icSigLmsData:
+    return "LmsData";
 
   case icSigRgbData:
     return "RgbData";
@@ -1953,7 +2007,7 @@ const icChar *CIccInfo::GetProfileClassSigName(icProfileClassSignature sig)
   // These strings are display-only labels for the deviceClass signature; every
   // caller emits them as human-readable text (iccDumpProfile "Profile Class: %s",
   // the validation report in IccProfile.cpp, the wxWidgets GUI label) and nothing
-  // parses, compares, or serializes them — XML/JSON write the raw 4CC via
+  // parses, compares, or serializes them -- XML/JSON write the raw 4CC via
   // icGetSigStr(), independent of this helper. The glued "Class" suffix is dropped:
   // it is not an ICC.1/ICC.2 spec identifier (in the spec "class" is a separate word
   // tied to "profile"/"device"/"media"), it is redundant since each caller's
@@ -2513,6 +2567,12 @@ const icChar *CIccInfo::GetColorantEncoding(icColorantEncoding colorant)
     case icColorantP22:
       return "P22";
 
+    case icColorantP3:
+      return "P3";
+
+    case icColorantBT2020:
+      return "ITU-R BT.2020";
+
     default:
       return "Customized Encoding";
   }
@@ -2821,6 +2881,7 @@ bool CIccInfo::IsValidSpace(icColorSpaceSignature sig)
   case icSigLuvData:
   case icSigYCbCrData:
   case icSigYxyData:
+  case icSigLmsData:
   case icSigRgbData:
   case icSigGrayData:
   case icSigHsvData:
@@ -3110,10 +3171,16 @@ const char *icUtf16ToUtf8(std::string &buf, const icUInt16Number *szSrc, int siz
       buf.clear();
       return buf.c_str();
     }
-    char *szDest = szBuf;
-    icConvertUTF16toUTF8(&szSrc, &szSrc[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    // icConvertUTF16toUTF8 stores its advanced cursor through a UTF8** out
+    // parameter. The old (UTF8**)&szDest aimed that at a char* object, so the
+    // callee wrote a UTF8* through a char* lvalue and this function read it
+    // back as char* -- undefined for the same reason as :707 above. Declaring
+    // the cursor UTF8* removes the pun rather than hiding it; UTF8 is unsigned
+    // char, so the bytes written and the length computed are unchanged.
+    UTF8 *szDest = (UTF8*)szBuf;
+    icConvertUTF16toUTF8(&szSrc, &szSrc[sizeSrc], &szDest, (UTF8*)&szBuf[n], lenientConversion);
     *szDest = '\0';
-    buf.assign(szBuf, (size_t)(szDest - szBuf));
+    buf.assign(szBuf, (size_t)(szDest - (UTF8*)szBuf));
     free(szBuf);
   } else {
     buf.clear();
@@ -3149,16 +3216,48 @@ const char *icWCharToUtf8(std::string &buf, const wchar_t *szSrc, size_t sizeSrc
       buf.clear();
       return buf.c_str();
     }
-    char *szDest = szBuf;
+    // Same UTF8** out-parameter pun as icUtf16ToUtf8 above, on both arms of
+    // the WCHAR_MAX branch.
+    UTF8 *szDest = (UTF8*)szBuf;
 #if WCHAR_MAX > 65535
-    const UTF32 *szPtr = (const UTF32 *)szSrc;
-    icConvertUTF32toUTF8(&szPtr, &szPtr[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    // #2526: a 32-bit wchar_t string is not always UTF-32 here.  The dictType
+    // names and values this function converts for IccTagXml.cpp and
+    // IccTagJson.cpp hold UTF-16 code units, one per wchar_t --
+    // CIccTagDict::Read and CIccUTF16String::ToWString store them that way,
+    // and CIccTagDict::Write narrows each wchar_t back to 16 bits.  Read as
+    // UTF-32, a character above U+FFFF arrived as two surrogates and came out
+    // as six bytes of CESU-8, which libxml2 refuses.
+    //
+    // So this arm now ends in icConvertUTF16toUTF8 too, as the Windows arm
+    // does.  A wchar_t above U+FFFF, which only real UTF-32 holds, is split
+    // into its surrogate pair first, and the UTF-16 converter joins a pair in
+    // whichever form it arrived.  Valid UTF-32 gives the same bytes as
+    // before.  Only surrogate values change, and UTF-32 cannot contain them:
+    // a pair is joined, and a lone one becomes U+FFFD -- or, if it is a high
+    // surrogate that ends the string, is dropped -- as on Windows (#2511).
+    // Every wchar_t yields at most 4 bytes, so n is still enough.
+    icUtf16Vector units;
+    units.reserve(sizeSrc);
+    for (size_t i = 0; i < sizeSrc; i++) {
+      UTF32 ch = (UTF32)szSrc[i];
+      if (ch <= 0xFFFF) {
+        units.push_back((UTF16)ch);
+      } else if (ch <= 0x10FFFF) {
+        ch -= 0x10000;
+        units.push_back((UTF16)(0xD800 + (ch >> 10)));
+        units.push_back((UTF16)(0xDC00 + (ch & 0x3FF)));
+      } else {
+        units.push_back(0xFFFD);  // past U+10FFFF, as icConvertUTF32toUTF8 did
+      }
+    }
+    const UTF16 *szPtr = units.data();
+    icConvertUTF16toUTF8(&szPtr, szPtr + units.size(), &szDest, (UTF8*)&szBuf[n], lenientConversion);
 #else
     const UTF16 *szPtr = (const UTF16 *)szSrc;
-    icConvertUTF16toUTF8(&szPtr, &szPtr[sizeSrc], (UTF8**)&szDest, (UTF8*)&szBuf[n], lenientConversion);
+    icConvertUTF16toUTF8(&szPtr, &szPtr[sizeSrc], &szDest, (UTF8*)&szBuf[n], lenientConversion);
 #endif
     *szDest = '\0';
-    buf.assign(szBuf, (size_t)(szDest - szBuf));
+    buf.assign(szBuf, (size_t)(szDest - (UTF8*)szBuf));
     free(szBuf);
   } else {
     buf.clear();

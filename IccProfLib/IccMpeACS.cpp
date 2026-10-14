@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -127,7 +103,18 @@ void CIccMpeAcs::Describe(std::string &sDescription, int nVerboseness)
 {
   icChar sigBuf[30];
 
-  if (GetBAcsSig())
+  // Label from the ELEMENT TYPE, not from the value of the ACS data signature.
+  // GetBAcsSig() returns m_signature on a bACS element and the base class's
+  // icSigAcsZero on everything else (IccTagMPE.h:177), so testing its truth
+  // conflates "this is a bACS element" with "this element's signature is
+  // non-zero".  Those two agree only by luck.  icSigAcsZero is a legitimate,
+  // explicitly named signature -- CIccMpeXmlBAcs::ToXml goes out of its way to
+  // round-trip it rather than writing the text "NULL" (#1843) -- and a bACS
+  // element carrying it therefore described itself as ELEM_eACS (#2181).
+  // GetType() is fixed per class (IccMpeACS.h:135 and :159) and cannot be
+  // confused by the payload.  This is the only reader of GetBAcsSig() in the
+  // tree; everything else discriminates on IsAcs(), which was always type-based.
+  if (GetType() == icSigBAcsElemType)
     sDescription += "ELEM_bACS\n";
   else
     sDescription += "ELEM_eACS\n";
@@ -303,19 +290,34 @@ icValidateStatus CIccMpeAcs::Validate(std::string sigPath, std::string &sReport,
 ******************************************************************************/
 bool CIccMpeAcs::AllocData(size_t size)
 {
+  // Clear both members before allocating, so the class invariant
+  // "m_pData == NULL if and only if m_nDataSize == 0" holds on EVERY exit,
+  // failure included.  It previously did not: on a failed malloc m_pData became
+  // NULL while m_nDataSize kept the PREVIOUS allocation's size (#2181).
+  //
+  // That stale pair is not merely untidy, because the four copy paths below
+  // guard the memcpy on the DESTINATION pointer and the SOURCE size:
+  //
+  //     AllocData(elemAcs.m_nDataSize);
+  //     if (m_pData && elemAcs.m_nDataSize)
+  //       memcpy(m_pData, elemAcs.m_pData, m_nDataSize);
+  //
+  // Copying an element left in the broken state allocates successfully from the
+  // stale non-zero size, finds the source size non-zero, and reads from a source
+  // pointer that is NULL.  Restoring the invariant at its origin fixes all four
+  // sites -- and NewCopy() is one of them -- without four separate guards.
   free(m_pData);
+  m_pData = NULL;
+  m_nDataSize = 0;
 
   if (size) {
     m_pData = (icUInt8Number*)malloc(size);
-    if (m_pData)
-      m_nDataSize = size;
-  }
-  else {
-    m_pData = NULL;
-    m_nDataSize = 0;
+    if (!m_pData)
+      return false;
+    m_nDataSize = size;
   }
 
-  return (size==0 || m_pData!=NULL);
+  return true;
 }
 
 

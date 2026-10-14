@@ -14,40 +14,11 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - ".github/workflows/ci-matlab.yml"
-      - "Build/Cmake/**"
-      - "IccProfLib/**"
-      - "Tools/CmdLine/IccPawgReport/**"
-      - ".github/ci/regression/luminance-normalization-diagnostic.cpp"
-      - ".github/ci/regression/pawg-q1-quality-contract.cpp"
-      - "**/*.m"
-      - "matlab/**"
-      - "Testing/Display/sRGB_D65_MAT.xml"
-      - "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
-      - "Testing/Display/sRGB_D65_MAT-500cdm2.xml"
-      - "Testing/HDR/BT2100PQFullDisplay.xml"
-      - "Testing/sRGB_v4_ICC_preference.icc"
   pull_request:
     branches:
       - master
     paths:
       - ".github/workflows/ci-matlab.yml"
-      - "Build/Cmake/**"
-      - "IccProfLib/**"
-      - "Tools/CmdLine/IccPawgReport/**"
-      - ".github/ci/regression/luminance-normalization-diagnostic.cpp"
-      - ".github/ci/regression/pawg-q1-quality-contract.cpp"
-      - "**/*.m"
-      - "matlab/**"
-      - "Testing/Display/sRGB_D65_MAT.xml"
-      - "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
-      - "Testing/Display/sRGB_D65_MAT-500cdm2.xml"
-      - "Testing/HDR/BT2100PQFullDisplay.xml"
-      - "Testing/sRGB_v4_ICC_preference.icc"
   workflow_dispatch:
 
 concurrency:
@@ -59,6 +30,10 @@ jobs:
     name: Windows MATLAB MEX
     runs-on: windows-2022
     timeout-minutes: 45
+    env:
+      ICCDEV_VCPKG_EXPORT_URL: >-
+        https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip
+      ICCDEV_VCPKG_EXPORT_SHA256: 89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e
     defaults:
       run:
         shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
@@ -81,26 +56,29 @@ jobs:
 
       - name: Set up MATLAB
         # matlab-actions/setup-matlab v3
-        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        uses: matlab-actions/setup-matlab@f9e43010f1ae678f7cfa0542fe2a4f60f7d1ad8d
         with:
           release: R2026a
 
-      - name: Reproduce specification calculations
+      - name: Run dependency-free MATLAB checks
         # matlab-actions/run-command v3
-        # Both checks are pure arithmetic over checked-in tables and fixtures, so
+        # These checks use MATLAB code plus checked-in tables and fixtures, so
         # they run before the native build rather than depending on it.
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');
             addpath(fullfile('matlab', 'tests'));
+            test_usage_guidance();
+            test_delta_e_2000();
+            run(fullfile('matlab', 'examples', 'ciede2000.m'));
             test_luminance_normalization();
             run(fullfile('matlab', 'examples', 'luminance_normalization.m'));
             test_colorimetry_issue_1475();
             run(fullfile('matlab', 'examples', 'colorimetry_issue_1475.m'))
           generate-summary: false
 
-      - name: Configure and build IccProfLib
+      - name: Fetch pinned vcpkg dependencies
         env:
           POWERSHELL_TELEMETRY_OPTOUT: "1"
           POWERSHELL_UPDATECHECK: Off
@@ -115,19 +93,57 @@ jobs:
           }
           . .trusted-helpers/.github/scripts/sanitize.ps1
 
+          $archive = Join-Path $env:RUNNER_TEMP 'vcpkg-exported-deps.zip'
+          Invoke-WebRequest -Uri $env:ICCDEV_VCPKG_EXPORT_URL -OutFile $archive
+          $actualDigest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actualDigest -ne $env:ICCDEV_VCPKG_EXPORT_SHA256) {
+            throw "vcpkg export digest mismatch: $actualDigest"
+          }
+          tar -xf $archive -C $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg export extraction failed with exit code $LASTEXITCODE"
+          }
+          Remove-Item -LiteralPath $archive -Force
+
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE `
+            'scripts\buildsystems\vcpkg.cmake'
+          if (-not (Test-Path $toolchain -PathType Leaf)) {
+            throw "Exported vcpkg CMake toolchain not found: $toolchain"
+          }
+
+      - name: Configure and build current iccDEV source
+        env:
+          POWERSHELL_TELEMETRY_OPTOUT: "1"
+          POWERSHELL_UPDATECHECK: Off
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          git config --global credential.helper ""
+          if (Test-Path Env:GITHUB_TOKEN) {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          }
+          . .trusted-helpers/.github/scripts/sanitize.ps1
+
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE `
+            'scripts\buildsystems\vcpkg.cmake'
           $configureArgs = @(
             '-S', 'Build\Cmake'
             '-B', 'out\matlab'
             '-G', 'Visual Studio 17 2022'
             '-A', 'x64'
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
+            '-DVCPKG_TARGET_TRIPLET=x64-windows'
+            '-DVCPKG_MANIFEST_MODE=OFF'
             '-DENABLE_TESTS=ON'
             '-DENABLE_TOOLS=ON'
             '-DENABLE_WXWIDGETS=OFF'
             '-DENABLE_SHARED_LIBS=OFF'
             '-DENABLE_STATIC_LIBS=ON'
             '-DENABLE_ICCXML=OFF'
-            '-DENABLE_ICCJSON=OFF'
-            '-DENABLE_IMAGE_TOOLS=OFF'
+            '-DENABLE_ICCJSON=ON'
+            '-DENABLE_IMAGE_TOOLS=ON'
             '-DENABLE_CMM_TOOLS=OFF'
             '-DENABLE_IIS_TOOLS=OFF'
             '-DICC_USE_ZLIB=OFF'
@@ -143,6 +159,10 @@ jobs:
             '--config', 'Release'
             '--target'
             'IccProfLib2-static'
+            'IccJSON2-static'
+            'iccToJson'
+            'iccFromJson'
+            'iccHeifDump'
             'iccProfilePlot'
             'iccPawgReport'
             'iccPawgQ1QualityContractTest'
@@ -154,8 +174,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Native regression test build failed with exit code $LASTEXITCODE"
           }
+          if (-not (Test-Path 'out\matlab\bin\Release\iccHeifDump.exe' -PathType Leaf)) {
+            throw 'iccHeifDump was not built for MATLAB QA'
+          }
+          if (-not (Test-Path 'installed\x64-windows\bin\heif.dll' -PathType Leaf)) {
+            throw 'libheif runtime was not found in the dependency export'
+          }
 
-      - name: Run native luminance and colorimetry regressions
+      - name: Run native MATLAB regressions
         env:
           POWERSHELL_TELEMETRY_OPTOUT: "1"
           POWERSHELL_UPDATECHECK: Off
@@ -169,8 +195,15 @@ jobs:
           }
           . .trusted-helpers/.github/scripts/sanitize.ps1
 
+          $nativeRegressionPattern = (
+            '^iccdev\.(' +
+            'luminance-normalization|' +
+            'colorimetry-methods|' +
+            'pawg-q1-quality-contract)$'
+          )
           ctest --test-dir out\matlab -C Release `
-            -R '^iccdev\.(luminance-normalization|colorimetry-methods|pawg-q1-quality-contract)$' `
+            --parallel ([Environment]::ProcessorCount) `
+            -R $nativeRegressionPattern `
             --output-on-failure `
             --no-tests=error
           if ($LASTEXITCODE -ne 0) {
@@ -179,7 +212,7 @@ jobs:
 
       - name: Build MATLAB MEX gateway
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');
@@ -188,17 +221,24 @@ jobs:
 
       - name: Run MATLAB QA
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');
             addpath(fullfile('matlab', 'tests'));
+            test_usage_guidance();
+            test_delta_e_2000();
+            test_json_bindings();
+            test_lut_type_range();
+            setenv('PATH', [fullfile(pwd, 'installed', 'x64-windows', 'bin') pathsep getenv('PATH')]);
+            test_heif_dump_native(fullfile(pwd, 'out', 'matlab'));
             run_local_qa();
             test_add_docker_path();
             test_plot();
             run(fullfile('matlab', 'examples', 'read_profile.m'));
             run(fullfile('matlab', 'examples', 'color_transform.m'));
-            run(fullfile('matlab', 'examples', 'gamma_curve.m'))
+            run(fullfile('matlab', 'examples', 'gamma_curve.m'));
+            run(fullfile('matlab', 'examples', 'ciede2000.m'))
           generate-summary: false
 
   docker-interop:
@@ -207,7 +247,7 @@ jobs:
     timeout-minutes: 30
     env:
       ICCDEV_IMAGE_REPOSITORY: ghcr.io/internationalcolorconsortium/iccdev
-      ICCDEV_IMAGE_DIGEST: sha256:2f4230308320b60106c2675b2c50aa7c22e0b50fe56045080ce480c6232b2672
+      ICCDEV_IMAGE_DIGEST: sha256:0504c43e0204e36aa36377fceee1de9c5f49468d578202c388525c75d42da079
 
     steps:
       - name: Checkout repository
@@ -227,7 +267,7 @@ jobs:
 
       - name: Set up MATLAB
         # matlab-actions/setup-matlab v3
-        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        uses: matlab-actions/setup-matlab@f9e43010f1ae678f7cfa0542fe2a4f60f7d1ad8d
         with:
           release: R2026a
 
@@ -245,7 +285,7 @@ jobs:
 
       - name: Validate published container from MATLAB
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');

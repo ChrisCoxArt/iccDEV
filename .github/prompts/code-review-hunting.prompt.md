@@ -19,17 +19,39 @@ condition, impact, and smallest safe remediation. Read `AGENTS.md`,
 
 Review only a frozen head that has passed
 `docs/governance/UPSTREAM_PR_READINESS.md`. Review the complete PR surface and
-cumulative diff, not incremental slices. A request for changes returns the
-branch to branch-only grooming; re-review only after the readiness evidence is
-renewed. If a re-review finds an issue in unchanged code, stop serial automated
-review and require maintainer direction. Prefer no comment to low-value review
-volume.
+cumulative diff, not incremental slices. Before reviewing, record a
+`base...HEAD` contract matrix mapping each changed cross-cutting surface to its
+producer, consumer, build/runtime behavior, platform or toolchain boundary, CI
+trigger, dependency owner, and local evidence. A request for changes returns
+the branch to branch-only grooming; re-review only after readiness evidence and
+the complete contract matrix are renewed. If a re-review finds any new blocker,
+including in the repair, stop serial automated review and require maintainer
+direction. Prefer no comment to low-value review volume.
 
-For every new or relocated C/C++ source or header, verify the complete ICC
-Software License block is retained. A missing, abbreviated, or placeholder
-block is a blocking changed-line defect.
+For every new or relocated ICC-owned C/C++ source or header, verify the
+complete BSD-3-Clause notice derived from `LICENSE.md` with
+`.github/scripts/check-license-notices.py`. A missing, abbreviated, or
+placeholder notice is a blocking changed-line defect; preserve third-party and
+generated-file attribution.
 
-## 4-Category Hunt
+## MATLAB MEX Review Pass
+
+For `matlab/**` changes, read
+`.github/instructions/matlab-code-review.instructions.md` before reporting.
+Verify:
+
+1. MEX actions reject wrong argument counts, MATLAB types, scalar shapes, enum
+   boundaries, and stale native handles before conversion or dereference.
+2. MATLAB wrappers close temporary files, file handles, Java streams, and
+   native handles on both success and failure.
+3. Public required-argument functions retain actionable `iccdev:*Required`
+   errors and matching `test_usage_guidance` fixtures.
+4. Tool wrappers use Java `ProcessBuilder` argument lists, surface nonzero
+   native diagnostics, and never return failed output as success.
+5. A new native tool dependency is wired through focused tests, Release build
+   targets, CI, staged artifacts, and MATLAB documentation.
+
+## 6-Category Hunt
 
 ### Category 1: Serialization Mismatch (CWE-345)
 
@@ -78,17 +100,48 @@ These findings should be LOW/informational, not CRITICAL.
 
 ### Category 4: Unchecked Return Values (CWE-252)
 
-Search for `Read()`, `Begin()`, `fromJson()` calls where the return
-value is discarded.
+Search for `Read()`, `Begin()`, `ParseXml()`, `ParseJson()`, and `fromJson()`
+calls where the return value is discarded. For paired XML/JSON readers, compare
+failure propagation at every nested parse boundary. A spec-defined empty
+placeholder may need an explicit exception, but a present malformed child must
+not be silently converted into that placeholder.
 
 ```bash
 grep -rn 'Read(' IccProfLib/ | grep -v 'if.*Read\|!.*Read\|==.*Read'
 grep -rn '\.Begin(' IccProfLib/ | grep -v 'if.*Begin\|!.*Begin'
 grep -rn 'fromJson(' Tools/ IccProfLib/ | grep -v 'if.*fromJson'
+grep -rn 'ParseXml\|ParseJson' IccXML/ IccJSON/
 ```
 
 Pattern: `Begin()` can return `false` for invalid state, but callers
 proceed to `Apply()` on uninitialized data.
+
+For reader/writer symmetry, also verify that fixed-width hexadecimal fields
+require the writer's exact decoded byte count and that a nested-node search
+starts at the parent's children rather than scanning the parent and its
+siblings. A successful parse that normalizes an invalid ID or drops nested
+text is a failure even when no sanitizer fires.
+
+### Category 5: Counted Buffers and Boundary Equality (CWE-121/CWE-122/CWE-787)
+
+Trace allocation count, loop count, and serialized count together. A fixed or
+heap buffer sized from one member is unsafe when indexed by a sibling channel,
+element, or function count. Issue #2608 is the reference shape: a 16-entry
+stack array indexed to `m_nOutputChannels`.
+
+Treat `index > count` before `buffer[index]` as suspect. The first invalid
+index is exactly `count`, so the rejection normally needs `index >= count` and
+a NULL-storage check. Run `iccdev/fixed-buffer-loop-bound` for fixed
+non-character arrays, then inspect pointer-backed arrays separately.
+
+### Category 6: Numeric Domain and Encoding Precision (CWE-190/CWE-681/CWE-682)
+
+For each conversion or formula, write down its input domain, finite-value
+contract, output encoding, and maximum acceptable round-trip error. Check NaN,
+infinity, negative fractional powers, zero denominators, fixed-point boundary
+values, and float-to-int casts independently. A broad "float looks risky"
+finding is not actionable; require a named ICC encoding/formula and an
+executable expected-value oracle.
 
 ## PoC Synthesis Requirements
 
@@ -111,9 +164,10 @@ Types: `dbz` (div-by-zero), `hbo` (heap-buffer-overflow),
 `sbo` (stack-buffer-overflow), `npd` (null-pointer-deref),
 `ub` (undefined-behavior), `oom` (out-of-memory)
 
-Prefer a minimal standalone PoC file that can be attached to the issue or added
-to an upstream regression directory. Avoid inline generators in issues unless
-the generator itself is the clearest reproduction.
+Prefer a durable ICC, XML, JSON, TIFF, PNG, JPEG, or `.cube` artifact that an
+existing project tool consumes. Do not create a standalone C++ PoC. Direct
+library contracts belong in the nearest checked-in regression executable and
+must have a one-line CTest command.
 
 ## Quality Checklist
 

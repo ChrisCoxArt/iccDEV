@@ -9,67 +9,43 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include <cstdio>
 #include "IccProfileXml.h"
 #include "IccTagXml.h"
 #include "IccUtilXml.h"
+#include "IccFileUtil.h" /* icSanitizeConsoleText (#2698) */
 #include "IccArrayBasic.h"
 #include <set>
 #include <cstring> /* C strings strcpy, memcpy ... */
 #include <map>
-
-typedef  std::map<icUInt32Number, icTagSignature> IccOffsetTagSigMap;
 
 bool CIccProfileXml::ToXml(std::string &xml)
 {
@@ -246,18 +222,29 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
   TagEntryList::iterator i, j;
   std::set<icTagSignature> sigSet;
   CIccInfo Fmt;
-  IccOffsetTagSigMap offsetTags;
+  // A tag attached under several signatures is one CIccTag object, and that
+  // is what every other path shares on: CIccProfile::Write() compares pTag,
+  // the SameAs reader re-attaches the object it finds, and the JSON writer
+  // keys its sameAs map on the pointer.  This used to key on the tag-table
+  // offset, which only Write() and Read() set: a profile built with
+  // AttachTag() or loaded with LoadXml() has every offset at 0, so every tag
+  // after the first came out as SameAs the first (#2767).
+  std::map<CIccTag*, icTagSignature> sharedTags;
 
   for (i=m_Tags.begin(); i!=m_Tags.end(); i++) {
     if (sigSet.find(i->TagInfo.sig)==sigSet.end()) {
+      // A signature repeated in the tag table is written once, as the JSON
+      // writer does: FindTag() returns the first entry's object for both, so
+      // a second pass would now write the tag as SameAs itself.
+      sigSet.insert(i->TagInfo.sig);
       CIccTag *pTag = FindTag(i->TagInfo.sig);
 
       if (pTag) {
         CIccTagXml *pTagXml = (CIccTagXml*)(pTag->GetExtension());
         if (pTagXml) {
-          IccOffsetTagSigMap::iterator prevTag = offsetTags.find(i->TagInfo.offset);
+          std::map<CIccTag*, icTagSignature>::iterator prevTag = sharedTags.find(pTag);
           const icChar *tagName = Fmt.GetTagSigName(i->TagInfo.sig);
-          if (prevTag == offsetTags.end()) {
+          if (prevTag == sharedTags.end()) {
             const icChar* tagSig = icGetTagSigTypeName(pTag->GetType());
 
             // Remember where this tag's markup begins.  The opening elements are
@@ -339,14 +326,14 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
                        icFixXmlComment(typeFix, tagSig ? tagSig : ""));
               xml += blanks + line;
 
-              // Deliberately not recorded in offsetTags: a later tag sharing this
-              // offset must serialize itself in full rather than emit a SameAs
-              // reference pointing at a tag that is no longer in the document.
+              // Deliberately not recorded in sharedTags: a later signature on
+              // this same tag object must serialize itself in full rather than
+              // emit a SameAs reference to a tag that is no longer in the document.
               continue;
             }
             snprintf(line, bufSize, "    </%s> </%s>\n\n", tagSig, tagName);
             xml += blanks + line;
-            offsetTags[i->TagInfo.offset] = i->TagInfo.sig;
+            sharedTags[pTag] = i->TagInfo.sig;
           }
           else {
             const icChar *prevTagName = Fmt.GetTagSigName(prevTag->second);
@@ -406,12 +393,64 @@ bool CIccProfileXml::ToXmlWithBlanks(std::string &xml, std::string blanks)
 // performs the range check.  This is the XML twin of the JSON defect fixed for
 // #1830, whose icJsonParseBCDByte in IccProfileJson.cpp now carries the same
 // contract.
-static bool parseVersion(const std::string &sPart, unsigned long &rv)
+// bFractional distinguishes the two kinds of component this helper encodes.  A
+// major is a whole number, so "5" is 0x05.  A minor is the fractional part of a
+// decimal version, so its digits are positional: "5.1" is five-and-one-TENTH and
+// must reach the header as 0x10, exactly as the canonical "5.10" does.  Encoding
+// the digit as the integer 1 instead gave 0x01, i.e. 5.01, which is #2383's
+// `0x05010100` -- and, being below the library's 5.10 threshold, is what made a
+// v5.1 profile report its zero-step observer and illuminant encodings as
+// noncompliant.
+//
+// #2387's test pinned this as an "unchanged quirk" while that PR repaired the
+// neighbouring loops; it is the defect itself, so that assertion is inverted here
+// rather than preserved.  Rejecting a one-digit minor instead was not an option:
+// 28 tracked documents use the short form (19x "5.0", 9x "1.0"), all with a zero
+// minor, which is why the corpus never exposed this.
+static bool parseVersion(const std::string &sPart, unsigned long &rv,
+                         bool bFractional)
 {
   icUInt32Number v = 0;
 
-  if (!icXmlParseU32(sPart.c_str(), v, 99))
+  // Trim first: a component carries the element's literal text, so a
+  // pretty-printed or hand-edited document indents it ("<ProfileVersion>\n
+  // 5.10\n</ProfileVersion>") or leaves a trailing space. icXmlParseU32 requires
+  // the whole string to be consumed, and strtoull skips leading blanks but not
+  // trailing ones, so "5.10 " was rejected outright and the version reached the
+  // header as 0 -- silently, since ParseBasic still returns true. That has been
+  // true of <ProfileVersion> since the #1845 repair put this helper on that path;
+  // routing <ProfileSubClassVersion> through the same helper would otherwise have
+  // spread it to a field whose atoi() had tolerated the whitespace.
+  std::string sTrimmed = sPart;
+  const char *szBlank = " \t\r\n\f\v";
+  std::string::size_type nFirst = sTrimmed.find_first_not_of(szBlank);
+  if (nFirst == std::string::npos)
     return false;
+  sTrimmed = sTrimmed.substr(nFirst, sTrimmed.find_last_not_of(szBlank) - nFirst + 1);
+
+  // Require one or two DIGITS, which is icJsonParseBCDByte's contract on the JSON
+  // side.  icXmlParseU32 alone is not enough here: it rejects a leading '-' but
+  // strtoull still accepts '+', and it accepts any number of leading zeros while
+  // the value stays <= 99.  Both slipped past the length test below, so "5.+1"
+  // and "5.001" scaled differently from "5.1" -- and, since the JSON twin refuses
+  // them outright, the same version text produced two different header words
+  // depending on which importer was used.  Checking digits here makes the length
+  // test below a true digit count and closes that divergence.
+  if (sTrimmed.size() < 1 || sTrimmed.size() > 2)
+    return false;
+  for (std::string::size_type i = 0; i < sTrimmed.size(); i++) {
+    if (sTrimmed[i] < '0' || sTrimmed[i] > '9')
+      return false;
+  }
+
+  if (!icXmlParseU32(sTrimmed.c_str(), v, 99))
+    return false;
+
+  // Scale a one-digit fractional component to its tenths place, so "1" and "10"
+  // both encode as 0x10.  Keyed on the digit COUNT rather than the value, so a
+  // written-out "05" still means five hundredths and is left at 0x05.
+  if (bFractional && sTrimmed.size() == 1)
+    v *= 10;
 
   rv = ((v / 10) % 10) * 16 + (v % 10);
   return true;
@@ -456,7 +495,7 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
         ver += *szVer;
       }
-      bVerOk = parseVersion(ver, verMajor);
+      bVerOk = parseVersion(ver, verMajor, false);
       ver.clear();
       if (*szVer)
         szVer++;
@@ -465,26 +504,37 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
         for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
           ver += *szVer;
         }
-        bVerOk = parseVersion(ver, verMinor);
+        bVerOk = parseVersion(ver, verMinor, true);
         ver.clear();
         if (*szVer)
           szVer++;
 
         if (bVerOk && *szVer) {
+          // Accumulate rather than assign.  889db62b repaired the major and
+          // minor loops above but left these two, so every iteration overwrote
+          // the previous digit and only the last one reached parseVersion:
+          // "5.10.12.34" landed as 05 10 02 04.
           for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
-            ver = *szVer;
+            ver += *szVer;
           }
-          bVerOk = parseVersion(ver, verClassMajor);
+          bVerOk = parseVersion(ver, verClassMajor, false);
           ver.clear();
           if (*szVer)
             szVer++;
 
           if (bVerOk && *szVer) {
             for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
-              ver = *szVer;
+              ver += *szVer;
             }
-            bVerOk = parseVersion(ver, verClassMinor);
+            bVerOk = parseVersion(ver, verClassMinor, true);
             ver.clear();
+
+            // The header holds exactly four components, so anything still
+            // unconsumed is a fifth. Rejecting rather than silently truncating
+            // is what icJsonParseBCDVersionStr does -- it hands the whole
+            // remainder to a helper that refuses more than two digits.
+            if (bVerOk && *szVer)
+              bVerOk = false;
           }
         }
       }
@@ -509,18 +559,51 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       const char *szVer = (const char*)pNode->children->content;
       std::string ver;
       unsigned long verClassMajor = 0, verClassMinor = 0;
+      // Three defects shared this block and they only cancel out together: the
+      // loops assigned instead of appending, so only the last digit survived;
+      // the major loop never stepped over the separator, so the minor loop ran
+      // zero times and atoi("") supplied 0; and atoi() stored a raw decimal
+      // where the header holds BCD.  Repairing only the first would have put
+      // "12" in the byte as 0x0C, which GetSubClassVersionName then rejects as
+      // "Invalid BCD subclass version".  parseVersion is the strict BCD helper
+      // ProfileVersion already uses, and matches icJsonParseBCDVersionStr on
+      // the JSON side.
+      bool bVerOk = false;
 
-      if (szVer) {
+      for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
+        ver += *szVer;
+      }
+      bVerOk = parseVersion(ver, verClassMajor, false);
+      ver.clear();
+      if (*szVer)
+        szVer++;
+
+      // A missing minor component stays 0, so "12" means "12.00"; a present but
+      // malformed one rejects the whole subclass version.
+      if (bVerOk && *szVer) {
         for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
-          ver = *szVer;
+          ver += *szVer;
         }
-        verClassMajor = (unsigned char)atoi(ver.c_str());
+        bVerOk = parseVersion(ver, verClassMinor, true);
         ver.clear();
-        
-        for (; *szVer && *szVer != '.' && *szVer != ','; szVer++) {
-          ver = *szVer;
-        }
-        verClassMinor = (unsigned char)atoi(ver.c_str());
+
+        // As above: the sub-class version is two components, so a third is a
+        // malformation rather than something to truncate away.
+        if (bVerOk && *szVer)
+          bVerOk = false;
+      }
+
+      if (!bVerOk) {
+        // Malformed input already reached the header as zero via atoi(), so the
+        // stored value is unchanged; what is new is the recorded reason. Note
+        // iccFromXml prints parseStr only when LoadXml fails, and ParseBasic
+        // returns true regardless, so this string is not yet surfaced on the
+        // command line -- that suppression is #2387 finding 4 / #2384, which
+        // needs a ruling on the tool's exit contract before it can move.
+        parseStr += "Cannot parse ProfileSubClassVersion '";
+        parseStr += (const char*)pNode->children->content;
+        parseStr += "'\n";
+        verClassMajor = verClassMinor = 0;
       }
 
       m_Header.version = (m_Header.version & 0xffff0000) | (((verClassMajor << 8) | verClassMinor) & 0x0000ffff);
@@ -612,9 +695,16 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
 			xmlAttr *z = icXmlFindAttr(xyzNode, "Z");
 
 			if (x && y && z) {
-			   m_Header.illuminant.X = icDtoF((icFloatNumber)atof(icXmlAttrValue(x)));
-			   m_Header.illuminant.Y = icDtoF((icFloatNumber)atof(icXmlAttrValue(y)));
-			   m_Header.illuminant.Z = icDtoF((icFloatNumber)atof(icXmlAttrValue(z)));
+			   icFloatNumber xyz[3];
+			   if (!icXmlParseFloat(icXmlAttrValue(x), xyz[0]) ||
+			       !icXmlParseFloat(icXmlAttrValue(y), xyz[1]) ||
+			       !icXmlParseFloat(icXmlAttrValue(z), xyz[2])) {
+			     parseStr += "Invalid PCSIlluminant XYZNumber\n";
+			     return false;
+			   }
+			   m_Header.illuminant.X = icDtoF(xyz[0]);
+			   m_Header.illuminant.Y = icDtoF(xyz[1]);
+			   m_Header.illuminant.Z = icDtoF(xyz[2]);
 			}
 		}
 		else if (!icXmlStrCmp(pNode->name, "ProfileCreator")) {
@@ -637,8 +727,14 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       xmlAttr *steps = icXmlFindAttr(xyzNode, "steps");
 
       if (start && end && steps) {
-        m_Header.spectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(start)));
-        m_Header.spectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(end)));
+        icFloatNumber dStart = 0, dEnd = 0;
+        if (!icXmlParseFloat(icXmlAttrValue(start), dStart) ||
+            !icXmlParseFloat(icXmlAttrValue(end), dEnd)) {
+          parseStr += "Invalid SpectralRange Wavelengths start or end\n";
+          return false;
+        }
+        m_Header.spectralRange.start = icFtoF16(dStart);
+        m_Header.spectralRange.end = icFtoF16(dEnd);
 
         // steps is the sample count for the whole spectral PCS, so narrowing it
         // modulo 65536 substitutes a different spectrum rather than failing:
@@ -663,8 +759,14 @@ bool CIccProfileXml::ParseBasic(xmlNode *pNode, std::string &parseStr)
       xmlAttr *steps = icXmlFindAttr(xyzNode, "steps");
 
       if (start && end && steps) {
-        m_Header.biSpectralRange.start = icFtoF16((icFloatNumber)atof(icXmlAttrValue(start)));
-        m_Header.biSpectralRange.end = icFtoF16((icFloatNumber)atof(icXmlAttrValue(end)));
+        icFloatNumber dStart = 0, dEnd = 0;
+        if (!icXmlParseFloat(icXmlAttrValue(start), dStart) ||
+            !icXmlParseFloat(icXmlAttrValue(end), dEnd)) {
+          parseStr += "Invalid BiSpectralRange Wavelengths start or end\n";
+          return false;
+        }
+        m_Header.biSpectralRange.start = icFtoF16(dStart);
+        m_Header.biSpectralRange.end = icFtoF16(dEnd);
 
         // Same defect and same reasoning as the spectralRange steps above; this
         // count sizes the bi-spectral (fluorescence) axis, which #1677 showed
@@ -770,7 +872,18 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
       }
       pTag = this->FindTag(sigParentTag);
       if (pTag) {
-        AttachTag(sigTag, pTag);
+        // AttachTag() refuses a signature that already holds a different
+        // object.  That result was discarded, so a document carrying a tag
+        // in full and then again as SameAs some other tag loaded as the
+        // first one and the SameAs was silently ignored; the JSON reader
+        // fails the same conflict (#2675).
+        if (!AttachTag(sigTag, pTag)) {
+          parseStr += "SameAs tag ";
+          parseStr += sameAs;
+          parseStr += " for ";
+          parseStr += nodeName + " conflicts with an earlier " + nodeName + "\n";
+          return false;
+        }
       }
       else {
         parseStr += "SameAs tag ";
@@ -795,6 +908,23 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
         parseStr += nodeName;
         parseStr += "\n";
         return false;
+      }
+
+      // A tag element holds exactly one type element.  A second one used to
+      // be ignored, so a document with two types under one tag loaded as the
+      // first and reported success (#2696).  The JSON reader refuses a Tags
+      // entry with a second member the same way.
+      for (xmlNode *pExtra = pTypeNode->next; pExtra; pExtra = pExtra->next) {
+        if (pExtra->type == XML_ELEMENT_NODE) {
+          parseStr += "More than one type element for ";
+          parseStr += nodeName;
+          parseStr += ": ";
+          parseStr += (const char*)pTypeNode->name;
+          parseStr += " and ";
+          parseStr += (const char*)pExtra->name;
+          parseStr += "\n";
+          return false;
+        }
       }
 
       // get the tag type signature
@@ -974,6 +1104,7 @@ bool CIccProfileXml::ParseTag(xmlNode *pNode, std::string &parseStr)
       ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, icSigGamutData);
     break;
 
+  case icSigNamedColorTag:
   case icSigNamedColor2Tag:
     {
       if (pTag && pTag->GetType()==icSigNamedColor2Type) {
@@ -1073,20 +1204,27 @@ bool CIccProfileXml::LoadXml(const char *szFilename, const char *szRelaxNGDir, s
      * they are released innermost-first.
      */
     bool bValid = false;
+    // The schema file's own XML parse, inside xmlRelaxNGParse(), reports
+    // through the global handler, not the parser context's (#2698).
+    icXmlSetGlobalSanitizedErrorHandler(true);
     xmlRelaxNGParserCtxt* rlxParser = xmlRelaxNGNewParserCtxt(szRelaxNGDir);
 
     //validate the xml file
     if (rlxParser) {
+      // Schema and validation diagnostics name the schema and document files;
+      // through libxml2's default handler they reached stderr unescaped (#2698).
+      icXmlSetSanitizedErrorHandlers(rlxParser, NULL);
       xmlRelaxNG* relaxNG = xmlRelaxNGParse(rlxParser);
 
       if (relaxNG) {
         xmlRelaxNGValidCtxt* validCtxt = xmlRelaxNGNewValidCtxt(relaxNG);
 
         if (validCtxt) {
+          icXmlSetSanitizedErrorHandlers(NULL, validCtxt);
           int result = xmlRelaxNGValidateDoc(validCtxt, doc);
 
           if (result != 0)
-            printf("\nError: %d: '%s' is an invalid XML file.\n", result, szFilename);
+            printf("\nError: %d: '%s' is an invalid XML file.\n", result, icSanitizeConsoleText(szFilename).c_str());
           else
             bValid = true;
 
@@ -1098,6 +1236,7 @@ bool CIccProfileXml::LoadXml(const char *szFilename, const char *szRelaxNGDir, s
 
       xmlRelaxNGFreeParserCtxt(rlxParser);
     }
+    icXmlSetGlobalSanitizedErrorHandler(false);
 
     /* Same rejection as before for a schema that will not load, will not
      * compile, or that the document fails - only now the document goes back

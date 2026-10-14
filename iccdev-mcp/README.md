@@ -3,12 +3,12 @@
 MCP server for ICC color profile tools from the International Color
 Consortium's RefIccMAX (iccDEV) library.
 
-Exposes 26 tools to AI assistants (Claude, Copilot, Cursor) via the
+Exposes tools to AI assistants (Claude, Copilot, Cursor) via the
 Model Context Protocol, covering profile inspection, color transforms,
 and format conversion for ICC v2/v4 and iccMAX v5 profiles.
 
-The static MCP inventory has 26 tools, but `health_check` reports tools
-available in the running environment. Optional native capabilities can differ
+The static MCP inventory lists supported tools; `health_check` reports the
+tools available in the running environment. Optional native capabilities can differ
 between container variants, so clients and CI must inspect capability flags and
 the discovered CLI inventory rather than assume a fixed health-tool total.
 The response includes the available native, CLI, and service inventories so
@@ -27,16 +27,56 @@ docker run --rm -i ghcr.io/internationalcolorconsortium/iccdev:latest \
 ```
 
 Use `pip install` when integrating with a local source checkout or a locally
-built iccDEV toolchain:
+built iccDEV toolchain. `iccdev-mcp` is published on PyPI:
 
 ```bash
-pip install iccdev-mcp
+python -m pip install "iccdev-mcp[rest]"
 ```
 
-For full functionality with the pip-installed package, seven Python-native tools
-are included in the `iccdev-mcp` wheel. The `validate_profile` tool dynamically
+The universal wheel from a successful rolling
+<a href="https://github.com/InternationalColorConsortium/iccDEV/releases/latest">Latest Build</a>
+remains available for exact-tag installation:
+
+```bash
+# Replace <release-tag> with the Git tag for the intended release.
+python -m pip install "git+https://github.com/InternationalColorConsortium/iccDEV.git@<release-tag>#subdirectory=iccdev-mcp"
+# Prebuilt GitHub release wheel; copy its exact tag-specific asset URL.
+python -m pip install "<iccdev_mcp-wheel-asset-URL>"
+# Optional REST server dependencies:
+python -m pip install "iccdev-mcp[rest] @ <iccdev_mcp-wheel-asset-URL>"
+```
+
+Release assets include one `iccdev_mcp-*-py3-none-any.whl` and a matching
+source distribution for Python 3.10+. Verify their published checksums and
+provenance before installation. The release workflow tests source imports,
+isolated wheel and sdist installations, console entry points, stdio tool calls,
+and REST health on Windows and Linux. It includes no native binaries or
+compiled transform bindings. See the
+<a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/docs/python-packaging-release.md">package release guide</a>
+for maintainer validation and the PyPI publication boundary.
+
+For an isolated MCP client, use the public package directly:
+
+```json
+{
+  "mcpServers": {
+    "iccdev": {
+      "command": "uvx",
+      "args": ["iccdev-mcp"]
+    }
+  }
+}
+```
+
+Use `uvx --from "<iccdev_mcp-wheel-asset-URL>" iccdev-mcp` when an exact
+GitHub release asset is required instead of the PyPI package.
+
+The wheel ships only the `iccdev_mcp` namespace, so it can share an environment
+with the separate Cython `iccdev` bindings. Header inspection and signature
+helpers are included. Pixel transforms require installing the native bindings
+from `python/` in the same environment. The `validate_profile` tool dynamically
 loads the public C validation ABI, so it also needs a shared IccProfLib build.
-The 17 CLI-backed tools require iccDEV CLI binaries. Build iccDEV locally or
+CLI-backed tools require iccDEV CLI binaries. Build iccDEV locally or
 set `ICCDEV_TOOLS_DIR` and `ICCDEV_BUILD_DIR` to an existing build. The REST
 health endpoint reports the bundled Python API and CLI discovery separately, so
 incomplete local builds are visible at startup.
@@ -66,7 +106,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
 ```
 
 Open <http://127.0.0.1:8080/> for the bundled REST dashboard. The dashboard
-groups the 26 MCP-backed API routes, shows REST-only utility routes such as
+groups MCP-backed API routes, shows REST-only utility routes such as
 file browsing and upload, and runs tools without requiring a separate client.
 
 Supported container modes are `mcp`/`stdio`, `rest`/`api`, `sse`, and
@@ -78,7 +118,14 @@ Useful runtime defaults are already configured:
 |----------|---------|
 | `ICCDEV_TOOLS_DIR` | `/workspace/build/Tools` |
 | `ICCDEV_TESTING_DIR` | `/workspace/iccDEV/Testing` |
-| `LD_LIBRARY_PATH` | iccDEV build library directories |
+| `ICCDEV_VALIDATION_LIBRARY` | `/opt/iccdev-validation/lib/libIccProfLib2.so` |
+
+The unified image keeps sanitizer CLI tools, but loads the validation ABI from
+an isolated non-sanitized shared build. An explicit validation library overrides
+`ICCDEV_BUILD_DIR`, including the image default above. To select a custom build,
+override this library path or unset it before starting the server. Empty,
+missing, and unloadable explicit library paths fail closed without silently
+falling back. Pip-only installations retain optional validation behavior.
 
 Mount additional profiles read-only and list them through
 `ICCDEV_PROFILE_DIRS`:
@@ -99,11 +146,29 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   iccdev:mcp-local iccdev-mcp-entrypoint rest
 curl -fsS http://127.0.0.1:8080/api/health
 curl -fsS http://127.0.0.1:8080/api/tools
+python3 .github/scripts/iccdev-container-smoke.py iccdev:mcp-local
 # Optional REST dashboard in a browser
 xdg-open http://127.0.0.1:8080/  # or open the URL manually
 ```
 
 ### Claude Desktop
+
+For a container-only local client, use this unified image configuration. Keep
+`-i` (open stdin), omit `-t`, and do not close stdin until requested tool
+responses arrive:
+
+```json
+{
+  "mcpServers": {
+    "iccdev": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i",
+               "ghcr.io/internationalcolorconsortium/iccdev:latest",
+               "iccdev-mcp-entrypoint", "mcp"]
+    }
+  }
+}
+```
 
 Add to `claude_desktop_config.json`:
 
@@ -168,6 +233,7 @@ Add this repository MCP configuration under
         "tiff_dump",
         "jpeg_dump",
         "png_dump",
+        "heif_dump",
         "from_cube",
         "apply_profiles",
         "apply_named_cmm",
@@ -192,19 +258,19 @@ iccdev-mcp --transport sse --port 8080
 
 ## Tools
 
-### Python-Native (7)
+### Python-Native
 
 | Tool | Description |
 |------|-------------|
 | `inspect_header` | ICC profile header (22 fields + 6 computed names) |
 | `profile_summary` | Compact profile classification and routing metadata |
 | `validate_profile` | In-memory validation status and report from the native C API; requires a shared IccProfLib build |
-| `color_transform` | Multi-profile color transform via CMM |
-| `roundtrip_delta` | Round-trip fidelity measurement (delta-E) |
+| `color_transform` | Multi-profile CMM transform; requires the native `iccdev` bindings |
+| `roundtrip_delta` | Device-channel round-trip Euclidean distance, not CIE Delta E; requires native bindings |
 | `icc_sig_to_str` | 4-byte ICC signature to string |
 | `enum_spaces` | List all 32 ICC color space identifiers |
 
-### CLI-Backed (17) -- require iccDEV tools
+### CLI-Backed -- require iccDEV tools
 
 | Tool | CLI Binary | Description |
 |------|-----------|-------------|
@@ -215,16 +281,48 @@ iccdev-mcp --transport sse --port 8080
 | `profile_to_json` | iccToJson | ICC to JSON conversion |
 | `json_to_profile` | iccFromJson | JSON to ICC conversion |
 | `round_trip_test` | iccRoundTrip | Round-trip transform fidelity |
-| `tiff_dump` | iccTiffDump | TIFF metadata + embedded ICC |
+| `tiff_dump` | iccTiffDump | Selected main-IFD metadata or bounded directory inventory |
 | `jpeg_dump` | iccJpegDump | JPEG metadata + embedded ICC |
 | `png_dump` | iccPngDump | PNG metadata + embedded ICC |
+| `heif_dump` | iccHeifDump | HEIF, HEIC, and AVIF metadata + embedded ICC |
 | `from_cube` | iccFromCube | .cube LUT to ICC profile |
 | `apply_profiles` | iccApplyProfiles | Multi-profile TIFF transform |
 | `apply_named_cmm` | iccApplyNamedCmm | Named color CMM |
 | `create_link` | iccApplyToLink | Device link creation |
 | `v5_to_v4` | iccV5DspObsToV4Dsp | v5 display to v4 conversion |
-| `spec_sep_to_tiff` | iccSpecSepToTiff | Spectral separation |
+| `spec_sep_to_tiff` | iccSpecSepToTiff | Combine numbered single-channel TIFFs, optionally tiled/BigTIFF |
 | `apply_search` | iccApplySearch | Search-based transform |
+
+TIFF inspection accepts `ifd` (0..4095), `list_directories`, and
+`evidence_json`. Listing and an explicit IFD are mutually exclusive; SubIFDs
+are reported as offsets, not followed. REST uses the same query names, with
+boolean query values `true` or `false`.
+
+`spec_sep_to_tiff` takes `input_prefix`, `start`, `end`, and `increment`,
+plus optional `compress`/`planar` (0 or 1), matching ICC `profile`,
+paired `tile_width`/`tile_height` (positive multiples of 16), and `bigtiff`.
+It returns successful TIFF output as `output_base64`. The REST
+`POST /api/spec-sep` body uses the same fields. The former separation/illuminant
+profile arguments did not match the native tool and are no longer accepted.
+For example, combine the tracked spectral channels using:
+
+```json
+{
+  "input_prefix": ".github/ci/test-data/spectral/spec_",
+  "start": 1,
+  "end": 10,
+  "increment": 1,
+  "tile_width": 16,
+  "tile_height": 32,
+  "bigtiff": true
+}
+```
+
+`apply_profiles` already accepts `config_args: ["-cfg", "config.json"]`;
+use the native `imageFiles.dstTileWidth`, `dstTileHeight`, and `dstBigTiff`
+configuration fields for tiled/BigTIFF destinations. Python's Cython and
+MATLAB's MEX APIs operate on profile/CMM sample arrays, not TIFF containers;
+these TIFF storage options do not change their in-process ABI.
 
 ### CLI-Only Tools (Not MCP-Exposed)
 
@@ -242,8 +340,8 @@ the command line; see the repository
 | `list_available_profiles` | Browse ICC test profiles |
 
 The REST dashboard at `/` and `/ui` provides Testing/ directory and filename
-selectors for ICC, XML, JSON, TIFF, JPEG, PNG, and cube inputs. `/api/tools`
-returns the stable 26-tool MCP inventory and separately lists REST-only utility
+selectors for ICC, XML, JSON, TIFF, JPEG, PNG, HEIF, HEIC, AVIF, and cube inputs. `/api/tools`
+returns the stable MCP inventory and separately lists REST-only utility
 routes (`/api/tools`, `/api/files`, and `/api/upload`). Core CLI-backed forms
 expose documented options for `iccDumpProfile` validation/verbosity/tag
 selection, `iccPawgReport` profile assessment, `iccRoundTrip` intent/MPE
@@ -277,4 +375,4 @@ python -m iccdev_mcp.server
 
 ## License
 
-BSD 3-Clause. See [LICENSE.md](../LICENSE.md).
+BSD 3-Clause. See [LICENSE.md](LICENSE.md).

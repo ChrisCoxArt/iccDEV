@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -74,9 +50,12 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cfloat>
 #include <cstring>
 #include <cstdlib>
 #include <new>
+#include <vector>
+#include <memory>
 #include "IccMpeBasic.h"
 #include "IccIO.h"
 #include <map>
@@ -497,6 +476,27 @@ bool CIccFormulaCurveSegment::Write(CIccIO *pIO)
 
 /**
  ******************************************************************************
+ * Name: icFormulaParamsNonFinite
+ *
+ * Purpose: Report whether any formula segment parameter is NaN or infinite.
+ *
+ * Args:
+ *  params = the parameters, may be NULL when nParams is 0
+ *  nParams = the number of parameters
+ *
+ * Return: true if a parameter is not finite
+ ******************************************************************************/
+static bool icFormulaParamsNonFinite(const icFloatNumber *params, icUInt8Number nParams)
+{
+  for (icUInt8Number i = 0; i < nParams; i++) {
+    if (!std::isfinite(params[i]))
+      return true;
+  }
+  return false;
+}
+
+/**
+ ******************************************************************************
  * Name: CIccFormulaCurveSegment::Begin
  * 
  * Purpose: 
@@ -534,9 +534,14 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
 
   case 0x0002:
   case 0x0003:
+    // Types 2 and 3 both take five parameters (ICC.2-2023 Table 111: a, b, c,
+    // d, e and gamma, a, b, c, d), and neither has a shortcut, so 2 falls into
+    // 3 and 3 stops here. Falling on into 4 would be wrong: case 4 derives
+    // m_nShortcutType from m_params[0] for a different formula, and Apply()
+    // never reads it for type 3. (#2731 resolves the "TODO - was this supposed
+    // to fall through" that stood here: no.)
     if (!m_params || m_nParameters < 5)
       return false;
-    // TODO - was this supposed to fall through, doesn't seem like it
     break;  // and return true below
 
   case 0x0004:
@@ -591,6 +596,9 @@ bool CIccFormulaCurveSegment::Begin(CIccCurveSegment * /* pPrevSeg = NULL */ )
     return false;
   }
 
+  if (icFormulaParamsNonFinite(m_params, m_nParameters))
+    return false;
+
   return true;
 }
 
@@ -599,6 +607,65 @@ static icFloatNumber clipPow(double v, double g)
   if (v <= 0)
     return 0;
   return (icFloatNumber)pow(v, g);
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaPow
+ *
+ * Purpose: pow() for a formula segment, without the NaN a negative base gives
+ *  under a fractional exponent.
+ *
+ *  ICC.1-2022 Table 60 and ICC.2-2023 Table 111 require a segment to give
+ *  float32Number values over its whole range, and a first or last segment
+ *  reaches -inf or +inf.  A negative base under a fractional exponent is
+ *  given the value at zero instead, the rule icParametricPow() applies to a
+ *  parametricCurveType (#2544).  An integer exponent was always finite for a
+ *  negative base and is left alone, so a gamma of 1.0 still passes negative
+ *  values.
+ *
+ *  Type 3 keeps clipPow(), which also zeroes a negative base under an
+ *  integer exponent.
+ *
+ * Args:
+ *  base = the power's base: X, aX + b, or the ratio in types 6 and 7
+ *  g = the exponent
+ *
+ * Return: base raised to g, a negative base under a fractional exponent
+ *  counting as zero.
+ ******************************************************************************/
+static double icFormulaPow(double base, double g)
+{
+  if (base < 0.0 && g != floor(g))
+    base = 0.0;
+
+  return pow(base, g);
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaLogArg
+ *
+ * Purpose: The argument a formula segment passes to log() or log10(), without
+ *  the NaN a negative argument gives or the -inf of zero.
+ *
+ *  Types 1 and 4 take the logarithm of b * X^g + c and d * X^g - b, which
+ *  parameters can put at or below zero for part of a segment.  Such an
+ *  argument is given the smallest positive float instead, so the logarithm
+ *  is large and negative but finite.  A NaN argument, which only an infinity
+ *  already in the expression makes, is passed through.
+ *
+ * Args:
+ *  arg = the logarithm's argument
+ *
+ * Return: arg, or FLT_MIN when arg is zero or negative.
+ ******************************************************************************/
+static double icFormulaLogArg(double arg)
+{
+  if (arg <= 0.0)
+    return FLT_MIN;
+
+  return arg;
 }
 
 /**
@@ -619,7 +686,7 @@ icFloatNumber CIccFormulaCurveSegment::Apply(icFloatNumber v) const
     switch (m_nShortcutType) {
     case 0:
     default:
-      return (icFloatNumber)(pow(m_params[1] * v + m_params[2], m_params[0]) + m_params[3]);
+      return (icFloatNumber)(icFormulaPow(m_params[1] * v + m_params[2], m_params[0]) + m_params[3]);
     case 1:
       return (m_params[1] * v);
     case 2:
@@ -632,69 +699,376 @@ icFloatNumber CIccFormulaCurveSegment::Apply(icFloatNumber v) const
 
   case 0x0001:
     // Y = a * log (b * X^g + c) + d      : g a b c d
-    return (icFloatNumber)(m_params[1] * log10(m_params[2] * pow(v, m_params[0]) + m_params[3]) + m_params[4]);
+    return (icFloatNumber)(m_params[1] * log10(icFormulaLogArg(m_params[2] * icFormulaPow(v, m_params[0]) + m_params[3])) + m_params[4]);
 
   case 0x0002:
     //Y = a * b^(c*X+d) + e               : a b c d e
-    return (icFloatNumber)(m_params[0] * pow(m_params[1], m_params[2] * v + m_params[3]) + m_params[4]);
+    return (icFloatNumber)(m_params[0] * icFormulaPow(m_params[1], m_params[2] * v + m_params[3]) + m_params[4]);
 
   case 0x0003:
     //Y = a * (b * X + c) ^ g  + d        : g a b c d
+    // clipPow() rather than icFormulaPow(): it also zeroes a negative base
+    // under an integer exponent, and BT2100HlgNarrow's g = 2 segments over
+    // (-inf, 0.5] would change from 0 to their squared value below zero.
     return (icFloatNumber)(m_params[1] * clipPow(m_params[2] * v + m_params[3], m_params[0]) + m_params[4]);
 
   case 0x0004:
     //Y = a * ln(d * X^g - b) + c         : g a b c d
     if (m_nShortcutType != 1)
-      return (icFloatNumber)(m_params[1] * log(m_params[4] * pow(v, m_params[0]) - m_params[2]) + m_params[3]);
+      return (icFloatNumber)(m_params[1] * log(icFormulaLogArg(m_params[4] * icFormulaPow(v, m_params[0]) - m_params[2])) + m_params[3]);
     else
-      return (icFloatNumber)(m_params[1] * log(m_params[4] * v - m_params[2]) + m_params[3]);
+      return (icFloatNumber)(m_params[1] * log(icFormulaLogArg(m_params[4] * v - m_params[2])) + m_params[3]);
 
   case 0x0005:
     //Y = e * exp((d * X^g - c) / a) + b  : g a b c d e
     if (m_params[1] == 0.0)
       return (icFloatNumber)m_params[2];
     if (m_nShortcutType != 1)
-      return (icFloatNumber)(m_params[5] * exp((m_params[4] * pow(v, m_params[0]) - m_params[3]) / m_params[1]) + m_params[2]);
+      return (icFloatNumber)(m_params[5] * exp((m_params[4] * icFormulaPow(v, m_params[0]) - m_params[3]) / m_params[1]) + m_params[2]);
     else
       return (icFloatNumber)(m_params[5] * exp((m_params[4] * v - m_params[3]) / m_params[1]) + m_params[2]);
 
   case 0x0006:
     //Y = d * (max(e * X^g - a, 0)/(b - c * X^g))^w  : w g a b c d e
     if (m_nShortcutType!=1) {
-      icFloatNumber denom6 = (icFloatNumber)(m_params[3] - m_params[4] * pow(v, m_params[1]));
+      icFloatNumber denom6 = (icFloatNumber)(m_params[3] - m_params[4] * icFormulaPow(v, m_params[1]));
       if (denom6 == 0.0f)
         return 0;
-      return (icFloatNumber)(m_params[5] * pow(icMax((icFloatNumber)(m_params[6] * pow(v, m_params[1]) - m_params[2]), 0.0f) /
+      return (icFloatNumber)(m_params[5] * icFormulaPow(icMax((icFloatNumber)(m_params[6] * icFormulaPow(v, m_params[1]) - m_params[2]), 0.0f) /
                                                denom6, m_params[0]));
     }
     else { //m_nShortcutType == 1
       icFloatNumber denom6s = (icFloatNumber)(m_params[3] - m_params[4] * v);
       if (denom6s == 0.0f)
         return 0;
-      return (icFloatNumber)(m_params[5] * pow(icMax((icFloatNumber)(m_params[6] * v - m_params[2]), 0.0f) /
+      return (icFloatNumber)(m_params[5] * icFormulaPow(icMax((icFloatNumber)(m_params[6] * v - m_params[2]), 0.0f) /
                                                denom6s, m_params[0]));
     }
 
   case 0x0007:
     //Y = d * ((a + b * X^g)/(1 + c * X^g)) ^ w     : w g a b c d
     if (m_nShortcutType != 1) {
-      icFloatNumber denom7 = (icFloatNumber)(1.0 + m_params[4] * pow(v, m_params[1]));
+      icFloatNumber denom7 = (icFloatNumber)(1.0 + m_params[4] * icFormulaPow(v, m_params[1]));
       if (denom7 == 0.0f)
         return 0;
-      return (icFloatNumber)(m_params[5] * pow((m_params[2] + m_params[3] * pow(v, m_params[1])) /
+      return (icFloatNumber)(m_params[5] * icFormulaPow((m_params[2] + m_params[3] * icFormulaPow(v, m_params[1])) /
                                                denom7, m_params[0]));
     }
     else { //m_nShortcutType == 1
       icFloatNumber denom7s = (icFloatNumber)(1.0 + m_params[4] * v);
       if (denom7s == 0.0f)
         return 0;
-      return (icFloatNumber)(m_params[5] * pow((m_params[2] + m_params[3] * v) /
+      return (icFloatNumber)(m_params[5] * icFormulaPow((m_params[2] + m_params[3] * v) /
                                                denom7s, m_params[0]));
     }
   }
 
   //Shouldn't get here!
   return v;
+}
+
+/**
+ ******************************************************************************
+ * Domain problems CIccFormulaCurveSegment::Validate() reports, one bit each.
+ ******************************************************************************/
+enum icFormulaDomainFlag {
+  icFormulaNegativeBase     = 0x01,  // negative base under a fractional exponent
+  icFormulaLogNotPositive   = 0x02,  // logarithm of zero or a negative value
+  icFormulaZeroNegativePow  = 0x04,  // zero raised to a negative exponent
+  icFormulaZeroDenominator  = 0x08,  // type 6 or 7 denominator of zero
+  icFormulaClipPow          = 0x10   // type 3 power with no value, clipPow() gives 0
+};
+
+/**
+ ******************************************************************************
+ * Name: icFormulaCheckPow
+ *
+ * Purpose: icFormulaPow(), recording in flags the domain problems it meets.
+ ******************************************************************************/
+static double icFormulaCheckPow(double base, double g, icUInt32Number &flags)
+{
+  if (base < 0.0 && g != floor(g)) {
+    flags |= icFormulaNegativeBase;
+    base = 0.0;
+  }
+  if (base == 0.0 && g < 0.0)
+    flags |= icFormulaZeroNegativePow;
+
+  return pow(base, g);
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaCheckLog
+ *
+ * Purpose: icFormulaLogArg(), recording in flags an argument that is not
+ *  positive.
+ ******************************************************************************/
+static double icFormulaCheckLog(double arg, icUInt32Number &flags)
+{
+  if (arg <= 0.0)
+    flags |= icFormulaLogNotPositive;
+
+  return icFormulaLogArg(arg);
+}
+
+static icFloatNumber icFormulaFloatMulAdd(icFloatNumber a, icFloatNumber v, icFloatNumber b)
+{
+  volatile icFloatNumber product = (icFloatNumber)(a * v);
+  return (icFloatNumber)(product + b);
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaDomainAt
+ *
+ * Purpose: Follow a formula segment's expression at v as Apply() does, and
+ *  return the domain problems met on the way.  The gamma-of-1.0 shortcuts
+ *  Begin() selects skip the power and do their arithmetic in float, so they
+ *  are followed here too: a sum that is zero in float is zero to Apply().
+ *
+ * Args:
+ *  nType = function type, 0 to 7
+ *  p = the function's parameters, at least as many as it reads
+ *  v = the input value
+ *  nDenomSign = for types 6 and 7, the sign of the denominator (-1, 0 or 1)
+ *   where the numerator is not zero, else 0
+ *
+ * Return: icFormulaDomainFlag bits.
+ ******************************************************************************/
+static icUInt32Number icFormulaDomainAt(icUInt16Number nType, const icFloatNumber *p, icFloatNumber v,
+                                        int &nDenomSign)
+{
+  icUInt32Number flags = 0;
+  nDenomSign = 0;
+
+  switch (nType) {
+  case 0x0000:
+    if (!icIsNear(p[0], 1.0))
+      icFormulaCheckPow(p[1] * v + p[2], p[0], flags);
+    break;
+
+  case 0x0001:
+    icFormulaCheckLog(p[2] * icFormulaCheckPow(v, p[0], flags) + p[3], flags);
+    break;
+
+  case 0x0002:
+    icFormulaCheckPow(p[1], p[2] * v + p[3], flags);
+    break;
+
+  case 0x0003:
+    {
+      // clipPow() gives 0 for any base <= 0.  Only where the formula itself
+      // has no value is reported, not where it has one clipPow() replaces.
+      double base = p[2] * v + p[3];
+      if ((base < 0.0 && p[0] != floor(p[0])) || (base == 0.0 && p[0] < 0.0))
+        flags |= icFormulaClipPow;
+    }
+    break;
+
+  case 0x0004:
+    if (icIsNear(p[0], 1.0))
+      icFormulaCheckLog(icFormulaFloatMulAdd(p[4], v, -p[2]), flags);
+    else
+      icFormulaCheckLog(p[4] * icFormulaCheckPow(v, p[0], flags) - p[2], flags);
+    break;
+
+  case 0x0005:
+    if (p[1] != 0.0 && !icIsNear(p[0], 1.0))
+      icFormulaCheckPow(v, p[0], flags);
+    break;
+
+  case 0x0006:
+    {
+      // A numerator max() holds at zero has no pole where the denominator is
+      // zero; Apply() gives 0 on both sides.
+      icFloatNumber num, denom;
+      if (icIsNear(p[1], 1.0)) {
+        num = icMax(icFormulaFloatMulAdd(p[6], v, -p[2]), 0.0f);
+        denom = icFormulaFloatMulAdd(-p[4], v, p[3]);
+      }
+      else {
+        double x = icFormulaCheckPow(v, p[1], flags);
+        num = icMax((icFloatNumber)(p[6] * x - p[2]), 0.0f);
+        denom = (icFloatNumber)(p[3] - p[4] * x);
+      }
+      if (num > 0.0f)
+        nDenomSign = denom < 0.0f ? -1 : denom > 0.0f ? 1 : 0;
+      if (denom == 0.0f) {
+        if (num > 0.0f)
+          flags |= icFormulaZeroDenominator;
+      }
+      else {
+        icFormulaCheckPow(num / denom, p[0], flags);
+      }
+    }
+    break;
+
+  case 0x0007:
+    {
+      double num;
+      icFloatNumber denom;
+      if (icIsNear(p[1], 1.0)) {
+        num = icFormulaFloatMulAdd(p[3], v, p[2]);
+        denom = icFormulaFloatMulAdd(p[4], v, 1.0f);
+      }
+      else {
+        double x = icFormulaCheckPow(v, p[1], flags);
+        num = p[2] + p[3] * x;
+        denom = (icFloatNumber)(1.0 + p[4] * x);
+      }
+      if (num != 0.0)
+        nDenomSign = denom < 0.0f ? -1 : denom > 0.0f ? 1 : 0;
+      if (denom == 0.0f) {
+        if (num != 0.0)
+          flags |= icFormulaZeroDenominator;
+      }
+      else {
+        icFormulaCheckPow(num / denom, p[0], flags);
+      }
+    }
+    break;
+  }
+
+  return flags;
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaDomainAddRoot
+ *
+ * Purpose: Add x and the floats either side of it to a list of values to
+ *  test, keeping those inside [lo, hi].
+ ******************************************************************************/
+static void icFormulaDomainAddRoot(std::vector<icFloatNumber> &xs, double x, icFloatNumber lo, icFloatNumber hi)
+{
+  if (!std::isfinite(x) || x < lo || x > hi)
+    return;
+
+  icFloatNumber f = (icFloatNumber)x;
+  const icFloatNumber cand[3] = { f, std::nextafter(f, icMinFloat32Number), std::nextafter(f, icMaxFloat32Number) };
+  for (int i = 0; i < 3; i++) {
+    if (cand[i] >= lo && cand[i] <= hi)
+      xs.push_back(cand[i]);
+  }
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaDomainAddPowRoot
+ *
+ * Purpose: Add the values of X, on either side of zero, where X^g equals r.
+ ******************************************************************************/
+static void icFormulaDomainAddPowRoot(std::vector<icFloatNumber> &xs, double r, double g,
+                                      icFloatNumber lo, icFloatNumber hi)
+{
+  if (!std::isfinite(r) || g == 0.0)
+    return;
+
+  double m = icIsNear((icFloatNumber)g, 1.0) ? fabs(r) : pow(fabs(r), 1.0 / g);
+  icFormulaDomainAddRoot(xs, m, lo, hi);
+  icFormulaDomainAddRoot(xs, -m, lo, hi);
+}
+
+/**
+ ******************************************************************************
+ * Name: icFormulaDomain
+ *
+ * Purpose: Find the domain problems a formula segment meets anywhere in the
+ *  inputs it is applied to.
+ *
+ *  ICC.1-2022 Table 60 and ICC.2-2023 Table 111 require a segment to give
+ *  float32Number values over its whole range, and ICC.1-2022 4.3 excludes
+ *  infinities and NaN from float32Number.  Apply() gives a value where the
+ *  formula has none (#2547), and this reports each place it has to.
+ *
+ *  An infinity is reported where it comes from a pole: zero raised to a
+ *  negative power, or a denominator of zero.  Overflow is not: a segment
+ *  running to -inf or +inf with a slope or power above 1 overflows near
+ *  icMaxFloat32Number, and most tracked profiles have one.
+ *
+ *  The range is not sampled.  Each expression is continuous and monotonic
+ *  between the input's endpoints, zero, and the inputs where a base, a
+ *  logarithm's argument, a denominator or type 6's max() term reaches zero,
+ *  so a problem inside the range shows at one of those inputs or at a float
+ *  next to it.  A segment's start is exclusive: Apply() takes a value at a
+ *  breakpoint from the segment that ends there.  The first segment of a
+ *  binary profile starts at icMinFloat32Number, which is kept.
+ *
+ * Args:
+ *  nType = function type, 0 to 7
+ *  p = the function's parameters, as many as it reads
+ *  start, end = the segment's start and end points
+ *
+ * Return: icFormulaDomainFlag bits.
+ ******************************************************************************/
+static icUInt32Number icFormulaDomain(icUInt16Number nType, const icFloatNumber *p,
+                                      icFloatNumber start, icFloatNumber end)
+{
+  icFloatNumber lo = start <= icMinFloat32Number ? icMinFloat32Number : std::nextafter(start, icMaxFloat32Number);
+  icFloatNumber hi = end;
+  if (!(lo <= hi))
+    return 0;
+
+  std::vector<icFloatNumber> xs;
+  xs.push_back(lo);
+  xs.push_back(hi);
+  icFormulaDomainAddRoot(xs, 0.0, lo, hi);
+
+  switch (nType) {
+  case 0x0000:
+    if (p[1] != 0.0)
+      icFormulaDomainAddRoot(xs, -(double)p[2] / p[1], lo, hi);
+    break;
+  case 0x0001:
+    if (p[2] != 0.0)
+      icFormulaDomainAddPowRoot(xs, -(double)p[3] / p[2], p[0], lo, hi);
+    break;
+  case 0x0002:
+    if (p[2] != 0.0)
+      icFormulaDomainAddRoot(xs, -(double)p[3] / p[2], lo, hi);
+    break;
+  case 0x0003:
+    if (p[2] != 0.0)
+      icFormulaDomainAddRoot(xs, -(double)p[3] / p[2], lo, hi);
+    break;
+  case 0x0004:
+    if (p[4] != 0.0)
+      icFormulaDomainAddPowRoot(xs, (double)p[2] / p[4], p[0], lo, hi);
+    break;
+  case 0x0006:
+    if (p[6] != 0.0)
+      icFormulaDomainAddPowRoot(xs, (double)p[2] / p[6], p[1], lo, hi);
+    if (p[4] != 0.0)
+      icFormulaDomainAddPowRoot(xs, (double)p[3] / p[4], p[1], lo, hi);
+    break;
+  case 0x0007:
+    if (p[3] != 0.0)
+      icFormulaDomainAddPowRoot(xs, -(double)p[2] / p[3], p[1], lo, hi);
+    if (p[4] != 0.0)
+      icFormulaDomainAddPowRoot(xs, -1.0 / p[4], p[1], lo, hi);
+    break;
+  }
+
+  icUInt32Number flags = 0;
+  bool bNegDenom = false, bPosDenom = false;
+  for (size_t i = 0; i < xs.size(); i++) {
+    int nDenomSign;
+    flags |= icFormulaDomainAt(nType, p, xs[i], nDenomSign);
+
+    // A denominator that changes sign under a non-zero numerator has a pole
+    // between two floats, where it may never be exactly zero.  A root's
+    // neighbours are both tested, so a pole under a non-zero numerator shows
+    // both signs.
+    if (nDenomSign < 0)
+      bNegDenom = true;
+    else if (nDenomSign > 0)
+      bPosDenom = true;
+  }
+  if (bNegDenom && bPosDenom)
+    flags |= icFormulaZeroDenominator;
+
+  return flags;
 }
 
 /**
@@ -718,6 +1092,42 @@ icValidateStatus CIccFormulaCurveSegment::Validate(std::string sigPath, std::str
     sReport += sSigPathName;
     sReport += " formula curve has non zero reserved data.\n";
     rv = icMaxStatus(rv, icValidateWarning);
+  }
+
+  // Where the formula has no value, Apply() gives one of its own or an
+  // infinity (#2547).  Only a function with its full, finite parameter list is
+  // examined.
+  static const icUInt8Number nRequired[8] = { 4, 5, 5, 5, 5, 6, 7, 6 };
+  bool bExamine = m_params && m_nFunctionType < 8 && m_nParameters >= nRequired[m_nFunctionType];
+  for (icUInt8Number i = 0; bExamine && i < m_nParameters; i++) {
+    if (!std::isfinite(m_params[i]))
+      bExamine = false;
+  }
+
+  if (bExamine) {
+    icUInt32Number flags = icFormulaDomain(m_nFunctionType, m_params, m_startPoint, m_endPoint);
+
+    static const struct {
+      icUInt32Number flag;
+      const char *szText;
+    } problems[] = {
+      { icFormulaNegativeBase, "raises a negative base to a fractional power for part of its range; the base is evaluated as zero" },
+      { icFormulaLogNotPositive, "takes the logarithm of a value that is not positive for part of its range; the smallest positive float is used" },
+      { icFormulaZeroNegativePow, "raises zero to a negative power for part of its range" },
+      { icFormulaZeroDenominator, "has a denominator that reaches zero for part of its range" },
+      { icFormulaClipPow, "raises a negative base to a fractional power, or zero to a negative power, for part of its range; the power is evaluated as zero" },
+    };
+
+    for (size_t i = 0; i < sizeof(problems) / sizeof(problems[0]); i++) {
+      if (flags & problems[i].flag) {
+        sReport += icMsgValidateWarning;
+        sReport += sSigPathName;
+        sReport += " formula curve segment ";
+        sReport += problems[i].szText;
+        sReport += ".\n";
+        rv = icMaxStatus(rv, icValidateWarning);
+      }
+    }
   }
 
   switch (m_nFunctionType) {
@@ -851,6 +1261,16 @@ icValidateStatus CIccFormulaCurveSegment::Validate(std::string sigPath, std::str
       sReport += buf;
       rv = icMaxStatus(rv, icValidateCriticalError);
     }
+  }
+
+  // A binary profile can carry a NaN or infinite parameter.  It is not a value
+  // the formula can use, it makes the output non-finite wherever the formula
+  // reads it, and Begin() refuses it (#2547).
+  if (m_params && icFormulaParamsNonFinite(m_params, m_nParameters)) {
+    sReport += icMsgValidateCriticalError;
+    sReport += sSigPathName;
+    sReport += " formula curve has a non-finite formulaCurveSegment parameter.\n";
+    rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
   return rv;
@@ -1216,6 +1636,16 @@ icFloatNumber CIccSampledCurveSegment::Apply(icFloatNumber v) const
   else if (v>m_endPoint)
     v=m_endPoint;
 
+  // The isfinite guard has to stay here, unlike the two sampled curves below,
+  // because Begin() cannot establish the invariant for a segment. A sampled
+  // segment is never the first one -- Begin() refuses a null pPrevSeg, and
+  // CIccSegmentedCurve::Begin() passes null for the first -- but it can be the
+  // last, and CIccSegmentedCurve::Read() gives the last segment the
+  // icMaxFloat32Number sentinel as its end point. An infinite m_range is
+  // therefore a legitimate configuration that Begin() must not reject, and even
+  // between finite endpoints (v-m_startPoint) can overflow to infinity, leaving
+  // inf/inf == NaN. NaN survives both clamps below and makes the cast to a
+  // sample index undefined (#2347).
   icFloatNumber pos = (v-m_startPoint)/m_range * m_last;
   if (!std::isfinite(pos) || pos<0.0f)
     pos=0.0f;
@@ -1259,6 +1689,19 @@ icValidateStatus CIccSampledCurveSegment::Validate(std::string sigPath, std::str
     sReport += sSigPathName;
     sReport += " sampled curve has too few sample points.\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
+  }
+  // Each endpoint is tested on its own rather than their difference, unlike the
+  // two sampled curves below. The difference is legitimately infinite here: the
+  // last segment of a segmented curve gets the icMaxFloat32Number sentinel as
+  // its end point, so any sufficiently negative breakpoint overflows the span
+  // while both endpoints remain sound wire values. What is actually malformed
+  // is a non-finite endpoint, which every comparison in Apply() then answers
+  // false and which the zero-range test below cannot see (#2347).
+  else if (!std::isfinite(m_startPoint) || !std::isfinite(m_endPoint)) {
+    sReport += icMsgValidateWarning;
+    sReport += sSigPathName;
+    sReport += " sampled curve has a non-finite end point.\n";
+    rv = icMaxStatus(rv, icValidateWarning);
   }
   else if (m_endPoint-m_startPoint == 0.0) {
     sReport += icMsgValidateWarning;
@@ -1782,8 +2225,14 @@ bool CIccSingleSampledCurve::Begin(icElemInterp /* nInterp */, CIccTagMultiProce
   if (m_nCount<2)
     return false;
 
+  // m_firstEntry and m_lastEntry come straight off the wire (Read() reads them
+  // with ReadFloat32Float, and the XML parser with atof), so either can be NaN
+  // or an infinity. NaN == 0.0 is false, so a NaN span used to pass the test
+  // below and reach Apply(), where it made the cast to a sample index undefined
+  // (#2324). isfinite() on the span covers both endpoints at once: a difference
+  // is finite only when both operands are finite and it does not overflow.
   m_range = m_lastEntry - m_firstEntry;
-  if (m_range == 0.0)
+  if (!std::isfinite(m_range) || m_range == 0.0)
     return false;
   m_last = (icFloatNumber)(m_nCount - 1);
   if (m_last == 0)
@@ -1843,8 +2292,11 @@ icFloatNumber CIccSingleSampledCurve::Apply(icFloatNumber v) const
     return m_hiSlope * v + m_hiIntercept;
   }
 
+  // No isfinite guard: v is non-NaN and inside [m_firstEntry, m_lastEntry] on
+  // this path, and Begin() refuses a zero or non-finite m_range and a zero
+  // m_last, so (v-m_firstEntry) lies in [0, m_range] and pos in [0, m_last].
   icFloatNumber pos = (v-m_firstEntry)/m_range * m_last;
-  if (!std::isfinite(pos) || pos<0.0f)
+  if (pos<0.0f)
     pos=0.0f;
   else if (pos>m_last)
     pos=m_last;
@@ -1902,7 +2354,17 @@ icValidateStatus CIccSingleSampledCurve::Validate(std::string sigPath, std::stri
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
   
-  if (m_lastEntry-m_firstEntry <= 0.0) {
+  // The non-finite case is tested first and separately: NaN <= 0.0 is false, so
+  // the range test below reported a NaN domain as valid even though Begin() now
+  // refuses it (#2324). Leaving it out would have this validator call a profile
+  // clean that the CMM will not apply.
+  if (!std::isfinite(m_lastEntry-m_firstEntry)) {
+    sReport += icMsgValidateWarning;
+    sReport += sSigPathName;
+    sReport += " single sampled curve has a non-finite sample range.\r\n";
+    rv = icMaxStatus(rv, icValidateWarning);
+  }
+  else if (m_lastEntry-m_firstEntry <= 0.0) {
     sReport += icMsgValidateWarning;
     sReport += sSigPathName;
     sReport += " single sampled curve has an invalid sample range.\r\n";
@@ -2153,6 +2615,17 @@ bool CIccSampledCalculatorCurve::SetExtensionType(icUInt16Number nExtensionType)
 ******************************************************************************/
 bool CIccSampledCalculatorCurve::SetCalculator(CIccMpeCalculator *pCalc)
 {
+  // Reinstalling the calculator this curve already owns is a no-op.  Releasing
+  // it first would free the object that SetParentObject() below then writes
+  // through, and leave m_pCalc dangling for the destructor to free a second
+  // time.  Unlike the setters fixed in #2630 and #2634 there is no public
+  // getter, but m_pCalc is protected and both front ends derive from this
+  // curve, so SetCalculator(m_pCalc) is reachable from a subclass.  The
+  // parent link is the only thing this function establishes, and freeing the
+  // object that holds it cannot re-establish it.
+  if (m_pCalc == pCalc)
+    return true;
+
   if (m_pCalc) {
     m_pCalc->SetParentObject(nullptr);
     delete m_pCalc;
@@ -2419,8 +2892,13 @@ bool CIccSampledCalculatorCurve::Begin(icElemInterp nInterp, CIccTagMultiProcess
 
   SetSize(nSize);
 
+  // Same wire-supplied endpoints as CIccSingleSampledCurve::Begin, and the same
+  // NaN-slips-past-== 0.0 hole (#2324). This bounds the src values the sample
+  // loop below feeds to the calculator; it says nothing about what comes back,
+  // since a calculator can return non-finite for finite input (an explicit
+  // divide by zero, say), so the sample table itself carries no such guarantee.
   m_range = m_lastEntry - m_firstEntry;
-  if (m_range == 0.0)
+  if (!std::isfinite(m_range) || m_range == 0.0)
     return false;
   m_last = (icFloatNumber)(m_nCount - 1);
   if (m_last == 0)
@@ -2487,8 +2965,11 @@ icFloatNumber CIccSampledCalculatorCurve::Apply(icFloatNumber v) const
     return m_hiSlope * v + m_hiIntercept;
   }
 
+  // No isfinite guard: same argument as CIccSingleSampledCurve::Apply -- v is
+  // forced finite above, is inside the sampled range here, and Begin() refuses a
+  // zero or non-finite range.
   icFloatNumber pos = (v - m_firstEntry) / m_range * m_last;
-  if (!std::isfinite(pos) || pos<0.0f)
+  if (pos<0.0f)
     pos=0.0f;
   else if (pos>m_last)
     pos=m_last;
@@ -2539,14 +3020,21 @@ icValidateStatus CIccSampledCalculatorCurve::Validate(std::string sigPath, std::
     rv = icMaxStatus(rv, icValidateWarning);
   }
 
-  if (m_lastEntry - m_firstEntry <= 0.0) {
+  // Same NaN blind spot as CIccSingleSampledCurve::Validate, same reason (#2324).
+  if (!std::isfinite(m_lastEntry - m_firstEntry)) {
+    sReport += icMsgValidateWarning;
+    sReport += sSigPathName;
+    sReport += " sampled calculator curve has a non-finite sample range.\n";
+    rv = icMaxStatus(rv, icValidateWarning);
+  }
+  else if (m_lastEntry - m_firstEntry <= 0.0) {
     sReport += icMsgValidateWarning;
     sReport += sSigPathName;
     sReport += " sampled calculator curve has an invalid sample range.\n";
     rv = icMaxStatus(rv, icValidateWarning);
   }
 
-  if (pProfile && pProfile->m_Header.version < icVersionNumberV5_1) {
+  if (pProfile && pProfile->m_Header.version < icVersionNumberV5) {
     sReport += icMsgValidateWarning;
     sReport += sSigPathName;
     sReport += " sampled calculator curve is not supported by version of profile.\n";
@@ -3245,24 +3733,25 @@ bool CIccMpeCurveSet::SetSize(int nNewSize)
  ******************************************************************************/
 bool CIccMpeCurveSet::SetCurve(int nIndex, icCurveSetCurvePtr newCurve)
 {
-  if (nIndex<0 || nIndex>m_nInputChannels)
+  if (nIndex < 0 || nIndex >= m_nInputChannels || !m_curve)
     return false;
 
-  if (m_curve) {
-    int i;
+  // Reinstalling the pointer already owned by this slot is a no-op.  Deleting
+  // it before assigning it back would leave the curve set holding a dangling
+  // pointer and cause a second delete when the set is destroyed.
+  if (m_curve[nIndex] == newCurve)
+    return true;
 
-    for (i = 0; i < m_nInputChannels; i++)
-      if (i != nIndex && m_curve[i] == m_curve[nIndex])
-        break;
+  int i;
 
-    if (i == m_nInputChannels) {
-      delete m_curve[nIndex];
-    }
+  for (i = 0; i < m_nInputChannels; i++)
+    if (i != nIndex && m_curve[i] == m_curve[nIndex])
+      break;
 
-    m_curve[nIndex] = newCurve;
-  }
-  else
-    return false;
+  if (i == m_nInputChannels)
+    delete m_curve[nIndex];
+
+  m_curve[nIndex] = newCurve;
   
   return true;
 }
@@ -3650,7 +4139,8 @@ CIccMpeTintArray::CIccMpeTintArray(const CIccMpeTintArray &tintArray)
     m_Array = (CIccTagNumArray*)tintArray.m_Array->NewCopy();
     m_Array->SetParentObject(this);
   }
-
+  else
+    m_Array = NULL;
 }
 
 /**
@@ -3681,6 +4171,12 @@ CIccMpeTintArray &CIccMpeTintArray::operator=(const CIccMpeTintArray &tintArray)
   if (tintArray.m_Array) {
     m_Array = (CIccTagNumArray*)tintArray.m_Array->NewCopy();
     m_Array->SetParentObject(this);
+  }
+  else {
+    // The delete above does not clear m_Array, so without this the member is
+    // left dangling whenever the source has no array -- the destructor then
+    // writes through it in SetParentObject().  Measured as a use-after-free.
+    m_Array = NULL;
   }
 
   return *this;
@@ -3731,6 +4227,16 @@ void CIccMpeTintArray::SetVectorSize(int nVectorSize)
  ******************************************************************************/
 void CIccMpeTintArray::SetArray(CIccTagNumArray *pArray)
 {
+  // GetArray() hands this member out, so SetArray(GetArray()) is reachable from
+  // any caller.  Releasing first would free the object being installed and then
+  // write through it in SetParentObject() below -- measured as a heap
+  // use-after-free WRITE under ASan.  Returning early is the whole fix: the
+  // pointer is already stored, and the only other thing this function does is
+  // set the parent link, which cannot be re-established by freeing the object
+  // that holds it.
+  if (m_Array == pArray)
+    return;
+
   if (m_Array) {
     m_Array->SetParentObject(nullptr);
     delete m_Array;
@@ -4020,6 +4526,28 @@ CIccToneMapFunc::CIccToneMapFunc()
 }
 
 
+CIccToneMapFunc::CIccToneMapFunc(const CIccToneMapFunc& toneMapFunc)
+{
+  // The copy constructor used to be = default, which member-wise copied the
+  // owning m_params pointer: the copy and the original then both free()d the
+  // same buffer.  CIccToneMapFunc::NewCopy() never hit it because it default
+  // constructs and assigns, but CIccJsonToneMapFunc::NewCopy() copy constructs,
+  // so every copy of a JSON-loaded tone map function double freed (#2633).
+  // Fixing it here rather than in that one override covers every subclass.
+  m_nFunctionType = toneMapFunc.m_nFunctionType;
+  m_nParameters = toneMapFunc.m_nParameters;
+  m_nReserved = toneMapFunc.m_nReserved;
+  m_nReserved2 = toneMapFunc.m_nReserved2;
+
+  if (toneMapFunc.m_nParameters && toneMapFunc.m_params) {
+    m_params = (icFloatNumber*)malloc(m_nParameters * sizeof(icFloatNumber));
+    if (m_params)
+      memcpy(m_params, toneMapFunc.m_params, m_nParameters * sizeof(icFloatNumber));
+  }
+  else
+    m_params = NULL;
+}
+
 CIccToneMapFunc::~CIccToneMapFunc()
 {
   free(m_params);
@@ -4077,6 +4605,21 @@ bool CIccToneMapFunc::SetFunction(icUInt16Number nFunc, icUInt8Number nParams, i
     m_params = (icFloatNumber*)calloc(nArgs, sizeof(icFloatNumber));
     if (m_params)
       memcpy(m_params, pParams, icIntMin(nArgs, nParams) * sizeof(icFloatNumber));
+  }
+  else {
+    // The free() above does not clear m_params, so without this a call that
+    // supplies no parameters -- SetFunction(nFunc, n, NULL), or any function
+    // type whose NumArgs() is zero -- leaves the member dangling and the
+    // destructor frees it a second time.  Measured as a double free under
+    // ASan; adjacent to #2633 rather than part of it.
+    //
+    // The count is cleared with it.  m_nParameters was set from nParams above
+    // whether or not anything was allocated, so an object that took this branch
+    // claimed parameters it had no buffer for, and every reader of the pair --
+    // ToJson() at IccMpeJson.cpp:897 among them -- indexed a NULL.  Clearing
+    // only the pointer would trade the double free for a NULL dereference.
+    m_params = NULL;
+    m_nParameters = 0;
   }
 
   return nParams == NumArgs();
@@ -4217,11 +4760,11 @@ bool CIccToneMapFunc::Begin()
 
 icFloatNumber CIccToneMapFunc::Apply(icFloatNumber lumValue, icFloatNumber pixelValue) const
 {
-  if (!m_nFunctionType && m_params) {
-    return m_params[0] * lumValue * (pixelValue + m_params[1]) + m_params[2];
-  }
-
-  return 0;
+  // No function-type or null-parameter test: Begin() returns false unless
+  // m_nFunctionType is 0 and m_params is non-null with at least NumArgs()
+  // entries, and a tone map whose Begin() failed is never applied. This ran once
+  // per output channel per pixel to re-establish both.
+  return m_params[0] * lumValue * (pixelValue + m_params[1]) + m_params[2];
 }
 
 icValidateStatus CIccToneMapFunc::Validate(std::string& sReport, int /* nVerboseness */) const
@@ -4762,8 +5305,13 @@ bool CIccMpeToneMap::Write(CIccIO* pIO)
 
   lumPos.size = (icUInt32Number)(pIO->Tell() - (lumPos.offset + nTagStartPos));
 
-  //Keep track of tone function positions
-  icPositionNumber funcPos[ 16 ];   // maximum output channels
+  //Keep track of tone function positions, one per output channel.  Allocated
+  //rather than a fixed array: the channel count is a uInt16Number, and Read()
+  //and the XML and JSON readers all accept any count.  nothrow because every
+  //other failure in this function returns false, as Read() does.
+  std::unique_ptr<icPositionNumber[]> funcPos(new (std::nothrow) icPositionNumber[m_nOutputChannels]);
+  if (!funcPos)
+    return false;
 
   //write out first tone function
   funcPos[0].offset = (icUInt32Number)(pIO->Tell() - nTagStartPos);
@@ -5623,6 +6171,15 @@ CIccMpeCLUT::~CIccMpeCLUT()
  ******************************************************************************/
 void CIccMpeCLUT::SetCLUT(CIccCLUT *pCLUT)
 {
+  // Reinstalling the table this element already owns is a no-op.  Deleting it
+  // first would free the object the lines below then dereference, and leave
+  // m_pCLUT dangling for the destructor; GetCLUT() hands the member out, so
+  // SetCLUT(GetCLUT()) is reachable from any caller.  The channel counts
+  // already describe this table -- every path that sets m_pCLUT derives them
+  // from the same CIccCLUT -- so there is nothing left to refresh.
+  if (m_pCLUT == pCLUT)
+    return;
+
   delete m_pCLUT;
 
   m_pCLUT = pCLUT;
@@ -5709,7 +6266,12 @@ bool CIccMpeCLUT::Read(icUInt32Number size, CIccIO *pIO)
 
   m_pCLUT->SetClipFunc(NoClip);
 
-  m_pCLUT->Init(gridPoints);
+  // The GetData(0) check below turns a refused Init() into a failed Read() only
+  // because Init() leaves m_pData NULL and GetData(0) is &m_pData[0]. State the
+  // rejection where it happens instead of relying on that; CIccMpeExtCLUT::Read
+  // further down this file already does.
+  if (!m_pCLUT->Init(gridPoints))
+    return false;
 
   icFloatNumber *pData = m_pCLUT->GetData(0);
 
@@ -5788,7 +6350,20 @@ bool CIccMpeCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement * /* pM
   if (!m_pCLUT)
     return false;
 
-  m_pCLUT->Begin();
+  // m_interpType is chosen from m_nInputChannels below, but every interpolator
+  // it selects walks the CLUT's own m_nInput. The two are only guaranteed equal
+  // when the element came from Read(), which bounds the count before narrowing
+  // it to the CLUT's icUInt8Number. An element built by a parser sets
+  // m_nInputChannels from its own source and lets the same narrowing happen
+  // separately when it constructs the CLUT, so a declared 257 could leave a
+  // one-dimensional CLUT under an element claiming 257 channels. Compare them
+  // here, where every apply path passes regardless of how the element was
+  // built.
+  if (m_pCLUT->GetInputDim() != m_nInputChannels)
+    return false;
+
+  if (!m_pCLUT->Begin())
+    return false;
 
   switch (m_nInputChannels) {
   case 1:
@@ -6382,15 +6957,28 @@ bool CIccMpeCAM::Write(CIccIO *pIO)
 
 bool CIccMpeCAM::Begin(icElemInterp /* nInterp */, CIccTagMultiProcessElement * /* pMPE */ )
 {
-  if (m_pCAM) {
-    icFloatNumber surround = m_pCAM->GetParameter_C();
-    return std::isfinite((double)surround) && surround >= 0.0f && surround <= 1.0f;
-  }
-  return false;
+  if (!m_pCAM)
+    return false;
+
+  // Moved here from CIccMpeJabToXYZ::Apply and CIccMpeXYZToJab::Apply, which each
+  // re-tested it on every pixel. Both convert through a three-component CAM, so
+  // any other channel count is an element this class cannot apply; refusing it
+  // here is what lets Apply() run unguarded.
+  if (m_nInputChannels != 3 || m_nOutputChannels != 3)
+    return false;
+
+  icFloatNumber surround = m_pCAM->GetParameter_C();
+  return std::isfinite((double)surround) && surround >= 0.0f && surround <= 1.0f;
 }
 
 void CIccMpeCAM::SetCAM(CIccCamConverter *pCAM)
 {
+  // Reinstalling the converter this element already owns is a no-op; deleting
+  // it first would leave m_pCAM dangling and delete it a second time in the
+  // destructor.  GetCAM() makes SetCAM(GetCAM()) reachable from any caller.
+  if (m_pCAM == pCAM)
+    return;
+
   delete m_pCAM;
   m_pCAM = pCAM;
 }
@@ -6514,16 +7102,10 @@ CIccMpeJabToXYZ::~CIccMpeJabToXYZ()
 
 void CIccMpeJabToXYZ::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
 {
-  if (!dstPixel || !srcPixel)
-    return;
-
-  if (!m_pCAM || m_nInputChannels != 3 || m_nOutputChannels != 3) {
-    if (m_nOutputChannels > 0 && m_nOutputChannels <= 3) {
-      memset(dstPixel, 0, m_nOutputChannels * sizeof(icFloatNumber));
-    }
-    return;
-  }
-
+  // No guards: CIccMpeCAM::Begin() refuses a null m_pCAM and a channel count
+  // other than 3, and an element whose Begin() failed is never applied. The
+  // buffers come from the caller's own storage, so they cannot be null. All of
+  // this was re-established on every pixel.
   m_pCAM->JabToXYZ(srcPixel, dstPixel, 1);
 }
 
@@ -6580,16 +7162,10 @@ CIccMpeXYZToJab::~CIccMpeXYZToJab()
 
 void CIccMpeXYZToJab::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
 {
-  if (!dstPixel || !srcPixel)
-    return;
-
-  if (!m_pCAM || m_nInputChannels != 3 || m_nOutputChannels != 3) {
-    if (m_nOutputChannels > 0 && m_nOutputChannels <= 3) {
-      memset(dstPixel, 0, m_nOutputChannels * sizeof(icFloatNumber));
-    }
-    return;
-  }
-
+  // No guards: CIccMpeCAM::Begin() refuses a null m_pCAM and a channel count
+  // other than 3, and an element whose Begin() failed is never applied. The
+  // buffers come from the caller's own storage, so they cannot be null. All of
+  // this was re-established on every pixel.
   m_pCAM->XYZToJab(srcPixel, dstPixel, 1);
 }
 

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 import os
 import pytest
@@ -28,6 +30,52 @@ from iccdev_mcp.cli_tools import _find_tool, discover_tools, TOOL_BINARIES
 # ---------------------------------------------------------------------------
 # Profile resolution tests
 # ---------------------------------------------------------------------------
+
+class TestValidationLibraryOverrides:
+    @pytest.mark.parametrize("value", ["", "/missing/libIccProfLib2.so"])
+    def test_invalid_explicit_override_fails_closed(self, monkeypatch, tmp_path, value):
+        from iccdev_mcp import _native as iccdev
+        library = tmp_path / "IccProfLib" / "libIccProfLib2.so"
+        library.parent.mkdir()
+        library.write_bytes(b"not a library")
+        monkeypatch.setenv("ICCDEV_BUILD_DIR", str(tmp_path))
+        monkeypatch.setenv("ICCDEV_VALIDATION_LIBRARY", value)
+        with pytest.raises(RuntimeError, match="ICCDEV_VALIDATION_LIBRARY"):
+            iccdev._validation_library_path()
+        assert not iccdev.native_validation_available()
+        with pytest.raises(RuntimeError):
+            iccdev.validate_profile(b"invalid profile")
+
+    def test_explicit_library_precedes_build_dir(self, monkeypatch, tmp_path):
+        from iccdev_mcp import _native as iccdev
+        library = tmp_path / "explicit.so"
+        library.write_bytes(b"not a library")
+        monkeypatch.setenv("ICCDEV_VALIDATION_LIBRARY", str(library))
+        monkeypatch.setenv("ICCDEV_BUILD_DIR", "/missing/build")
+        assert iccdev._validation_library_path() == library
+        assert not iccdev.native_validation_available()
+        with pytest.raises(RuntimeError, match="Unable to load"):
+            iccdev.validate_profile(b"profile")
+
+    def test_build_dir_when_explicit_library_unset(self, monkeypatch, tmp_path):
+        from iccdev_mcp import _native as iccdev
+        library = tmp_path / "IccProfLib" / "libIccProfLib2.so"
+        library.parent.mkdir()
+        library.write_bytes(b"not a library")
+        monkeypatch.delenv("ICCDEV_VALIDATION_LIBRARY", raising=False)
+        monkeypatch.setenv("ICCDEV_BUILD_DIR", str(tmp_path))
+        assert iccdev._validation_library_path() == library
+
+    def test_optional_without_native_configuration(self, monkeypatch):
+        from iccdev_mcp import _native as iccdev
+        monkeypatch.delenv("ICCDEV_VALIDATION_LIBRARY", raising=False)
+        monkeypatch.delenv("ICCDEV_BUILD_DIR", raising=False)
+        assert not iccdev.native_validation_available()
+        from iccdev_mcp.server import health_check
+        health = health_check()
+        assert not health["validation_api"]["available"]
+        assert "validate_profile" not in health["python_api"]["available_tools"]
+
 
 class TestProfileResolution:
     """Tests for profile path resolution."""
@@ -155,6 +203,9 @@ class TestCLIToolDiscovery:
     def test_pawg_report_is_tracked(self):
         assert "iccPawgReport" in TOOL_BINARIES
 
+    def test_heif_dump_is_tracked(self):
+        assert "iccHeifDump" in TOOL_BINARIES
+
     def test_tools_dir_multiconfig_layout_is_discovered(self, monkeypatch, tmp_path):
         """ICCDEV_TOOLS_DIR=Build/Tools should find MSVC Debug/Release binaries."""
         tools_dir = tmp_path / "Build" / "Tools"
@@ -181,20 +232,16 @@ class TestServerImport:
         assert mcp is not None
         assert callable(main)
 
-    def test_fastmcp_settings_are_resolved(self):
+    def test_mcpserver_is_registered(self):
         from iccdev_mcp.server import mcp
-        from mcp.server.fastmcp.server import Settings as FastMCPSettings
+        from mcp.server.mcpserver import MCPServer
 
-        assert mcp is not None
-        assert FastMCPSettings.__pydantic_complete__
+        assert isinstance(mcp, MCPServer)
 
     def test_server_has_tools(self):
         from iccdev_mcp import __version__
         from iccdev_mcp.server import mcp
-        # FastMCP should have registered tools
-        assert mcp is not None
-        options = mcp._mcp_server.create_initialization_options()
-        assert options.server_version == __version__
+        assert mcp.version == __version__
 
     def test_package_version(self):
         from importlib.metadata import version
@@ -202,16 +249,72 @@ class TestServerImport:
         assert version("iccdev-mcp") == __version__
 
 
+@pytest.mark.asyncio
+async def test_server_discover_request_succeeds():
+    """The current MCP discovery request must not be parsed as a legacy request."""
+    source_root = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (source_root, env.get("PYTHONPATH")))
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "iccdev_mcp.server",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+
+    try:
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "iccdev-mcp-test",
+                        "version": "1.0",
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
+            },
+        }
+        process.stdin.write((json.dumps(request) + "\n").encode())
+        await process.stdin.drain()
+
+        response_line = await asyncio.wait_for(process.stdout.readline(), timeout=5)
+        assert response_line, "server/discover did not receive a response within 5 seconds"
+        response = json.loads(response_line)
+        assert response["id"] == 1
+        assert "error" not in response
+        assert "2026-07-28" in response["result"]["supportedVersions"]
+    finally:
+        process.stdin.close()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+
+
 # ---------------------------------------------------------------------------
-# Python-native tool tests (require iccdev)
+# Python-native tool tests (use bundled header helpers)
 # ---------------------------------------------------------------------------
 
-# Check if iccdev is available
-try:
-    import iccdev
-    HAS_ICCDEV = hasattr(iccdev, "IccProfile")
-except ImportError:
-    HAS_ICCDEV = False
+from iccdev_mcp import _native as iccdev
+HAS_ICCDEV = hasattr(iccdev, "IccProfile")
 
 # Find a test profile
 _test_profile = None
@@ -262,7 +365,7 @@ class TestNativeTools:
         assert all(0x20 <= ord(ch) <= 0x7E for ch in result["color_space_display"])
 
     def test_validate_profile(self):
-        import iccdev
+        from iccdev_mcp import _native as iccdev
         from iccdev_mcp.server import validate_profile
         if not iccdev.native_validation_available():
             pytest.skip("Native C validation ABI is not available")
@@ -395,6 +498,47 @@ class TestSubprocessTools:
         assert "returncode" in result
         assert "stdout" in result
 
+    @pytest.mark.skipif(
+        not _has_cli_tool("iccHeifDump"),
+        reason="iccHeifDump not available",
+    )
+    def test_heif_dump_missing_file(self):
+        from iccdev_mcp.server import heif_dump
+        with pytest.raises(FileNotFoundError):
+            heif_dump("nonexistent_12345.heic")
+
+    @pytest.mark.skipif(
+        not _has_cli_tool("iccPawgReport"),
+        reason="iccPawgReport not available",
+    )
+    def test_pawg_report_preserves_malformed_mpe_failure(self, tmp_path):
+        import struct
+
+        from iccdev_mcp.server import pawg_report
+
+        profile = bytearray(160)
+        profile[0:4] = struct.pack(">I", len(profile))
+        profile[8:12] = struct.pack(">I", 0x05000000)
+        profile[12:16] = b"mntr"
+        profile[16:20] = b"RGB "
+        profile[20:24] = b"XYZ "
+        profile[36:40] = b"acsp"
+        profile[68:72] = struct.pack(">I", 0x0000F6D6)
+        profile[72:76] = struct.pack(">I", 0x00010000)
+        profile[76:80] = struct.pack(">I", 0x0000D32D)
+        profile[128:132] = struct.pack(">I", 1)
+        profile[132:136] = b"D2B0"
+        profile[136:140] = struct.pack(">I", 144)
+        profile[140:144] = struct.pack(">I", 16)
+        profile[144:148] = b"mpet"
+        profile[152:156] = struct.pack(">HH", 3, 3)
+        profile[156:160] = struct.pack(">I", 1)
+        path = tmp_path / "malformed-mpe.icc"
+        path.write_bytes(profile)
+
+        result = pawg_report(str(path))
+        assert result["returncode"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Error handling tests
@@ -439,6 +583,45 @@ class TestPixelValidation:
             roundtrip_delta("profile.icc", [[0.5, math.nan, 0.1]])
 
 
+def test_transforms_fail_closed_without_compiled_bindings(monkeypatch):
+    from iccdev_mcp.server import color_transform, health_check, roundtrip_delta
+
+    monkeypatch.setitem(sys.modules, "iccdev", None)
+    with pytest.raises(RuntimeError, match="compiled iccdev Python bindings"):
+        color_transform("src.icc", "dst.icc", [[0.5, 0.4, 0.3]])
+    with pytest.raises(RuntimeError, match="compiled iccdev Python bindings"):
+        roundtrip_delta("profile.icc", [[0.5, 0.4, 0.3]])
+    available = health_check()["python_api"]["available_tools"]
+    assert "color_transform" not in available
+    assert "roundtrip_delta" not in available
+    assert "inspect_header" in available
+
+
+@pytest.mark.skipif(not _test_profile, reason="No test profiles found")
+def test_native_transforms_apply_profiles():
+    from iccdev_mcp.server import _transform_available, color_transform, roundtrip_delta
+
+    if not _transform_available():
+        pytest.skip("Compiled iccdev bindings are unavailable")
+    testing = _find_testing_dir()
+    profile = testing / "sRGB_v4_ICC_preference.icc"
+    if not profile.is_file():
+        pytest.skip("sRGB_v4_ICC_preference.icc is unavailable")
+
+    pixels = [[1.0, 0.0, 0.0], [0.4, 0.5, 0.6]]
+    transformed = color_transform(str(profile), str(profile), pixels)
+    assert transformed["src_channels"] == transformed["dst_channels"] == 3
+    assert transformed["pixel_count"] == 2
+    assert len(transformed["pixels"]) == 2
+    assert abs(transformed["pixels"][0][0] - pixels[0][0]) > 0.001
+
+    roundtrip = roundtrip_delta(str(profile), pixels)
+    assert len(roundtrip["roundtripped"]) == len(pixels)
+    assert all(len(row) == 3 for row in roundtrip["roundtripped"])
+    assert roundtrip["stats"]["pixel_count"] == len(pixels)
+    assert 0 < roundtrip["deltas"][0] < 0.05
+
+
 def test_dump_profile_passes_cli_options(monkeypatch, tmp_path):
     """MCP stdio dump_profile should expose the same core options as REST."""
     profile = tmp_path / "test.icc"
@@ -469,6 +652,28 @@ def test_dump_profile_passes_cli_options(monkeypatch, tmp_path):
         "verbosity": 100,
         "tag": "desc",
     }
+
+
+def test_heif_dump_passes_resolved_path(monkeypatch, tmp_path):
+    """MCP stdio heif_dump should resolve paths before invoking the CLI."""
+    image = tmp_path / "test.heic"
+    image.write_bytes(b"ftyp")
+    captured = {}
+
+    def fake_run_heif_dump(path):
+        captured["path"] = path
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(
+        "iccdev_mcp.server.cli_tools.run_heif_dump",
+        fake_run_heif_dump,
+    )
+
+    from iccdev_mcp.server import heif_dump
+    result = heif_dump(str(image))
+
+    assert result["returncode"] == 0
+    assert captured == {"path": str(image.resolve())}
 
 
 def test_round_trip_test_passes_cli_options(monkeypatch, tmp_path):

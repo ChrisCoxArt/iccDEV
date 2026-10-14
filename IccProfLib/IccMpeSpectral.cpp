@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2014 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -184,6 +160,18 @@ CIccMpeSpectralMatrix::CIccMpeSpectralMatrix(const CIccMpeSpectralMatrix &matrix
  ******************************************************************************/
 void CIccMpeSpectralMatrix::copyData(const CIccMpeSpectralMatrix &matrix)
 {
+  // Assigning an element to itself must not disturb it.  Every buffer below is
+  // released and then re-copied out of the source, which is this same object.
+  // That is not a read through freed memory: malloc() has already overwritten
+  // the member by the time the memcpy reads the source pointer, so the copy is
+  // the new block onto itself and the element keeps its shape while silently
+  // losing its CONTENTS.  std::sort and any dedup loop assign an element to
+  // itself, and copyData() is the whole body of operator=.  Guarding here
+  // rather than in the three operator= bodies that reach this one also covers
+  // the callers that are not assignment operators.
+  if (this == &matrix)
+    return;
+
   m_nReserved = matrix.m_nReserved;
   m_nReserved2 = matrix.m_nReserved2;
 
@@ -226,6 +214,11 @@ void CIccMpeSpectralMatrix::copyData(const CIccMpeSpectralMatrix &matrix)
   else
     m_pWhite = NULL;
 
+  // The apply matrix belongs to this element, was built by Begin() out of the
+  // buffers being replaced above, and is deleted by the destructor.  Dropping
+  // the pointer without releasing it orphans it; SetSize() already releases it
+  // the same way before it resets.
+  delete m_pApplyMtx;
   m_pApplyMtx = NULL;
 }
 
@@ -678,17 +671,13 @@ bool CIccMpeEmissionMatrix::Begin(icElemInterp /* nInterp */, CIccTagMultiProces
  ******************************************************************************/
 void CIccMpeEmissionMatrix::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
 {
-  if (m_pApplyMtx) {
-    m_pApplyMtx->VectorMult(dstPixel, srcPixel);
-    dstPixel[0] += m_xyzOffset[0];
-    dstPixel[1] += m_xyzOffset[1];
-    dstPixel[2] += m_xyzOffset[2];
-  }
-  else {
-    dstPixel[0] = 0;
-    dstPixel[1] = 0;
-    dstPixel[2] = 0;
-  }
+  // No null test: Begin() returns false when m_pApplyMtx could not be built, and
+  // an element whose Begin() failed is never applied. The former else branch
+  // zeroed the output for a state that cannot reach here.
+  m_pApplyMtx->VectorMult(dstPixel, srcPixel);
+  dstPixel[0] += m_xyzOffset[0];
+  dstPixel[1] += m_xyzOffset[1];
+  dstPixel[2] += m_xyzOffset[2];
 }
 
 
@@ -761,18 +750,12 @@ bool CIccMpeInvEmissionMatrix::Begin(icElemInterp /* nInterp */, CIccTagMultiPro
  ******************************************************************************/
 void CIccMpeInvEmissionMatrix::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *dstPixel, const icFloatNumber *srcPixel) const
 {
-  if (m_pApplyMtx) {
-    icFloatNumber xyz[3];
-    xyz[0] = srcPixel[0] - m_xyzOffset[0];
-    xyz[1] = srcPixel[1] - m_xyzOffset[1];
-    xyz[2] = srcPixel[2] - m_xyzOffset[2];
-    m_pApplyMtx->VectorMult(dstPixel, xyz);
-  }
-  else {
-    dstPixel[0] = 0;
-    dstPixel[1] = 0;
-    dstPixel[2] = 0;
-  }
+  // No null test, for the same reason as CIccMpeEmissionMatrix::Apply above.
+  icFloatNumber xyz[3];
+  xyz[0] = srcPixel[0] - m_xyzOffset[0];
+  xyz[1] = srcPixel[1] - m_xyzOffset[1];
+  xyz[2] = srcPixel[2] - m_xyzOffset[2];
+  m_pApplyMtx->VectorMult(dstPixel, xyz);
 }
 
 /**
@@ -890,6 +873,13 @@ CIccMpeSpectralCLUT::CIccMpeSpectralCLUT(const CIccMpeSpectralCLUT &clut)
  ******************************************************************************/
 void CIccMpeSpectralCLUT::copyData(const CIccMpeSpectralCLUT &clut)
 {
+  // As in CIccMpeSpectralMatrix::copyData above, but this one is worse: the
+  // three releases happen before anything is read, so the copy constructor
+  // below dereferences the table this call just freed.  CIccMpeCLUT::operator=
+  // already opens with the same guard.
+  if (this == &clut)
+    return;
+
   delete m_pCLUT;
   delete m_pApplyCLUT;
   free(m_pWhite);
@@ -952,7 +942,11 @@ void CIccMpeSpectralCLUT::SetData(CIccCLUT *pCLUT, icUInt16Number nStorageType,
                                   const icSpectralRange &range, icFloatNumber *pWhite,
                                   icUInt16Number nOutputChannels)
 {
-  delete m_pCLUT;
+  // GetCLUT() and GetWhite() both hand a member out, so SetData() must not
+  // release either one when it is handed back the pointer it already holds.
+  // Only the release is skipped; everything the call refreshes still runs.
+  if (m_pCLUT != pCLUT)
+    delete m_pCLUT;
 
   m_pCLUT = pCLUT;
   if (pCLUT) {
@@ -963,12 +957,21 @@ void CIccMpeSpectralCLUT::SetData(CIccCLUT *pCLUT, icUInt16Number nStorageType,
 
   m_nStorageType = nStorageType;
 
-  delete m_pApplyCLUT;
+  // The apply table is a second CIccCLUT this element owns, built by Begin()
+  // and handed out by the public GetApplyCLUT().  m_pCLUT holds pCLUT by now,
+  // so this test is "the caller did not just hand us the apply table": when it
+  // did, releasing it here would leave m_pCLUT dangling for the destructor.
+  // Skipping the release is leak-free -- the two alias, so ownership has simply
+  // passed to m_pCLUT, and the source table this call installs is stale as an
+  // apply table either way.
+  if (m_pApplyCLUT != m_pCLUT)
+    delete m_pApplyCLUT;
   m_pApplyCLUT = NULL;
 
   m_Range = range;
 
-  free(m_pWhite);
+  if (m_pWhite != pWhite)
+    free(m_pWhite);
 
   m_pWhite = pWhite;
 }
@@ -1038,6 +1041,26 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
   if (m_nInputChannels < 1 || m_nOutputChannels < 1)
     return false;
 
+  // m_nInputChannels is a 16-bit field taken straight from the profile, and it
+  // is narrowed to icUInt8Number when the CLUT is constructed below. The bound
+  // that matters here is therefore not only CIccCLUT's 16-input maximum but the
+  // cast: a declared 256 truncates to 0 and a declared 257 truncates to 1, so
+  // the count this element reports through NumInputChannels() stops describing
+  // the CLUT that backs it. The out-of-range values are already refused, if only
+  // by accident -- Init() below rejects an m_nInput of 0 or >16, leaves m_pData
+  // NULL, and the GetData(0) check that follows turns that into a failed Read.
+  // The truncating ones are not: 257 produces a readable element advertising 257
+  // input channels over a one-dimensional CLUT, and because
+  // icNumColorSpaceChannels() is the low 16 bits of the colour space signature,
+  // a header can declare a 257-channel N-channel space and satisfy the
+  // inputSamples == NumInputChannels() equality in CIccXformMpe::Begin. The
+  // element then applies, reading channel 0 and silently discarding the other
+  // 256. Bound the field before the cast, as CIccMpeCLUT::Read (IccMpeBasic.cpp)
+  // and CIccMpeExtCLUT::Read already do, so the count and the CLUT cannot
+  // disagree.
+  if (m_nInputChannels > 16)
+    return false;
+
   if (!pIO->Read32(&m_flags))
     return false;
 
@@ -1070,7 +1093,13 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
   if (!nBytesPerSample)
     return false;
 
-  m_pCLUT->Init(gridPoints, size - headerSize, nBytesPerSample);
+  // The GetData(0) check below has been catching this failure by side effect --
+  // Init() leaves m_pData NULL when it refuses, and GetData(0) is &m_pData[0].
+  // Say it directly, so the rejection does not depend on GetData()'s current
+  // shape, and so the reason a malformed CLUT is refused appears at the point of
+  // refusal. CIccMpeExtCLUT::Read in IccMpeBasic.cpp already reads this way.
+  if (!m_pCLUT->Init(gridPoints, size - headerSize, nBytesPerSample))
+    return false;
 
   icFloatNumber *pData = m_pCLUT->GetData(0);
 
@@ -1444,6 +1473,18 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
   if (!m_pCLUT || !m_pWhite || m_pCLUT->GetOutputChannels()!=m_Range.steps || m_nOutputChannels!=3)
     return false;
 
+  // The element's declared input channel count and the dimensionality of the
+  // CLUT backing it must agree. Read() now bounds the count before the narrowing
+  // cast that builds the CLUT, but Read() is not the only constructor: the XML
+  // parser sets m_nInputChannels straight from the InputChannels attribute
+  // (capped at 0xFFFF by icXmlParseChannels) and then lets icCLutFromXml()
+  // narrow the same value to icUInt8Number independently, so a declared 257
+  // yields a one-dimensional CLUT under an element still claiming 257. Checking
+  // it here covers every route in, because Begin() is what the apply path calls
+  // whatever built the object.
+  if (m_pCLUT->GetInputDim() != m_nInputChannels)
+    return false;
+
   switch (m_nInputChannels) {
   case 1:
     m_interpType = ic1dInterp;
@@ -1493,10 +1534,21 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
   }
 
   m_pApplyCLUT->SetClipFunc(NoClip);
-  m_pApplyCLUT->Init(m_pCLUT->GridPointArray());
+
+  // Unlike the Read() path, nothing here checks the pointers Init() is
+  // responsible for: pDst below is used as the destination of the VectorMult()
+  // loop without a NULL test, so a refused Init() writes through NULL on the
+  // first node rather than failing. The apply CLUT is built at the same
+  // dimensionality and grid as m_pCLUT, so an Init() that refuses here means the
+  // two have diverged; refusing Begin() is the only correct answer.
+  if (!m_pApplyCLUT->Init(m_pCLUT->GridPointArray()))
+    return false;
 
   icFloatNumber *pSrc = m_pCLUT->GetData(0);
   icFloatNumber *pDst = m_pApplyCLUT->GetData(0);
+
+  if (!pSrc || !pDst)
+    return false;
 
   icFloatNumber xyzW[3];
   icUInt32Number i;
@@ -1519,7 +1571,8 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
     pDst += m_nOutputChannels;
   }
 
-  m_pApplyCLUT->Begin();
+  if (!m_pApplyCLUT->Begin())
+    return false;
 
   return true;
 }
@@ -1540,6 +1593,18 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   if (!m_pCLUT || !m_pWhite ||
       m_Range.steps < 2 || m_Range.start >= m_Range.end ||
       m_pCLUT->GetOutputChannels()!=m_Range.steps || m_nOutputChannels!=3)
+    return false;
+
+  // The element's declared input channel count and the dimensionality of the
+  // CLUT backing it must agree. Read() now bounds the count before the narrowing
+  // cast that builds the CLUT, but Read() is not the only constructor: the XML
+  // parser sets m_nInputChannels straight from the InputChannels attribute
+  // (capped at 0xFFFF by icXmlParseChannels) and then lets icCLutFromXml()
+  // narrow the same value to icUInt8Number independently, so a declared 257
+  // yields a one-dimensional CLUT under an element still claiming 257. Checking
+  // it here covers every route in, because Begin() is what the apply path calls
+  // whatever built the object.
+  if (m_pCLUT->GetInputDim() != m_nInputChannels)
     return false;
 
   switch (m_nInputChannels) {
@@ -1643,19 +1708,46 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   }
 
   m_pApplyCLUT->SetClipFunc(NoClip);
-  m_pApplyCLUT->Init(m_pCLUT->GridPointArray());
+
+  // As in CIccMpeEmissionCLUT::Begin above: pDst is written through without a
+  // NULL test, so Init()'s refusal has to stop us here. pApplyMtx is this
+  // function's to release on every exit once it is not the stack observer.
+  if (!m_pApplyCLUT->Init(m_pCLUT->GridPointArray())) {
+    if (pApplyMtx!=&observer)
+      delete pApplyMtx;
+    return false;
+  }
 
   icFloatNumber *pSrc = m_pCLUT->GetData(0);
   icFloatNumber *pDst = m_pApplyCLUT->GetData(0);
+
+  if (!pSrc || !pDst) {
+    if (pApplyMtx!=&observer)
+      delete pApplyMtx;
+    return false;
+  }
 
   icFloatNumber xyzW[3];
 
   pApplyMtx->VectorMult(xyzW, m_pWhite);
 
-  bool bUseAbsolute = (m_flags & icRelativeSpectralData)!=0;
+  // ICC.2:2023 11.2.12: the media white -> illuminant white normalization of
+  // Formulae (43) to (46) applies "for relative colorimetric processing (when
+  // the Absolute flag is zero)". Bit 0 of the flags is icAbsoluteSpectralData;
+  // this used to mask with icRelativeSpectralData, which is 0, so the test was
+  // always false and every element took the relative path whatever its Flags
+  // said (#2520). With the flag set, the product below is left as it is: the
+  // observer was normalized against the illuminant by getEmissiveObserver(),
+  // so a perfect reflector comes out at Y = 1. Formula (41) prints its k as
+  // 1 / sum(cy,i * wi); that difference is not addressed here.
+  bool bUseAbsolute = (m_flags & icAbsoluteSpectralData)!=0;
   bool bLab = (m_flags & icLabSpectralData) != 0;
 
-  icFloatNumber xyzscale[3];
+  // Only read under the same !bUseAbsolute test that fills it. While that test
+  // was constant, the compiler could see the array was always set; now that it
+  // is not, GCC 15's -Wmaybe-uninitialized cannot connect the two tests (an
+  // -Werror failure under LTO), so start from 1.0, which is "no adaptation".
+  icFloatNumber xyzscale[3] = {1.0f, 1.0f, 1.0f};
   if (!bUseAbsolute) {
     xyzscale[0] = xyzW[0] != 0.0f ? xyzi[0] / xyzW[0] : 0.0f;
     xyzscale[1] = xyzW[1] != 0.0f ? xyzi[1] / xyzW[1] : 0.0f;
@@ -1685,7 +1777,8 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   if (pApplyMtx!=&observer)
     delete pApplyMtx;
 
-  m_pApplyCLUT->Begin();
+  if (!m_pApplyCLUT->Begin())
+    return false;
 
   return true;
 }
@@ -1711,6 +1804,13 @@ CIccMpeSpectralObserver::CIccMpeSpectralObserver()
   m_Range.end=0;
   m_Range.steps=0;
 
+  // Neither this constructor nor the two copy paths below used to touch
+  // m_flags, so an observer that was never Read() from a file, and every copy
+  // of one, carried whatever the allocator left there. Apply() already read
+  // the Lab bit from it, and since #2520 bit 0 selects absolute processing
+  // too. The spectral CLUT constructors set and copy it the same way.
+  m_flags = 0;
+
   m_pApplyMtx = NULL;
 }
 
@@ -1733,6 +1833,12 @@ CIccMpeSpectralObserver::CIccMpeSpectralObserver(const CIccMpeSpectralObserver &
   m_nOutputChannels = matrix.m_nOutputChannels;
 
   m_Range = matrix.m_Range;
+
+  // See the default constructor (#2520). This is the path a profile copy
+  // takes: CIccProfile's copy constructor copies each tag, and the MPE tag
+  // copies each element with NewCopy(), as CIccCmm::AddXform(CIccProfile&)
+  // does.
+  m_flags = matrix.m_flags;
 
   if (matrix.m_pWhite) {
     int num = m_Range.steps*sizeof(icFloatNumber);
@@ -1758,12 +1864,20 @@ CIccMpeSpectralObserver::CIccMpeSpectralObserver(const CIccMpeSpectralObserver &
  ******************************************************************************/
 void CIccMpeSpectralObserver::copyData(const CIccMpeSpectralObserver &matrix)
 {
+  // Same self-assignment contract as the two copyData() above: m_pWhite is
+  // freed and re-copied out of this same object, which loses the white point.
+  if (this == &matrix)
+    return;
+
   m_nReserved = matrix.m_nReserved;
 
   m_nInputChannels = matrix.m_nInputChannels;
   m_nOutputChannels = matrix.m_nOutputChannels;
 
   m_Range = matrix.m_Range;
+
+  // As in the copy constructor (#2520); operator= comes through here.
+  m_flags = matrix.m_flags;
 
   free(m_pWhite);
 
@@ -1776,6 +1890,9 @@ void CIccMpeSpectralObserver::copyData(const CIccMpeSpectralObserver &matrix)
   else
     m_pWhite = NULL;
 
+  // Same ownership as CIccMpeSpectralMatrix::copyData above: release the apply
+  // matrix rather than just dropping the pointer to it.
+  delete m_pApplyMtx;
   m_pApplyMtx = NULL;
 }
 
@@ -2001,7 +2118,13 @@ void CIccMpeSpectralObserver::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *
     icFloatNumber xyz[3];
     m_pApplyMtx->VectorMult(xyz, srcPixel);
 
-    bool bUseAbsolute = (m_flags & icRelativeSpectralData)!=0;
+    // Same flag test as CIccMpeReflectanceCLUT::Begin() (#2520). Both observer
+    // elements share this Apply(): for the reflectance observer m_xyzscale holds
+    // the media white adaptation of Formulae (51) to (54); for the emission
+    // observer it is 1.0, because getEmissiveObserver() has already applied the
+    // relative k of Formula (26). Begin() leaves m_xyzscale unset when the flag
+    // is set, so it must not be read on that path.
+    bool bUseAbsolute = (m_flags & icAbsoluteSpectralData)!=0;
     bool bLab = (m_flags & icLabSpectralData) != 0;
 
     if (!bUseAbsolute) {
@@ -2124,9 +2247,16 @@ bool CIccMpeEmissionObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiProc
 
   m_pApplyMtx->VectorMult(m_xyzw, m_pWhite);
 
+  // getEmissiveObserver() has already scaled the observer by the relative k of
+  // ICC.2:2023 Formula (26), so the white emission comes out at Y = 1 and
+  // Apply() has no further normalization to do: it multiplies by 1.0. This used
+  // to assign m_xyzscale[0] three times, and no constructor initializes the
+  // array, so Apply() multiplied Y and Z by whatever the allocator had left
+  // there (#2520). The Absolute flag (k = 1) is still not honoured here,
+  // because getEmissiveObserver() always applies the relative k.
   m_xyzscale[0] = 1.0;
-  m_xyzscale[0] = 1.0;
-  m_xyzscale[0] = 1.0;
+  m_xyzscale[1] = 1.0;
+  m_xyzscale[2] = 1.0;
 
   return true;
 }
@@ -2211,7 +2341,11 @@ bool CIccMpeReflectanceObserver::Begin(icElemInterp /* nInterp */, CIccTagMultiP
 
   m_pApplyMtx->VectorMult(xyzm, m_pWhite);
 
-  bool bUseAbsolute = (m_flags & icRelativeSpectralData)!=0;
+  // ICC.2:2023 11.2.13, as in CIccMpeReflectanceCLUT::Begin() (#2520): the
+  // media white adaptation of Formulae (51) to (54) applies only when the
+  // Absolute flag is zero. When it is set, m_xyzscale is left unset and
+  // Apply() does not read it.
+  bool bUseAbsolute = (m_flags & icAbsoluteSpectralData)!=0;
   //bool bLab = (m_flags & icLabSpectralData) != 0;
 
   if (!bUseAbsolute) {

@@ -7,63 +7,40 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <exception>
 #include "IccProfLibVer.h"
+#include "IccFileUtil.h"
 #include "PawgReport.h"
 
 #ifdef _WIN32
@@ -137,7 +114,8 @@ int main(int argc, char *argv[])
       return 0;
     }  else if (argv[k][0] == '-') {
        // unrecognized switch/option, document and return error
-       printf("Unknown option \"%s\"\n\n", argv[k] );
+       printf("Unknown option \"%s\"\n\n",
+               icSanitizeConsoleText(argv[k]).c_str() );
        printUsage();
        return 1;
     } else {
@@ -164,6 +142,13 @@ int main(int argc, char *argv[])
   }
 #endif
 
+  // #2414: built BEFORE the try, not inside the handlers.  std::bad_alloc is a
+  // std::exception, so sanitizing in the catch block would allocate on the one
+  // path where allocation has just failed -- and an exception escaping a handler
+  // leaves main() uncaught, turning a clean diagnostic into a terminate().  This
+  // is also the hoisting pattern the other nine tools in this sweep use.
+  const std::string displayPath = icSanitizeConsoleText(profilePath);
+
   try {
 #if defined(ICCDEV_ENABLE_QA_FLAGS)
     if (bEvidenceJson) {
@@ -173,10 +158,12 @@ int main(int argc, char *argv[])
     return DumpPawgReport(profilePath.c_str(), bJson);
   }
   catch (const std::exception& e) {
-    fprintf(stderr, "ERROR - exception while processing PAWG report for '%s': %s\n", profilePath.c_str(), e.what() );
+    fprintf(stderr, "ERROR - exception while processing PAWG report for '%s': %s\n",
+             displayPath.c_str(), e.what() );
   }
   catch (...) {
-    printf("ERROR - Unknown exception while preparing PAWG report for '%s'\n", profilePath.c_str() );
+    printf("ERROR - Unknown exception while preparing PAWG report for '%s'\n",
+            displayPath.c_str() );
   }
   
   // we only get here if an exception was thrown during report generation

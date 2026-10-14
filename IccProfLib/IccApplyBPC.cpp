@@ -9,58 +9,34 @@ Copyright:  (c) see ICC Software License
 */
 
 /*
-* The ICC Software License, Version 0.2
-*
-*
-* Copyright (c) 2003-2012 The International Color Consortium. All rights 
-* reserved.
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, are permitted provided that the following conditions
-* are met:
-*
-* 1. Redistributions of source code must retain the above copyright
-*    notice, this list of conditions and the following disclaimer. 
-*
-* 2. Redistributions in binary form must reproduce the above copyright
-*    notice, this list of conditions and the following disclaimer in
-*    the documentation and/or other materials provided with the
-*    distribution.
-*
-* 3. In the absence of prior written permission, the names "ICC" and "The
-*    International Color Consortium" must not be used to imply that the
-*    ICC organization endorses or promotes products derived from this
-*    software.
-*
-*
-* THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
-* WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-* OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-* DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
-* ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-* SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-* LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-* USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-* OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-* SUCH DAMAGE.
-* ====================================================================
-*
-* This software consists of voluntary contributions made by many
-* individuals on behalf of the The International Color Consortium. 
-*
-*
-* Membership in the ICC is encouraged when this software is used for
-* commercial purposes. 
-*
-*  
-* For more information on The International Color Consortium, please
-* see <http://www.color.org/>.
-*  
-* 
-*/
-
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -307,7 +283,7 @@ bool CIccApplyBPC::calcSrcBlackPoint(const CIccProfile* pProfile, const CIccXfor
 		lab2pcs(XYZb, pProfile);
 
 		//convert the PCS value to CMYK
-		if (!pixelXfm(Pixel, XYZb, pProfile->m_Header.pcs, icPerceptual, pProfile)) {
+		if (!pixelXfm(Pixel, XYZb, pProfile->m_Header.pcs, icPerceptual, pProfile, pXform->UseD2BTags())) {
 			return false;
 		}
 	}
@@ -353,7 +329,7 @@ bool CIccApplyBPC::calcSrcBlackPoint(const CIccProfile* pProfile, const CIccXfor
 	}
 
 	// convert the device value to PCS
-	if (!pixelXfm(XYZb, Pixel, pProfile->m_Header.colorSpace, pXform->GetIntent(), pProfile)) {
+	if (!pixelXfm(XYZb, Pixel, pProfile->m_Header.colorSpace, pXform->GetIntent(), pProfile, pXform->UseD2BTags())) {
 		return false;
 	}
 
@@ -396,7 +372,7 @@ bool CIccApplyBPC::calcDstBlackPoint(const CIccProfile* pProfile, const CIccXfor
 	{ // do the complicated and lengthy black point estimation
 
 		// get the black transform
-		CIccCmm* pCmm = getBlackXfm(nIntent, pProfile);
+		CIccCmm* pCmm = getBlackXfm(nIntent, pProfile, pXform->UseD2BTags());
 		if (!pCmm) {
 			return false;
 		}
@@ -558,7 +534,7 @@ bool CIccApplyBPC::calcDstBlackPoint(const CIccProfile* pProfile, const CIccXfor
 **************************************************************************
 */
 bool CIccApplyBPC::pixelXfm(icFloatNumber *DstPixel, icFloatNumber *SrcPixel, icColorSpaceSignature SrcSpace, 
-														icRenderingIntent nIntent, const CIccProfile *pProfile) const
+														icRenderingIntent nIntent, const CIccProfile *pProfile, bool bUseD2BTags) const
 {
 	// create the cmm object
 	CIccCmm cmm(SrcSpace, icSigUnknownData, !IsSpacePCS(SrcSpace));
@@ -568,7 +544,8 @@ bool CIccApplyBPC::pixelXfm(icFloatNumber *DstPixel, icFloatNumber *SrcPixel, ic
 	if (!pICC) return false;
 
 	// add the xform
-	if (cmm.AddXform(pICC, nIntent, icInterpTetrahedral, NULL, icXformLutColorimetric, pICC->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) {
+	if (cmm.AddXform(pICC, nIntent, icInterpTetrahedral, NULL, icXformLutColorimetric,
+									 pICC->m_Header.version >= icVersionNumberV5 ? false : bUseD2BTags)!=icCmmStatOk) {
 		return false;
 	}
 
@@ -594,7 +571,7 @@ bool CIccApplyBPC::pixelXfm(icFloatNumber *DstPixel, icFloatNumber *SrcPixel, ic
 * 
 **************************************************************************
 */
-CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile *pProfile) const
+CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile *pProfile, bool bUseD2BTags) const
 {
 	// create the cmm object
 	CIccCmm* pCmm = new (std::nothrow) CIccCmm(pProfile->m_Header.pcs, icSigUnknownData, false);
@@ -608,7 +585,8 @@ CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile 
 	}
 
 	// add the xform
-	if (pCmm->AddXform(pICC1, nIntent, icInterpTetrahedral, NULL, icXformLutColor, pICC1->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) {
+	if (pCmm->AddXform(pICC1, nIntent, icInterpTetrahedral, NULL, icXformLutColor,
+										 pICC1->m_Header.version >= icVersionNumberV5 ? false : bUseD2BTags)!=icCmmStatOk) {
 		delete pCmm;
 		return NULL;
 	}
@@ -621,7 +599,8 @@ CIccCmm* CIccApplyBPC::getBlackXfm(icRenderingIntent nIntent, const CIccProfile 
 	}
 
 	// add the xform
-	if (pCmm->AddXform(pICC2, icRelativeColorimetric, icInterpTetrahedral, NULL, icXformLutColor, pICC2->m_Header.version >= icVersionNumberV5 ? false : true)!=icCmmStatOk) { // uses the relative intent on the device to Lab side
+	if (pCmm->AddXform(pICC2, icRelativeColorimetric, icInterpTetrahedral, NULL, icXformLutColor,
+										 pICC2->m_Header.version >= icVersionNumberV5 ? false : bUseD2BTags)!=icCmmStatOk) { // uses the relative intent on the device to Lab side
 		delete pCmm;
 		return NULL;
 	}

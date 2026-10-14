@@ -14,7 +14,7 @@ command-line tools.
 - Local patch stacks: `.github/ci/fuzz-patches/afl` and
   `.github/ci/fuzz-patches/cfl`
 - Patch stack validation: `.github/scripts/check-fuzz-patches.sh`
-- CFL smoke: `cfl/build.sh` and `.github/workflows/ci-cfl-smoke.yml`
+- CFL smoke: `.github/ci/cfl/build.sh` and `.github/workflows/ci-cfl-smoke.yml`
 - Governance: `.github/instructions/workflow-governance.instructions.md`
 - Docs: `docs/afl-fuzzing.md`
 
@@ -37,6 +37,10 @@ version. For Clang/LLVM 22, build AFL++ `dev` with `CC=clang-22`,
 `AFL_CXX=clang++-22`. The current narrow CI target set is `afl-fuzz`,
 `afl-showmap`, `afl-cc`, `afl-compiler-rt.o`,
 `SanitizerCoveragePCGUARD.so`, and `cmplog-routines-pass.so`.
+
+Reject compiler pairs outside matching Clang 21 or Clang 22. The packaged
+AFL++ wrapper is paired with 21, while the workflow rebuild is paired with 22;
+do not silently fall back to an older system Clang.
 
 The target sets differ per lane, and are not interchangeable.
 
@@ -89,7 +93,7 @@ shellcheck .github/scripts/iccdev-afl-smoke.sh
 actionlint .github/workflows/ci-afl-smoke.yml
 yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' .github/workflows/ci-afl-smoke.yml
 .github/scripts/iccdev-afl-smoke.sh --seconds 10 --targets dump --exec-timeout-ms 30000
-cfl/build.sh --targets dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize --seconds 30
+.github/ci/cfl/build.sh --targets dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize --seconds 30
 ```
 
 Run `.github/scripts/preflight-safety-checks.sh --require-tools` before pushing
@@ -99,8 +103,9 @@ When changing AFL++ bootstrap behavior, also run the regression-container
 bootstrap probe documented in `docs/afl-fuzzing.md`.
 
 When changing fuzz patch stacks, the patch checker, the patch applicator, or
-`cfl/` build behavior, verify that `.github/workflows/ci-docker.yml` still
-rebuilds and tests the unified image for those paths.
+`.github/ci/cfl/` build behavior, manually dispatch
+`.github/workflows/ci-docker.yml` from an approved publishing ref to rebuild
+and test the unified image.
 
 ## Handoff
 

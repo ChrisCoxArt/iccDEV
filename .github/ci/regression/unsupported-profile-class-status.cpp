@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // Regression for #1843 (claim 1): a profile whose class carries no device<->PCS
 // transform pair must be refused with icCmmStatUnsupportedProfileClass, not with
 // icCmmStatInvalidProfile.
@@ -186,12 +215,18 @@ int main()
     // The reference for "fell through to the default" is a status one past the last
     // enumerator. It must stay inside the enum's valid value range: icStatusCMM is an
     // unscoped enum with no fixed underlying type, so its values span only the smallest
-    // bit-field holding -1..19 (a signed 6-bit field, i.e. -32..31). Loading anything
+    // bit-field holding -1..20 (a signed 6-bit field, i.e. -32..31). Loading anything
     // outside that is undefined behaviour, which UBSan's enum check flags at the switch
     // in GetStatusText -- a far-out sentinel such as 0x7FFFFFFF fails the sanitizer CI
-    // jobs. If a future status does take 20 it will have its own text, so the assertion
-    // below stays meaningful either way.
-    const char *szUnknown = CIccCmm::GetStatusText((icStatusCMM)20);
+    // jobs.
+    //
+    // This was 20 until #2176 appended icCmmStatCantAdjustPcs there. The old note said
+    // the assertion "stays meaningful either way" if a future status took 20, which was
+    // wrong: the check below only compares szNew against szUnknown, so once 20 decoded
+    // to real text the comparison stopped testing anything about falling through to the
+    // default and merely observed that two different statuses have different text. The
+    // sentinel has to track the end of the enum to keep saying what it claims to say.
+    const char *szUnknown = CIccCmm::GetStatusText((icStatusCMM)21);
 
     check(szNew != NULL && strcmp(szNew, szUnknown) != 0,
           "icCmmStatUnsupportedProfileClass should decode to text rather than fall through to the default");

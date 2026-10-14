@@ -100,6 +100,8 @@ then
 	iccFromXml Rec2100HlgFull.xml Rec2100HlgFull.icc
 	iccFromXml Rec2100HlgNarrow.xml Rec2100HlgNarrow.icc
 	iccFromXml RgbGSDF.xml RgbGSDF.icc
+	iccFromXml SpectralObserverElements.xml SpectralObserverElements.icc
+	iccFromXml SpectralRangeTags.xml SpectralRangeTags.icc
 	iccFromXml sRGB_D65_MAT-300cdm2.xml sRGB_D65_MAT-300cdm2.icc
 	iccFromXml sRGB_D65_MAT-500cdm2.xml sRGB_D65_MAT-500cdm2.icc
 	iccFromXml sRGB_D65_MAT.xml       sRGB_D65_MAT.icc
@@ -154,6 +156,7 @@ then
 	iccFromXml FluorescentNamedColor.xml FluorescentNamedColor.icc
 	iccFromXml NamedColor.xml NamedColor.icc
 	iccFromXml SparseMatrixNamedColor.xml SparseMatrixNamedColor.icc
+	iccFromXml SparseMatrixNamedColorTint.xml SparseMatrixNamedColorTint.icc
 	iccFromXml NamedColorV4.xml NamedColorV4.icc
 	set +x
 fi
@@ -190,6 +193,7 @@ if [ "$1" != "clean" ]
 then
 	set -x
 	iccFromXml 4ChanSelect-MID.xml 4ChanSelect-MID.icc
+	iccFromXml 4ChanLink-MLNK.xml 4ChanLink-MLNK.icc
 	iccFromXml 7ChanSelect-MID.xml 7ChanSelect-MID.icc
 	iccFromXml CGYK-SelectMID.xml  CGYK-SelectMID.icc
 	iccFromXml CMPK-SelectMID.xml  CMPK-SelectMID.icc
@@ -295,6 +299,23 @@ then
 	iccFromXml RefIncW.xml RefIncW.icc
 	# RefEstimationImport.xml is not a standalone XML file
 	set +x
+fi
+cd ..
+
+echo "====================== HDR =========================="
+
+cd HDR
+find . -iname "*\.icc" -delete
+if [ "$1" != "clean" ]
+then
+	# #2328: HDR/mkprofiles.sh already builds exactly these ten profiles and is what
+	# the CI workflows invoke directly, so call it rather than keeping a second copy
+	# of the same command list here. A duplicate list drifts silently: an eleventh
+	# HDR profile added to one copy would leave iccdev.qa-profile-manifest either
+	# short a profile or short a manifest row, depending on which copy was edited.
+	# sh -x, not a bare sh: set -x does not cross the process boundary, and every
+	# other section of this script traces its iccFromXml calls into CreateAllProfiles.log.
+	sh -x mkprofiles.sh
 fi
 cd ..
 

@@ -16,9 +16,9 @@ listed below. Maintainer-level sanitizer, Docker, and CMake policy details live 
 
 | Platform | Packages |
 |----------|----------|
-| Ubuntu | `libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev wx-common wx3.2-headers nlohmann-json3-dev cmake make ninja-build` |
-| macOS | `libpng jpeg-turbo libtiff libxml2 zlib wxwidgets nlohmann-json` |
-| Windows | MSVC 2022 or 2026 with vcpkg-managed `libpng`, `libjpeg-turbo`, `libtiff`, `libxml2`, `zlib`, `wxwidgets`, `nlohmann-json` |
+| Ubuntu | `libheif-dev libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev wx-common wx3.2-headers nlohmann-json3-dev cmake make ninja-build` |
+| macOS | `libheif libpng jpeg-turbo libtiff libxml2 zlib wxwidgets nlohmann-json` |
+| Windows | MSVC 2022 or 2026 with vcpkg-managed `libheif`, `libpng`, `libjpeg-turbo`, `libtiff`, `libxml2`, `zlib`, `wxwidgets`, `nlohmann-json` |
 
 Thread support is provided by the platform C/C++ runtime and CMake's
 `Threads::Threads` imported target; no separate Ubuntu package is required.
@@ -38,7 +38,7 @@ on the configure command line.
 ## Ubuntu
 
 ```bash
-sudo apt install -y libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev \
+sudo apt install -y libheif-dev libpng-dev libjpeg-dev libtiff-dev libxml2-dev zlib1g-dev \
   libwxgtk3.2-dev libwxgtk-media3.2-dev libwxgtk-webview3.2-dev \
   wx-common wx3.2-headers nlohmann-json3-dev curl git make cmake \
   clang clang-tools build-essential ninja-build
@@ -48,6 +48,63 @@ cd iccdev
 cmake --preset linux-clang -S Build/Cmake -B out/linux-clang
 cmake --build out/linux-clang -j"$(nproc)"
 ```
+
+## Maintainer static analysis
+
+The reusable `ci-pr-lint` workflow uses cppcheck and clang-tidy to report
+non-blocking diagnostics for `IccProfLib`, `IccXML`, `IccJSON`, `IccConnect`,
+and `Tools`. It creates separate component reports plus a combined report.
+Install the additional local tooling on Ubuntu:
+
+```bash
+sudo apt install -y clang-tidy clang-tools cppcheck
+```
+
+Run the same full-source lint configuration from the repository root:
+
+```bash
+LINT_BUILD=/tmp/iccdev-pr-lint-build
+LINT_REPORTS=/tmp/iccdev-pr-lint-reports
+cmake -S Build/Cmake -B "$LINT_BUILD" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DENABLE_TOOLS=ON \
+  -DENABLE_TESTS=ON \
+  -DENABLE_WXWIDGETS=OFF \
+  -DICC_USE_ZLIB=ON \
+  -DICCDEV_ENABLE_QA_FLAGS=ON \
+  -DICCDEV_ENABLE_STRICT_WARNINGS=ON \
+  -Wno-dev
+cmake --build "$LINT_BUILD" --target IccProfLib2 --parallel "$(nproc)"
+mkdir -p "$LINT_REPORTS"
+find IccProfLib IccXML IccJSON IccConnect Tools -type f \
+  \( -name '*.cpp' -o -name '*.cxx' -o -name '*.cc' -o -name '*.c' \
+     -o -name '*.h' -o -name '*.hpp' -o -name '*.hh' \) \
+  -print0 | sort -z > "$LINT_REPORTS/changed_files.txt"
+for component in IccProfLib IccXML IccJSON IccConnect Tools; do
+  grep -z -E "^${component}/" "$LINT_REPORTS/changed_files.txt" \
+    | xargs -r -0 run-clang-tidy -j "$(nproc)" -p "$LINT_BUILD" \
+      -checks='modernize-*,readability-*,-readability-identifier-length,-readability-implicit-bool-conversion,-readability-braces-around-statements,-readability-uppercase-literal-suffix,cppcoreguidelines-*,clang-analyzer-core.*,clang-analyzer-security.*,clang-analyzer-alpha.core.*,clang-analyzer-alpha.security.*' \
+      > "$LINT_REPORTS/clang_tidy_${component}.txt" 2>&1 || true
+  cppcheck --language=c++ --std=c++17 \
+    --enable=warning,performance,portability,style \
+    --suppress=missingIncludeSystem --suppress=unusedStructMember \
+    --suppress=unknownMacro:Tools/wxWidget/wxProfileDump/wxProfileDump.cpp \
+    -DICCPROFLIBVER='"cppcheck"' -DICFLOATSFX='"f"' -j "$(nproc)" \
+    --project="$LINT_BUILD/compile_commands.json" \
+    --file-filter="*/${component}/*" \
+    2> "$LINT_REPORTS/cppcheck_${component}.txt" || true
+done
+cat "$LINT_REPORTS"/clang_tidy_*.txt > "$LINT_REPORTS/clang_tidy.txt"
+cat "$LINT_REPORTS"/cppcheck_*.txt > "$LINT_REPORTS/cppcheck.txt"
+```
+
+Each command emits reports rather than acting as a pass/fail quality gate.
+Review structured `file:line:column` diagnostics, prioritize memory safety,
+input handling, and type-punning defects, and do not treat source excerpts
+that merely contain the word `error:` as compiler errors.
 
 ## macOS
 
@@ -68,6 +125,28 @@ To open the generated project:
 ```bash
 open out/macos-xcode/RefIccMAX.xcodeproj
 ```
+
+`Build/XCode/BuildAll.sh` wraps this same configure/build sequence and can be
+invoked from any working directory. It replaces the legacy per-tool Xcode
+projects and source-tree copies; executables remain under the build directory,
+not in `Testing/`. Pass CMake configure options as arguments, or use
+`ICCDEV_XCODE_BUILD_DIR`, `ICCDEV_XCODE_CONFIG`, and
+`CMAKE_BUILD_PARALLEL_LEVEL` to select the output directory, configuration, and
+job count. Relative build directories are resolved from the repository root.
+For example:
+
+```bash
+ICCDEV_XCODE_CONFIG=Debug Build/XCode/BuildAll.sh -DENABLE_WXWIDGETS=OFF
+```
+
+This wrapper builds macOS, not iOS; use the mobile core presets and the
+device smoke app below for an iPhone or iPad.
+
+Xcode places CLI executables in `Tools/<tool>/<configuration>/`. Use
+`ctest --test-dir out/macos-xcode -C Release` to select that configuration.
+CTest automatically prepares a configuration-specific compatibility directory
+for the shell-backed suites; no executable copies or manual path overrides
+are needed. See <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/docs/ctest.md">CTest Tool Suites</a> for the build and test commands.
 
 For GuardMalloc/libgmalloc crash reproduction, use a non-sanitizer Debug build
 and verify that the built Mach-O tools contain `LC_UUID`. Apple's dynamic loader
@@ -90,6 +169,236 @@ out/macos-clang-guard-malloc/Tools/IccToXml/iccToXml input.icc output.xml
 Do not combine GuardMalloc with AddressSanitizer, ThreadSanitizer, or
 MemorySanitizer. Use ASan/UBSan builds for sanitizer attribution and use
 GuardMalloc separately when checking allocator-sensitive behavior.
+
+## Apple mobile core libraries
+
+iOS, tvOS, watchOS, and visionOS builds provide two static-library tiers. The
+`apple-*-core` presets remain dependency-free and build `IccProfLib2-static`
+only. The `apple-*-extended-core` presets add zlib-backed text tags, IccXML,
+IccJSON, and IccConnect when the Apple SDK and host headers are available.
+They still intentionally exclude command-line tools, CTest executables, image
+libraries, and wxWidgets. Integrate the resulting archives into an app or
+package matching device and simulator archives as an XCFramework.
+
+These presets require Xcode on macOS. Extended presets additionally need
+nlohmann-json CMake package metadata on the host; the Apple SDK supplies zlib
+and LibXml2 for the mobile target. The device and simulator presets below use
+arm64; change `CMAKE_OSX_ARCHITECTURES` for an Xcode-supported simulator
+architecture when needed. watchOS devices use the platform's `arm64_32`
+architecture.
+
+```bash
+cmake --preset apple-ios-device-core -S Build/Cmake
+(cd Build/Cmake && cmake --build --preset apple-ios-device-core --parallel)
+
+cmake --preset apple-ios-simulator-core -S Build/Cmake
+(cd Build/Cmake && cmake --build --preset apple-ios-simulator-core --parallel)
+
+cmake --preset apple-ios-simulator-extended-core -S Build/Cmake
+(cd Build/Cmake && cmake --build --preset apple-ios-simulator-extended-core --parallel)
+```
+
+Equivalent `apple-tvos-*-core`, `apple-watchos-*-core`,
+`apple-visionos-*-core`, and matching `*-extended-core` presets select the
+corresponding device or simulator SDK. Set the app's minimum deployment target through
+`CMAKE_OSX_DEPLOYMENT_TARGET`; iccDEV does not choose one on behalf of an app.
+App code must use only sandbox-authorized file locations or streams. Native
+Apple test hosts are the appropriate test mechanism for these targets; the
+repository's command-line CTest suites remain macOS-host tools. The mobile app
+reports this as a non-failing gap while exercising the library-backed
+capabilities those tools depend on.
+
+The `Apple mobile core libraries` workflow discovers installed Apple SDKs,
+builds every matching minimal and extended mobile-core preset, and runs the
+simulator and Xcode CTest smoke gates below. Manual runs upload the static
+libraries, generated version headers, and build manifest as
+`iccdev-apple-mobile-core`. The workflow also remains callable by trusted
+workflow orchestration without uploading PR-controlled artifacts. Apple mobile
+and Apple smoke workflows are not push or pull-request triggers; dispatch
+`.github/workflows/ci-apple-mobile-core.yml` or
+`.github/workflows/ci-apple-platform-smoke.yml` when a change needs this Apple
+gate before review.
+
+### Run the core smoke app on an iPhone, iPad, or Apple Watch
+
+`Build/AppleMobile` is a standalone Xcode consumer of the core's exported
+CMake package. UIKit (iOS/iPadOS) and SwiftUI (watchOS) hosts share
+Foundation-based tests; neither enables desktop tools or CTest on the device.
+The app exercises the bundled RGB profile, memory and sandbox-file
+serialization, truncated-header rejection, single/batch RGB transforms,
+invalid-file rejection without accepting a platform/default RGB substitute,
+analytic 3D CLUT interpolation with 3, 8, 15, and 16 output channels, and
+extended JSON/XML/IccConnect checks when linked to an `apple-*-extended-core`
+build. Its on-screen summary and `Documents/results.json` include non-failing
+notes for mobile gaps such as desktop command-line tools, image-dependent tool
+packaging, and external platform-profile substitution investigations that are
+not part of the public iccDEV smoke app.
+
+Use an unlocked, paired device with Developer Mode enabled and an Apple
+Development signing identity in Xcode. A Developer ID Application certificate
+cannot sign a mobile app. Set your team ID and the device identifier from
+`xcrun devicectl list devices`; do not commit signing credentials, provisioning
+profiles, device identifiers, or generated Xcode projects.
+For a watch, also keep its paired iPhone available and confirm Xcode can connect
+to the watch. Developer Mode alone does not establish the CoreDevice network
+tunnel.
+
+Run from the repository root, with `TEAM_ID` and `DEVICE_ID` set in your shell.
+Set `RUN_TARGET` to `iphone`, `ipad`, `tv`, or `watch`; the default below
+targets iPhone. The run target selects the matching Apple platform, Xcode
+device family, bundle identifier, SDK, architecture, and core preset:
+
+```bash
+run_target="${RUN_TARGET:-iphone}"
+case "$run_target" in
+  iphone)
+    platform=ios; system=iOS; sdk=iphoneos; arch=arm64; deployment=17.0
+    bundle=org.color.iccdev.CoreSmoke ;;
+  ipad)
+    system=iOS; sdk=iphoneos; arch=arm64; deployment=17.0
+    platform=ios; bundle=org.color.iccdev.CoreSmoke.ipad ;;
+  tv)
+    platform=tvos; system=tvOS; sdk=appletvos; arch=arm64; deployment=17.0
+    bundle=org.color.iccdev.CoreSmoke.tv ;;
+  watch)
+    system=watchOS; sdk=watchos; arch=arm64_32; deployment=10.0
+    platform=watchos; bundle=org.color.iccdev.CoreSmoke.watch ;;
+  *) echo "Set RUN_TARGET to iphone, ipad, tv, or watch" >&2; exit 2 ;;
+esac
+core_preset="apple-${platform}-device-extended-core"
+core="out/${core_preset}"
+build="out/apple-${run_target}-device-smoke"
+json_package_args=()
+if [[ "$core_preset" == *-extended-core ]] && command -v brew >/dev/null 2>&1; then
+  json_prefix="$(brew --prefix nlohmann-json 2>/dev/null || true)"
+  if [[ -f "${json_prefix}/share/cmake/nlohmann_json/nlohmann_jsonConfig.cmake" ]]; then
+    json_package_args+=("-Dnlohmann_json_DIR=${json_prefix}/share/cmake/nlohmann_json")
+  fi
+fi
+cmake --preset "$core_preset" -S Build/Cmake \
+  -DCMAKE_OSX_ARCHITECTURES="$arch" -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment"
+cmake --build "$core" --parallel
+cmake -S Build/AppleMobile -B "$build" -G Xcode \
+  -DCMAKE_SYSTEM_NAME="$system" -DCMAKE_OSX_SYSROOT="$sdk" \
+  -DCMAKE_OSX_ARCHITECTURES="$arch" -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment" \
+  -DRefIccMAX_DIR="$PWD/$core" \
+  -DICCDEV_APPLE_RUN_TARGET="$run_target" \
+  -DICCDEV_APPLE_BUNDLE_IDENTIFIER="$bundle" \
+  -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="$TEAM_ID" \
+  "${json_package_args[@]}"
+xcodebuild -project "$build/IccDevCoreSmoke.xcodeproj" \
+  -target IccDevCoreSmoke -configuration Release -sdk "$sdk" \
+  -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+xcrun devicectl device install app --device "$DEVICE_ID" \
+  "$build/Release-${sdk}/IccDevCoreSmoke.app"
+xcrun devicectl device process launch --device "$DEVICE_ID" \
+  --console --terminate-existing --timeout 90 \
+  --json-output "$build/device-launch.json" "$bundle" --exit-after-tests
+jq -e '.info.outcome == "success" and .result.terminationResult.exitCode == 0' \
+  "$build/device-launch.json"
+xcrun devicectl device copy from --device "$DEVICE_ID" \
+  --domain-type appDataContainer --domain-identifier "$bundle" \
+  --source Documents/results.json --destination "$build/results.json"
+jq -e '.passed == true and (.tests | length > 0) and all(.tests[]; .passed == true)' \
+  "$build/results.json"
+```
+
+Require successful commands, `ICCDEV_DEVICE_TESTS PASS` in the console,
+exit code zero in the current launch JSON, and a passing report copied from
+that run. An installation or launch alone is not a test pass. A normal app
+launch (without `--exit-after-tests`) leaves the report visible on the device.
+This is a core smoke suite, not the desktop regression suite or a benchmark.
+Set `core_preset="apple-${platform}-device-core"` to test the dependency-free
+library tier instead.
+
+Change `bundle` if your team needs a different app ID, and use the same ID in
+the device commands. `ICCDEV_IOS_BUNDLE_IDENTIFIER` remains supported for iOS
+when `ICCDEV_APPLE_BUNDLE_IDENTIFIER` is unset or empty. The deployment targets
+above are specific to this sample; keep the core and app targets aligned.
+Never link a device archive into a simulator app, even when both use arm64.
+Use the simulator helper below to build and exercise matching simulator pairs.
+
+### Run the simulator and Xcode CI gates locally
+
+From the repository root on a Mac with Xcode, CMake, Ninja, `jq`, and
+nlohmann-json available to CMake:
+
+```bash
+bash .github/scripts/iccdev-apple-simulator-smoke.sh ios
+bash .github/scripts/iccdev-apple-simulator-smoke.sh ipad
+bash .github/scripts/iccdev-apple-simulator-smoke.sh tvos
+bash .github/scripts/iccdev-apple-simulator-smoke.sh watchos
+bash .github/scripts/iccdev-xcode-ctest-smoke.sh
+```
+
+Each simulator command builds a matching core/app pair and creates a disposable
+simulator. It requires a fresh passing report, then a missing-profile failure
+control, followed by a restored passing run. Reports and console logs remain
+under `out/apple-<platform>-simulator-smoke`; only the simulator created by the
+command is shut down and deleted. No signing identity is needed. An unavailable
+runtime fails with an installation command; set
+`ICCDEV_APPLE_DOWNLOAD_RUNTIME=1` to permit Xcode to download it, as CI does.
+The simulator helper uses `ICCDEV_APPLE_CORE_FLAVOR=extended` by default; set
+`ICCDEV_APPLE_CORE_FLAVOR=minimal` to exercise the dependency-free core.
+
+The Xcode command builds dependency-free Release and Debug test targets in
+`out/xcode-ctest-smoke`, exercises the configuration-specific CTest runtime
+layout, and requires freshly generated CLI output to catch skipped execution.
+See <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/docs/ctest.md">CTest tool suites</a> for broader desktop coverage.
+
+### Manual iOS example apps
+
+The `examples/ios-*` apps are standalone manual-review Xcode consumers of the
+exported Apple static-core package. They are not CTest targets and are not part
+of the Apple workflow gates unless a maintainer explicitly adds that coverage.
+Keep their app CMake, helper script, README commands, bundle-ID override,
+deployment target, asset labels, persisted report path, and simulator, device,
+or Mac Catalyst launch behavior aligned as one surface.
+
+| Example | Purpose | Start here |
+| --- | --- | --- |
+| `ios-benchapply` | On-device `CIccCmm::Apply` timing POC using the desktop benchmark primitives. | <a href="../examples/ios-benchapply/README.md">examples/ios-benchapply/README.md</a> |
+| `ios-apply-preview` | Visual profile-apply preview with source, applied, and delta panels. | <a href="../examples/ios-apply-preview/README.md">examples/ios-apply-preview/README.md</a> |
+| `ios-clut-editor` | Live profile-chain plus editable 3D CLUT preview for a selected or default image. | <a href="../examples/ios-clut-editor/README.md">examples/ios-clut-editor/README.md</a> |
+
+Use each example helper from the repository root:
+
+```bash
+examples/ios-apply-preview/build-ios.sh simulator --run-tests
+examples/ios-benchapply/build-ios.sh simulator --run-tests
+examples/ios-clut-editor/build-ios.sh simulator --run-tests
+examples/ios-clut-editor/build-ios.sh maccatalyst --run-tests
+TEAM_ID="$TEAM_ID" DEVICE_ID="$DEVICE_ID" \
+  examples/ios-apply-preview/build-ios.sh device --launch
+TEAM_ID="$TEAM_ID" DEVICE_ID="$DEVICE_ID" \
+  examples/ios-benchapply/build-ios.sh device --launch
+TEAM_ID="$TEAM_ID" DEVICE_ID="$DEVICE_ID" \
+  examples/ios-clut-editor/build-ios.sh device --launch
+```
+
+Maintainers can run all three example sentinels with the combined sanitizers
+on one disposable iOS simulator:
+
+```bash
+.github/scripts/iccdev-ios-example-smoke.sh sanitizers
+```
+
+The manually dispatched `Apple platform smoke` workflow exposes `core`,
+`examples`, and `all` scopes so example-only QA does not repeat the tvOS,
+watchOS, and Xcode CTest gates.
+
+Each helper removes bundle-ID drift by forwarding `BUNDLE_ID` to
+each app-specific CMake bundle variable, uses Release by default, and launches
+the simulator with `--console-pty --terminate-running-process` so repeated
+terminal smokes exercise a fresh process. Device runs reject placeholder
+signing values before starting the build without blocking simulator or Mac
+Catalyst runs; unsigned simulator and Mac Catalyst runs ignore a globally
+exported placeholder `BUNDLE_ID` and use the default bundle ID instead. The
+`--run-tests` launch path is bounded by `ICCDEV_LAUNCH_TIMEOUT_SECONDS`
+(default `120`) and treats the app-specific PASS sentinel as completion, so a
+stuck console attachment cannot outlive a successful or failed smoke. The
+`ios-clut-editor` `maccatalyst` target builds a matching Mac Catalyst
+`IccProfLib2-static` archive and runs the same UIKit app on Apple Silicon Macs.
 
 ## Windows MSVC
 
@@ -260,14 +569,13 @@ cmake -S Build/Cmake -B build \
   -DENABLE_WXWIDGETS=OFF
 cmake --build build --parallel "$(nproc)"
 ctest --test-dir build -N --no-tests=error
-cmake --build build --target build-test-binaries --parallel "$(nproc)"
 ctest --test-dir build --output-on-failure --no-tests=error
 ```
 
-The default `all` build excludes CTest-only regression helper binaries. The
-`build-test-binaries` target builds those helpers for filtered CTest runs. The
-`check` target runs the same CTest suite after building tool and test
-dependencies:
+Regression-only CTest helper binaries are intentionally excluded from the
+default `all` product build. Build the `build-test-binaries` target before a
+direct CTest run. The `check` target builds tool and test dependencies before
+running the same suite:
 
 ```bash
 cmake --build build --target check
@@ -281,7 +589,7 @@ ctest --test-dir out/vs2022-x64 -C Release --output-on-failure --no-tests=error
 cmake --build out/vs2022-x64 --config Release --target check
 ```
 
-See [CTest tool suites](ctest.md) for the registered tests, fixtures, logs, and
+See <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/docs/ctest.md">CTest tool suites</a> for the registered tests, fixtures, logs, and
 add-test process.
 
 QA flag evidence builds are enabled by `ICCDEV_ENABLE_QA_FLAGS=ON`. Convenience
@@ -312,8 +620,12 @@ For local FlameGraph capture of the hybrid `iccApplyProfiles` path, use the
 profiling helper after building tools:
 
 ```bash
-ICCDEV_TOOLS_DIR=$PWD/build/Tools ICCDEV_TESTING_DIR=$PWD/Testing ICCDEV_PROFILE_MODE=record ICCDEV_FLAMEGRAPH_DIR=/tmp/FlameGraph .github/scripts/iccdev-hybrid-applyprofiles-profile.sh
+ICCDEV_TOOLS_DIR=$PWD/build/Tools ICCDEV_TESTING_DIR=$PWD/Testing ICCDEV_PROFILE_MODE=record ICCDEV_FLAMEGRAPH_DIR=/path/to/FlameGraph .github/scripts/iccdev-hybrid-applyprofiles-profile.sh
 ```
+
+The unified container sets `ICCDEV_FLAMEGRAPH_DIR=/opt/FlameGraph` to its
+pinned FlameGraph checkout, so the explicit directory is needed only for a
+host installation.
 
 The helper defaults to user-space samples, DWARF call graphs, a higher sample
 frequency, and a minimum sample threshold so short or kernel-heavy captures do
@@ -337,6 +649,34 @@ cmake --preset vs2022-x64-qa-flags -S Build/Cmake -B out/vs2022-x64-qa-flags
 cmake --preset vs2022-clangcl-x64-qa-flags -S Build/Cmake -B out/vs2022-clangcl-x64-qa-flags
 cmake --preset mingw-x64-qa-flags -S Build/Cmake -B out/mingw-x64-qa-flags
 ```
+
+### Opt-in telemetry builds
+
+`ICCDEV_ENABLE_TELEMETRY` defaults to `OFF` for every configuration. With it
+off, apply-tool JSONL/evidence code and library CLUT/threaded-CMM counters are
+excluded at compile time. The apply tools reject telemetry options in these
+builds. Set it to `ON` in a separate build tree to include both surfaces;
+`ICC_PERF_STATS_FILE` then selects a library counter report at runtime. The
+older `ICCDEV_ENABLE_PERF_MONITORING=ON` option remains a deprecated alias,
+including when reconfiguring an existing build tree. An `ON` legacy value takes
+precedence over `ICCDEV_ENABLE_TELEMETRY=OFF`; set the legacy option to `OFF`
+before disabling telemetry in that build tree.
+
+The telemetry presets keep their outputs separate from ordinary builds:
+
+```sh
+cmake --preset linux-clang-telemetry -S Build/Cmake
+cmake --build --preset linux-clang-telemetry
+cmake --preset macos-clang-telemetry -S Build/Cmake
+cmake --build --preset macos-clang-telemetry
+```
+
+Linux GCC, Windows MSVC, ClangCL and MinGW, and macOS Xcode have matching
+`*-telemetry` configure and build presets. Single-config presets select
+Release by default; override with `-DCMAKE_BUILD_TYPE=MinSizeRel` or `Debug`.
+For Visual Studio or Xcode, select the configuration at build time with
+`--config Release`, `--config MinSizeRel`, or `--config Debug`. Use distinct
+build directories when comparing enabled and disabled binaries.
 
 ### Linux AVX2 and AVX-512 CLUT build
 
@@ -475,9 +815,12 @@ smoke and uploads the `reficcmax-runtime-packages-linux` artifact.
 ## Shared library exports
 
 `ENABLE_SHARED_LIBS` defaults to `ON`, so a default Windows build links against
-`IccProfLib2.dll`. Its exports come from CMake's `WINDOWS_EXPORT_ALL_SYMBOLS`
-rather than from `__declspec` annotations: MSVC is deliberately excluded from the
-`ICCPROFLIBDLL_EXPORTS` definition in `Build/Cmake/IccProfLib/CMakeLists.txt`.
+`IccProfLib2.dll`. MSVC exports come from CMake's
+`WINDOWS_EXPORT_ALL_SYMBOLS`, while MinGW uses the linker
+`--export-all-symbols` option so its import library contains unannotated C++
+functions even when other symbols have explicit exports. MSVC is deliberately
+excluded from the `ICCPROFLIBDLL_EXPORTS` definition in
+`Build/Cmake/IccProfLib/CMakeLists.txt`.
 That arrangement dates from #764, and the same file records why hidden visibility
 is not used on GCC/Clang -- `ICCPROFLIB_API` annotations are incomplete
 (~308 partial uses across 43 headers) and `IccXML` has none at all.
@@ -502,18 +845,18 @@ kept deliberately separate from `ICCPROFLIB_API` so real `dllexport`/`dllimport`
 could be added without flipping the ~308 incomplete `ICCPROFLIB_API` annotations
 and changing how every class and function is exported. The shared IccProfLib
 target defines `ICCPROFLIBDLL_DATA_EXPORTS` `PRIVATE` and
-`ICCPROFLIBDLL_DATA_IMPORTS` `INTERFACE`, so anything linking it — in-tree tools
-and `find_package()` consumers alike — sees `dllimport`. The static target
+`ICCPROFLIBDLL_DATA_IMPORTS` `INTERFACE`, so anything linking it -- in-tree tools
+and `find_package()` consumers alike -- sees `dllimport`. The static target
 deliberately gets neither and keeps a plain `extern`.
 
 Nothing special is needed to consume these symbols now. Link
 `RefIccMAX::IccProfLib2` and reference them; the workarounds the tree used to
 carry are gone (#2154):
 
-- **Tools** — `iccDumpProfile`, `iccProfilePlot` and `wxProfileDump` linked
+- **Tools** -- `iccDumpProfile`, `iccProfilePlot` and `wxProfileDump` linked
   `IccProfLib2-static` on Windows shared builds; all three now link
   `${TARGET_LIB_ICCPROFLIB}` on every platform.
-- **Regression executables** — the `${ICCDEV_TEST_LIB_ICCPROFLIB}` indirection
+- **Regression executables** -- the `${ICCDEV_TEST_LIB_ICCPROFLIB}` indirection
   that applied the same fallback is retired; tests link
   `${TARGET_LIB_ICCPROFLIB}` directly.
 - **Consumers that also link `IccXML`/`IccJson`** could never use that fallback
@@ -523,7 +866,7 @@ carry are gone (#2154):
 One case still needs a line of CMake: a **hand-built imported target**, which
 inherits nothing. `install(EXPORT)` carries the `INTERFACE` definition, and
 `Build/Cmake/Modules/FindRefIccMAX.cmake` and `examples/hello-iccdev` set it
-explicitly for the same reason — but a consumer that constructs its own
+explicitly for the same reason -- but a consumer that constructs its own
 `IMPORTED` target from a found library path must add
 `INTERFACE_COMPILE_DEFINITIONS "ICCPROFLIBDLL_DATA_IMPORTS"` to it, on the
 shared target only. Without it the macro compiles empty and Windows is back to
@@ -538,7 +881,7 @@ platforms) pins the linkage and the literal values, while
 test with the `LNK2019` in its log.
 
 A third test, `iccdev.installed-package-consumer`, covers the same annotation
-one step further out — on the *installed* package rather than the build tree.
+one step further out -- on the *installed* package rather than the build tree.
 It stages an install into a temporary prefix and then builds and runs three
 consumers against it: `find_package(RefIccMAX CONFIG)`, `find_package(RefIccMAX
 MODULE)` through `FindRefIccMAX.cmake`, and `examples/hello-iccdev` itself. A
@@ -554,11 +897,11 @@ arms are skipped, with a logged reason, on sanitizer builds (the out-of-tree
 consumers are not instrumented) and the MODULE arms on static-only builds.
 
 `IccUtil.h` also declared `icInfo` until #1897, but that one had no definition
-anywhere in the tree and so failed to link on every platform — a dangling
+anywhere in the tree and so failed to link on every platform -- a dangling
 declaration rather than an export problem. It is gone; construct a `CIccInfo`
 where one is needed. The `iccdev.proflib-exported-global-definitions` CTest
 checks every `ICCPROFLIB_API extern` **and** `ICCPROFLIB_DATA_API extern`
-declaration in these headers — in both macro orderings — against the built
+declaration in these headers -- in both macro orderings -- against the built
 library's symbol table, so a declaration added without a definition fails CI
 rather than reaching a consumer. Annotate a new exported *variable*
 `ICCPROFLIB_DATA_API`, not `ICCPROFLIB_API`: both are audited, but only the
@@ -664,15 +1007,18 @@ cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake
 make -j"$(nproc)"
 
 # Profiling build
-cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TOOLS=ON -DENABLE_PROFILING=ON
-make -j"$(nproc)"
+CC=clang CXX=clang++ cmake -S Build/Cmake -B out/linux-profiling -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_TOOLS=ON -DENABLE_TESTS=ON -DENABLE_PROFILING=ON
+cmake --build out/linux-profiling --target iccDumpProfile --parallel "$(nproc)"
+ctest --test-dir out/linux-profiling -R '^iccdev\.profiling-smoke$' --output-on-failure --no-tests=error
 ```
 
-For ThreadSanitizer and MemorySanitizer, use one sanitizer family per build:
+For ThreadSanitizer, use a standalone build. For MemorySanitizer, use the
+instrumented runtime and focused QA helper so distribution libc++, libc++abi,
+and libxml2 do not create false reports:
 
 ```bash
 cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TOOLS=ON -DENABLE_TSAN=ON
-cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TOOLS=ON -DENABLE_MSAN=ON
+.github/scripts/iccdev-build-msan-libcxx.sh --prefix "$PWD/out/msan-runtime" && .github/scripts/iccdev-msan-taint-qa.sh --source-dir "$PWD" --build-dir "$PWD/out/linux-clang-msan-taint" --runtime-dir "$PWD/out/msan-runtime" --out-dir "$PWD/out/msan-taint-evidence"
 ```
 
 Do not enable coverage while reproducing sanitizer findings; coverage
@@ -685,23 +1031,44 @@ Preset equivalents are available for the same modes:
 ```bash
 cmake --preset linux-clang-sanitizers -S Build/Cmake -B out/linux-clang-sanitizers
 cmake --preset linux-clang-ubsan-int-float -S Build/Cmake -B out/linux-clang-ubsan-int-float
-cmake --preset linux-clang-tsan -S Build/Cmake -B out/linux-clang-tsan
-cmake --preset linux-clang-msan -S Build/Cmake -B out/linux-clang-msan
+cmake --preset linux-clang-tsan -S Build/Cmake && cmake --build out/linux-clang-tsan -j"$(nproc)"
+ICCDEV_MSAN_LIBCXX_DIR="$PWD/out/msan-runtime" cmake --preset linux-clang-msan -S Build/Cmake && cmake --build out/linux-clang-msan -j"$(nproc)"
+cmake --preset linux-clang-valgrind -S Build/Cmake && cmake --build out/linux-clang-valgrind -j"$(nproc)"
 cmake --preset linux-clang-coverage -S Build/Cmake -B out/linux-clang-coverage
 cmake --preset linux-clang-profiling -S Build/Cmake -B out/linux-clang-profiling
 cmake --preset macos-clang-sanitizers -S Build/Cmake -B out/macos-clang-sanitizers
 cmake --preset macos-clang-guard-malloc -S Build/Cmake -B out/macos-clang-guard-malloc
 ```
 
+Bootstrap `out/msan-runtime` with `iccdev-build-msan-libcxx.sh` before using
+the MSan preset. The preset is disabled when `ICCDEV_MSAN_LIBCXX_DIR` is unset
+rather than silently selecting distribution libraries. The Valgrind preset
+intentionally enables no compiler sanitizer; never run Valgrind against an
+ASan, MSan, TSan, or UBSan build.
+
+The `macos-clang-sanitizers` preset also selects libc++ `EXTENSIVE` hardening.
+This adds standard-library precondition and bounds checks to the QA build while
+leaving normal and Release presets at the SDK default. To test another Apple
+libc++ tier explicitly, pass
+`-DICCDEV_LIBCPP_HARDENING_MODE=none|fast|extensive|debug`; non-Apple and
+non-libc++ toolchains reject non-`none` values at configure time. Use only
+`_LIBCPP_HARDENING_MODE`; current Xcode libc++ has removed
+`_LIBCPP_ENABLE_ASSERTIONS`.
+
 ## Maintainer Dockerfiles
 
 `Dockerfile*` files are maintainer-owned release and CI infrastructure. General
 source builds should use the platform package lists above; only maintainers
 should change container package pins, published image tags, or GHCR workflows.
+The canonical `ci-docker` workflow is manual-dispatch only.
 
 | File | Maintainer purpose | Publish/validation path |
 |------|--------------------|-------------------------|
-| `Dockerfile` | Pinned Ubuntu unified image for runtime, MCP, and maintainer checks, with Clang/LLVM 22 defaults, a Clang 21 pair for the packaged AFL++ LLVM plugin, GCC 15.2+, sanitizer, debugger, fuzzing, git, curl, and GitHub CLI tooling. | Validate locally with a no-cache Docker build and toolchain smoke tests before maintainer publishing; AFL wrapper changes also need the `docs/afl-fuzzing.md` container bootstrap probe; consumer workflows select `latest`, an immutable SHA, or a release tag. |
+| `Dockerfile` | Pinned Ubuntu unified image for runtime, MCP, and maintainer checks, with Clang/LLVM 22 defaults, a Clang 21 pair for the packaged AFL++ LLVM plugin, GCC 15.2+, sanitizer, debugger, fuzzing, git, curl, and GitHub CLI tooling. Published tags are native `linux/amd64` and `linux/arm64` manifests; Docker Desktop on Apple Silicon selects `linux/arm64`. | Follow the [container maintainer preflight](regression-container.md#maintainer-preflight-and-security-checks) before publishing; AFL wrapper changes also need the `docs/afl-fuzzing.md` container bootstrap probe. Consumer workflows select `latest`, `ci-qa-pr-docker-testing`, `ci-publish-colourbill-ctrl`, an immutable SHA, or a release tag. |
+
+Local development builds may use Docker's build cache to shorten edit and test
+cycles. Run the final pre-push container preflight with `--no-cache` so the
+published dependency envelope is still verified from the canonical base.
 
 For reproducible maintainer checks, pass the immutable SHA tag to
 `ci-iccdev-tool-tests.yml`; use `latest` only for the current `master`
@@ -728,15 +1095,28 @@ On Windows, run from a Developer Command Prompt or another shell where `cl.exe`
 is already available. The package build reuses that environment instead of
 launching another `vcvarsall.bat`, which avoids failures from very long
 developer `PATH` values. Native-backed parity tests use the built iccDEV tools
-for ProfileLib, XML, and JSON parity; cibuildwheel keeps using the lightweight
-`not parity` subset so isolated wheel tests do not require repository build
-artifacts.
-For Python packaging PR gates, merge criteria, and production PyPI release
+for ProfileLib, XML, and JSON parity. `ci-json-python` and `ci-latest-release`
+share `_build-python-wheels.yml`, using Python 3.13 to drive cibuildwheel 3.4.0
+for seven platform lanes and 45 CPython 3.9-3.13 wheels. Both callers run the
+installed-wheel `not parity` unit suite without native build artifacts.
+Windows ARM64 Python 3.9/3.10 test without optional NumPy; other wheel targets
+require binary NumPy wheels. Primary CI retains native parity and isolated
+sdist tests, fails on empty test collection, and disables wheel artifact
+upload for the shared matrix. Release CI enables explicitly named artifacts and validates every
+expected wheel before release upload. CMake/CTest and CPack still own
+the native tool and runtime packages; the Python wheels bundle the portable
+core and do not depend on those package generators.
+For interim GitHub wheels, Python packaging PR gates, merge criteria, and production PyPI release
 steps, see [Python packaging PR, merge, and production release](python-packaging-release.md).
 
 ## vcpkg Consumers
 
 The `ports/iccdev/` overlay port builds core static libraries and CLI tools.
+The pinned vcpkg registry baseline is
+`04a9d8e5212d01ee1dd9478eadd9caade4f8b0d4`. Keep the root and
+`Build/Cmake` manifests, the `hello-iccdev` registry configuration, and both
+vcpkg CI bootstrap paths synchronized when updating it. The overlay port
+manifest intentionally has no registry baseline.
 For a complete consuming-project example, see the
 [`examples/hello-iccdev` README](https://github.com/InternationalColorConsortium/iccDEV/blob/master/examples/hello-iccdev/README.md).
 
@@ -749,6 +1129,6 @@ Use `CONFIG` mode for a static-only install, as above.
 `Build/Cmake/Modules/FindRefIccMAX.cmake` reports not-found for one on purpose:
 a static archive carries none of its own dependencies, and which ones the
 consumer has to repeat depends on the options the install was built with
-(`ICC_USE_ZLIB`, `ENABLE_ICCXML`) — something a hand-written find module cannot
+(`ICC_USE_ZLIB`, `ENABLE_ICCXML`) -- something a hand-written find module cannot
 see. The `CONFIG` package is generated from the build that produced it and
 carries them exactly.

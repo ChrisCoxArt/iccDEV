@@ -7,58 +7,34 @@
  */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #ifndef ICC_QUALITY_METRICS_H
 #define ICC_QUALITY_METRICS_H
 
@@ -77,6 +53,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <cstdio>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,6 +116,9 @@ struct CharacterizationMetrics {
   int rowsUsed = 0;
   double avgDe00 = 0.0;
   double maxDe00 = 0.0;
+  // True when the forward transform was built from a DToBx tag because the
+  // profile carries no AToBx tag and no matrix/TRC or grayTRC model.
+  bool viaDToBx = false;
 };
 
 constexpr int kQualityMaxDeviceChannels = 4;
@@ -324,6 +304,51 @@ inline double delta_e_2000(const icFloatNumber *lab1, const icFloatNumber *lab2)
   const double value = termL * termL + termC * termC + termH * termH +
                        rt * termC * termH;
   return value > 0.0 ? std::sqrt(value) : 0.0;
+}
+
+// A discontinuity is one step between smoothness samples, or two adjacent
+// steps, where the largest step is over kSmoothDiscontinuityDe00 and the mean
+// is more than kSmoothJumpRatio times the steps either side.  Two steps are
+// taken together because a jump in a sampled table rises over one table
+// interval, which can hold a sample.  The threshold alone also counts steep but
+// smooth regions: L* rises as the cube root of Y near black, CIEDE2000 weighs a
+// steady change of a* or b* most near neutral, and an extended-range PCS can
+// span more than 64 * 6 units of L*.  The steepest of these, a cube root from
+// zero, makes a first step 1 / (2^(1/3) - 1) = 3.85 times the next.
+constexpr double kSmoothDiscontinuityDe00 = 6.0;
+constexpr double kSmoothJumpRatio = 4.0;
+
+// steps holds one sampled path's steps in order; a step beyond either end of
+// the path counts as zero.
+inline int count_smoothness_discontinuities(const std::vector<double> &steps) {
+  int count = 0;
+  size_t i = 0;
+  while (i < steps.size()) {
+    size_t width = 0;
+    for (size_t w = 1; w <= 2 && i + w <= steps.size(); ++w) {
+      double largest = 0.0;
+      double sum = 0.0;
+      for (size_t k = i; k < i + w; ++k) {
+        largest = std::max(largest, steps[k]);
+        sum += steps[k];
+      }
+      const double before = i > 0 ? steps[i - 1] : 0.0;
+      const double after = i + w < steps.size() ? steps[i + w] : 0.0;
+      if (largest > kSmoothDiscontinuityDe00 &&
+          sum / static_cast<double>(w) > kSmoothJumpRatio * std::max(before, after)) {
+        width = w;
+        break;
+      }
+    }
+
+    if (width) {
+      ++count;
+      i += width;
+    } else {
+      ++i;
+    }
+  }
+  return count;
 }
 
 template <typename Fn>
@@ -566,6 +591,103 @@ inline bool status_ok(icStatusCMM status, const std::string &phase, std::string 
   return false;
 }
 
+// Why a started CMM cannot be applied with source and destination buffers of
+// nMaxSamples floats, or an empty string if it can.
+//
+// The chain is checked at its ENDS.  Begin() may append steps after the
+// profile's own transform - a CIccPcsXform that converts a lut8/lut16 table's
+// legacy Lab encoding, for one - so GetLastXform() is not necessarily the
+// profile's transform, and its source count says nothing about the CMM's
+// source.  Comparing the two (#1633) rejected every lut8/lut16 profile: a
+// CMYK->Lab 'mft2' chain ends in a 3-in, 3-out conversion, not 4-in.
+//
+// What #1633 guards against is Apply() reading GetSourceSamples() floats from,
+// and writing GetDestSamples() floats to, fixed-size buffers, so those two
+// counts are bounded against the buffer size directly.
+inline std::string cmm_chain_mismatch(const CIccCmm &cmm, size_t nMaxSamples) {
+  const CIccXform *first = cmm.GetFirstXform();
+  const CIccXform *last = cmm.GetLastXform();
+  if (!first || !last) {
+    return "the CMM started but holds no transform";
+  }
+
+  char buf[200];
+  if (first->GetNumSrcSamples() != cmm.GetSourceSamples() ||
+      last->GetNumDstSamples() != cmm.GetDestSamples()) {
+    std::snprintf(buf, sizeof(buf),
+                  "the transform chain's channel counts (%u in, %u out) do not match the "
+                  "profile's data and connection spaces (%u in, %u out)",
+                  (unsigned)first->GetNumSrcSamples(), (unsigned)last->GetNumDstSamples(),
+                  (unsigned)cmm.GetSourceSamples(), (unsigned)cmm.GetDestSamples());
+    return buf;
+  }
+  if (cmm.GetSourceSamples() > nMaxSamples || cmm.GetDestSamples() > nMaxSamples) {
+    std::snprintf(buf, sizeof(buf),
+                  "the profile's data and connection spaces (%u in, %u out) have more than "
+                  "the %u channels this evaluation supports",
+                  (unsigned)cmm.GetSourceSamples(), (unsigned)cmm.GetDestSamples(),
+                  (unsigned)nMaxSamples);
+    return buf;
+  }
+  return std::string();
+}
+
+// Whether the quality metrics should build their CMM from the DToBx/BToDx
+// tags.  They opt out of those tags by default (the bUseD2BxB2DxTags=false
+// below, from #1633): with the colorimetric LUT path CIccXform::Create
+// then considers the AToBx tags, the matrix/TRC model for RGB and the grayTRC
+// model for Gray, and a DToBx whose output is spectral never reaches the
+// fixed 16-float buffers.  A profile whose forward transform exists ONLY as
+// a DToBx tag got no transform at all and reported a Gap.  Such profiles
+// are evaluated now, through the DToBx tags, when
+//   - no AToBx tag, no complete matrix/TRC set and no grayTRC is present,
+//     so the result for every profile evaluated before is unchanged;
+//   - the header has no spectral PCS, so the DToBx emits the colorimetric
+//     PCS the target data is compared in (CIccXform::Create switches a
+//     DToBx to spectral output whenever the header carries one), which
+//     keeps #1633's buffers safe; the chain bound in cmm_chain_mismatch
+//     stays as a second guard.
+// When a profile carries both, the AToBx path is kept: it is what every
+// v2/v4 CMM applies, and Q4 is a characterization check of that transform.
+inline bool use_dtobx_tags(CIccProfile *pIcc) {
+  if (!pIcc) {
+    return false;
+  }
+  static const icTagSignature kAToB[] = {icSigAToB0Tag, icSigAToB1Tag, icSigAToB2Tag, icSigAToB3Tag};
+  for (icTagSignature sig : kAToB) {
+    if (pIcc->FindTag(sig)) {
+      return false;
+    }
+  }
+  if (pIcc->m_Header.colorSpace == icSigRgbData) {
+    static const icTagSignature kMatrixTrc[] = {
+        icSigRedMatrixColumnTag, icSigGreenMatrixColumnTag, icSigBlueMatrixColumnTag,
+        icSigRedTRCTag, icSigGreenTRCTag, icSigBlueTRCTag};
+    bool complete = true;
+    for (icTagSignature sig : kMatrixTrc) {
+      if (!pIcc->FindTag(sig)) {
+        complete = false;
+      }
+    }
+    if (complete) {
+      return false;
+    }
+  }
+  if (pIcc->m_Header.colorSpace == icSigGrayData && pIcc->FindTag(icSigGrayTRCTag)) {
+    return false;
+  }
+  if (pIcc->m_Header.spectralPCS) {
+    return false;
+  }
+  static const icTagSignature kDToB[] = {icSigDToB0Tag, icSigDToB1Tag, icSigDToB2Tag, icSigDToB3Tag};
+  for (icTagSignature sig : kDToB) {
+    if (pIcc->FindTag(sig)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Build a CMM step for the round-trip / smoothness metrics.  The intent defaults
 // to RELATIVE COLORIMETRIC and callers should leave it that way unless they have a
 // specific reason: these metrics measure how invertible / smooth the transform is,
@@ -595,8 +717,13 @@ inline bool begin_profile_cmm(CIccProfile *pIcc,
     return false;
   }
 
+  // icXformLutColorimetric turns the DToBx tags off again for a v5 profile
+  // inside CIccXform::Create, so the DToBx path asks for icXformLutColor;
+  // use_dtobx_tags() has already ruled out a spectral PCS, which is what
+  // icXformLutColorimetric exists to exclude.
+  const bool bDToBx = use_dtobx_tags(pIcc);
   icStatusCMM status = cmm.AddXform(*pIcc, intent, icInterpLinear, NULL,
-                                    icXformLutColorimetric, false);
+                                    bDToBx ? icXformLutColor : icXformLutColorimetric, bDToBx);
   if (!status_ok(status, std::string(direction) + " AddXform", reason)) {
     return false;
   }
@@ -606,11 +733,10 @@ inline bool begin_profile_cmm(CIccProfile *pIcc,
     return false;
   }
 
-  CIccXform *xform = cmm.GetLastXform();
-  if (!xform ||
-      xform->GetNumSrcSamples() != cmm.GetSourceSamples() ||
-      xform->GetNumDstSamples() != cmm.GetDestSamples()) {
-    reason = "CIccCmm " + std::string(direction) + " selected a transform with incompatible channel counts";
+  // The callers apply this CMM with 16-float buffers.
+  const std::string mismatch = cmm_chain_mismatch(cmm, 16);
+  if (!mismatch.empty()) {
+    reason = "CIccCmm " + std::string(direction) + ": " + mismatch;
     return false;
   }
 
@@ -792,6 +918,7 @@ inline bool measure_cmm_forward_smoothness(CIccProfile *pIcc,
   int stepCount = 0;
 
   auto accumulate_path = [&](bool diagonal, int axis) {
+    std::vector<double> steps;
     bool havePrev = false;
     double prevStep = -1.0;
 
@@ -829,9 +956,7 @@ inline bool measure_cmm_forward_smoothness(CIccProfile *pIcc,
           metrics.maxCurvatureDe00 =
               std::max(metrics.maxCurvatureDe00, std::fabs(step - prevStep));
         }
-        if (step > 6.0) {
-          ++metrics.discontinuities;
-        }
+        steps.push_back(step);
         prevStep = step;
         ++stepCount;
       } else {
@@ -840,6 +965,8 @@ inline bool measure_cmm_forward_smoothness(CIccProfile *pIcc,
 
       prevLab = currLab;
     }
+
+    metrics.discontinuities += count_smoothness_discontinuities(steps);
   };
 
   if (deviceChannels == 1) {
@@ -1287,6 +1414,7 @@ inline bool measure_forward_smoothness_matrix_trc(CIccProfile *pIcc,
   int stepCount = 0;
 
   auto accumulate_path = [&](bool diagonal, int axis) {
+    std::vector<double> steps;
     bool havePrev = false;
     double prevStep = -1.0;
 
@@ -1320,9 +1448,7 @@ inline bool measure_forward_smoothness_matrix_trc(CIccProfile *pIcc,
           metrics.maxCurvatureDe00 =
               std::max(metrics.maxCurvatureDe00, std::fabs(step - prevStep));
         }
-        if (step > 6.0) {
-          ++metrics.discontinuities;
-        }
+        steps.push_back(step);
         prevStep = step;
         ++stepCount;
       } else {
@@ -1331,6 +1457,8 @@ inline bool measure_forward_smoothness_matrix_trc(CIccProfile *pIcc,
 
       prevLab = currLab;
     }
+
+    metrics.discontinuities += count_smoothness_discontinuities(steps);
   };
 
   if (xform.channels == 1) {
@@ -1379,6 +1507,7 @@ inline bool measure_forward_smoothness_classic_lut(CIccProfile *pIcc,
   int stepCount = 0;
 
   auto accumulate_path = [&](bool diagonal, int axis) {
+    std::vector<double> steps;
     bool havePrev = false;
     double prevStep = -1.0;
 
@@ -1412,9 +1541,7 @@ inline bool measure_forward_smoothness_classic_lut(CIccProfile *pIcc,
           metrics.maxCurvatureDe00 =
               std::max(metrics.maxCurvatureDe00, std::fabs(step - prevStep));
         }
-        if (step > 6.0) {
-          ++metrics.discontinuities;
-        }
+        steps.push_back(step);
         prevStep = step;
         ++stepCount;
       } else {
@@ -1423,6 +1550,8 @@ inline bool measure_forward_smoothness_classic_lut(CIccProfile *pIcc,
 
       prevLab = currLab;
     }
+
+    metrics.discontinuities += count_smoothness_discontinuities(steps);
   };
 
   if (forward.inputChannels == 1) {
@@ -1795,6 +1924,66 @@ inline void normalize_device_rows(std::vector<std::array<double, kQualityMaxDevi
   }
 }
 
+// What a profile carries that Q4's forward transform could be built from, in
+// words a reader of the report can act on.  Q4 asks for an absolute-
+// colorimetric transform through the colorimetric LUT path; with the D2Bx
+// tags opted out CIccXform::Create considers, in order: an AToBx tag (AToB1,
+// then AToB0, then AToB3), and failing that the matrix/TRC model for RGB or
+// the grayTRC model for Gray.  The DToBx tags are used only under the
+// conditions use_dtobx_tags() states.  Naming what is present lets a reader
+// tell "the profile has no transform Q4 can use" from "the tool failed".
+inline std::string describe_forward_transform_tags(CIccProfile *pIcc) {
+  static const struct { icTagSignature sig; const char *name; } kAToB[] = {
+    { icSigAToB0Tag, "AToB0" }, { icSigAToB1Tag, "AToB1" },
+    { icSigAToB2Tag, "AToB2" }, { icSigAToB3Tag, "AToB3" },
+  };
+  static const struct { icTagSignature sig; const char *name; } kDToB[] = {
+    { icSigDToB0Tag, "DToB0" }, { icSigDToB1Tag, "DToB1" },
+    { icSigDToB2Tag, "DToB2" }, { icSigDToB3Tag, "DToB3" },
+  };
+  static const struct { icTagSignature sig; const char *name; } kMatrixTrc[] = {
+    { icSigRedMatrixColumnTag, "rXYZ" }, { icSigGreenMatrixColumnTag, "gXYZ" },
+    { icSigBlueMatrixColumnTag, "bXYZ" }, { icSigRedTRCTag, "rTRC" },
+    { icSigGreenTRCTag, "gTRC" }, { icSigBlueTRCTag, "bTRC" },
+  };
+
+  std::string atob, dtob, missing;
+  int nMatrixTrc = 0;
+  for (const auto &t : kAToB)
+    if (pIcc->IsTagPresent(t.sig)) atob += std::string(atob.empty() ? "" : ", ") + t.name;
+  for (const auto &t : kDToB)
+    if (pIcc->IsTagPresent(t.sig)) dtob += std::string(dtob.empty() ? "" : ", ") + t.name;
+  for (const auto &t : kMatrixTrc) {
+    if (pIcc->IsTagPresent(t.sig)) ++nMatrixTrc;
+    else missing += std::string(missing.empty() ? "" : ", ") + t.name;
+  }
+
+  std::string out = "The profile carries ";
+  out += atob.empty() ? "no AToBx tag" : atob;
+
+  if (pIcc->m_Header.colorSpace == icSigRgbData) {
+    if (nMatrixTrc == 6) out += "; a complete matrix/TRC set";
+    else if (nMatrixTrc == 0) out += "; no matrix/TRC tags";
+    else out += "; an incomplete matrix/TRC set (missing " + missing + ")";
+  }
+  else if (pIcc->m_Header.colorSpace == icSigGrayData) {
+    out += pIcc->IsTagPresent(icSigGrayTRCTag) ? "; a grayTRC" : "; no grayTRC";
+  }
+
+  if (!dtob.empty()) {
+    out += "; and " + dtob;
+    if (use_dtobx_tags(pIcc))
+      out += ", which Q4 used here because the profile carries no other forward transform";
+    else if (pIcc->m_Header.spectralPCS)
+      out += ", which Q4 does not use for a profile with a spectral PCS - the DToBx would emit "
+             "spectral samples, which cannot be compared with colorimetric target data";
+    else
+      out += ", which Q4 uses only when no AToBx, matrix/TRC or grayTRC transform is present";
+  }
+  out += ".";
+  return out;
+}
+
 inline bool evaluate_characterization(CIccProfile *pIcc,
                                       CharacterizationMetrics &metrics,
                                       std::string &reason) {
@@ -1954,27 +2143,44 @@ inline bool evaluate_characterization(CIccProfile *pIcc,
   // A2B LUT read (which would yield media-relative numbers and reintroduce the
   // very error this fixes); if an absolute transform cannot be built we report
   // N/A rather than a wrong number.
+  //
+  // When it cannot be built, the reason names the step that failed, carries
+  // the CMM's own status text, and - for the two steps that depend on what the
+  // profile contains - says what forward-transform tags it does carry.  The
+  // three failures below used to collapse into one sentence with the status
+  // discarded, so a reader could not tell a profile Q4 has no path for from a
+  // transform that failed for some other reason.
+  static const char kQ4Lead[] =
+      "Characterization data present but an absolute-colorimetric forward transform could not be built";
   CIccCmm cmmForward(colorSpace, pcs, true);
-  icStatusCMM st = cmmForward.AddXform(*pIcc, icAbsoluteColorimetric, icInterpTetrahedral,
-                                       NULL, icXformLutColorimetric, false);
-  if (st == icCmmStatOk) {
-    st = cmmForward.Begin();
-  }
-  if (st == icCmmStatOk) {
-    CIccXform *xform = cmmForward.GetLastXform();
-    if (!xform ||
-        xform->GetNumSrcSamples() != cmmForward.GetSourceSamples() ||
-        xform->GetNumDstSamples() != cmmForward.GetDestSamples()) {
-      st = icCmmStatBadXform;
-    }
-  }
+  // As in begin_profile_cmm(): icXformLutColorimetric turns the DToBx tags
+  // off again for a v5 profile inside CIccXform::Create, so the DToBx path
+  // asks for icXformLutColor; use_dtobx_tags() has ruled out a spectral PCS.
+  metrics.viaDToBx = use_dtobx_tags(pIcc);
+  icStatusCMM st = cmmForward.AddXform(*pIcc, icAbsoluteColorimetric, icInterpTetrahedral, NULL,
+                                       metrics.viaDToBx ? icXformLutColor : icXformLutColorimetric,
+                                       metrics.viaDToBx);
   if (st != icCmmStatOk) {
-    reason = "Characterization data present but an absolute-colorimetric forward transform could not be built";
+    reason = std::string(kQ4Lead) + ": creating the transform failed (" +
+             CIccCmm::GetStatusText(st) + "). " + describe_forward_transform_tags(pIcc);
     return false;
+  }
+  st = cmmForward.Begin();
+  if (st != icCmmStatOk) {
+    reason = std::string(kQ4Lead) + ": the transform was created but could not be started (" +
+             CIccCmm::GetStatusText(st) + "). " + describe_forward_transform_tags(pIcc);
+    return false;
+  }
+  std::array<icFloatNumber, 16> pcsPred{};
+  {
+    const std::string mismatch = cmm_chain_mismatch(cmmForward, pcsPred.size());
+    if (!mismatch.empty()) {
+      reason = std::string(kQ4Lead) + ": " + mismatch + ".";
+      return false;
+    }
   }
 
   const size_t limit = std::min<size_t>(deviceRows.size(), kMaxCharacterizationSamples);
-  std::array<icFloatNumber, 16> pcsPred{};
   std::array<icFloatNumber, 3> labPred{};
   std::array<icFloatNumber, 3> labMeasured{};
 

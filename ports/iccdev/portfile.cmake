@@ -4,10 +4,10 @@
 #                 All rights reserved.
 #                 https://color.org
 #
-# Last Updated: 2026-04-02 01:27:42 UTC by David Hoyt
-#               Add SHA Pin
+# Last Updated: 2026-09-23 UTC
+#               Refresh source pin
 #               Fixups following BeyondRGB PR-418
-# Remark:       vcpkg testing macOS, WSL-2 & Win11              
+# Remark:       vcpkg CI targets Windows 2022 (x64-windows)
 #
 # portfile.cmake - vcpkg port for iccDEV (RefIccMAX)
 #
@@ -42,8 +42,8 @@ else()
     vcpkg_from_github(
         OUT_SOURCE_PATH SOURCE_PATH
         REPO InternationalColorConsortium/iccDEV
-        REF 3fb8e19870fab46666929bcbad08a598a9c9e01b
-        SHA512 ce4c0f38c7deb6e66142a9993f40df2ba87b2bcb972358d52d33bd9e1ca10d822c96688ba3a106e15208f9fc3daa800509f24270714f226942c157866f2da1a2
+        REF dfc4ffd2423159dd6e5c62642758b8d3d1532503
+        SHA512 417576da65067018cabb89b1ed135a475d98cd809b199f2a48023320a01a3222c7062fdd2611f28bd5e180ad1b556da7949da5b8e78c7fd9f56c616ec49bcbee
         HEAD_REF master
     )
 endif()
@@ -132,6 +132,7 @@ if("tools" IN_LIST FEATURES)
         iccPawgReport
         iccV5DspObsToV4Dsp
         iccProfileVisualize
+        iccBenchApply
     )
     vcpkg_copy_tools(TOOL_NAMES ${_core_tools} AUTO_CLEAN)
 

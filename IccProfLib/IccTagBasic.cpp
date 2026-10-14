@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -384,6 +360,13 @@ CIccTagUnknown::CIccTagUnknown()
 {
   m_nType = icSigUnknownType;
   m_pData = NULL;
+
+  // #2706: m_nSize was left uninitialised. Read() and the XML/JSON parsers set
+  // it only when they find data, and CIccTagJsonUnknown::ParseJson() returns
+  // success without touching it when the document has no "unknownData" key.
+  // Write() then tested the garbage count before the NULL m_pData, which
+  // MemorySanitizer reports; GetSize() returned it to callers as a byte count.
+  m_nSize = 0;
 }
 
 /**
@@ -398,11 +381,21 @@ CIccTagUnknown::CIccTagUnknown()
  */
 CIccTagUnknown::CIccTagUnknown(const CIccTagUnknown &ITU)
 {
-  m_nSize = ITU.m_nSize;
   m_nType = ITU.m_nType;
 
-  m_pData = new icUInt8Number[m_nSize];
-  memcpy(m_pData, ITU.m_pData, sizeof(icUInt8Number)*m_nSize);
+  // Copy only a payload that exists. An empty tag (m_nSize 0, m_pData NULL)
+  // used to reach memcpy() with a NULL source; its copy is an empty tag, which
+  // is what Write() emits for it. The m_pData test is defensive: Read() and the
+  // XML/JSON parsers leave m_nSize 0 whenever they leave no buffer.
+  if (ITU.m_nSize && ITU.m_pData) {
+    m_nSize = ITU.m_nSize;
+    m_pData = new icUInt8Number[m_nSize];
+    memcpy(m_pData, ITU.m_pData, sizeof(icUInt8Number)*m_nSize);
+  }
+  else {
+    m_nSize = 0;
+    m_pData = NULL;
+  }
 }
 
 /**
@@ -420,12 +413,21 @@ CIccTagUnknown &CIccTagUnknown::operator=(const CIccTagUnknown &UnknownTag)
   if (&UnknownTag == this)
     return *this;
 
-  m_nSize = UnknownTag.m_nSize;
-  m_nType = UnknownTag.m_nType;
+  // Same rule as the copy constructor: copy only a payload that exists. The
+  // new buffer is allocated before the old one is released, so a throwing
+  // new[] leaves this tag as it was.
+  icUInt8Number *pData = NULL;
+  icUInt32Number nSize = 0;
+  if (UnknownTag.m_nSize && UnknownTag.m_pData) {
+    nSize = UnknownTag.m_nSize;
+    pData = new icUInt8Number[nSize];
+    memcpy(pData, UnknownTag.m_pData, sizeof(icUInt8Number)*nSize);
+  }
 
   delete [] m_pData;
-  m_pData = new icUInt8Number[m_nSize];
-  memcpy(m_pData, UnknownTag.m_pData, sizeof(icUInt8Number)*m_nSize);
+  m_pData = pData;
+  m_nSize = nSize;
+  m_nType = UnknownTag.m_nType;
 
   return *this;
 }
@@ -462,6 +464,13 @@ bool CIccTagUnknown::Read(icUInt32Number size, CIccIO *pIO)
   delete [] m_pData;
   m_pData = NULL;
 
+  // #2706: every failure below leaves an empty tag, m_nSize 0 with no buffer.
+  // m_nSize used to keep the previous payload's count on an early return, and
+  // the new count after a failed allocation, so Describe(), ToJson() and
+  // ToXml() could dump that many bytes from NULL; a short read left a buffer
+  // that was partly never written.
+  m_nSize = 0;
+
   if (size<sizeof(icTagTypeSignature) || !pIO) {
     return false;
   }
@@ -469,22 +478,26 @@ bool CIccTagUnknown::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read32(&m_nType))
     return false;
 
-  m_nSize = size - sizeof(icTagTypeSignature);
+  icUInt32Number nSize = size - sizeof(icTagTypeSignature);
 
   // Prevent excessive allocation - limit to 256MB
   const icUInt32Number MAX_UNKNOWN_TAG_SIZE = 268435456;
-  if (m_nSize > MAX_UNKNOWN_TAG_SIZE)
+  if (nSize > MAX_UNKNOWN_TAG_SIZE)
     return false;
 
-  if (m_nSize > 0) { // size could be stored as smaller than expected value, therefore the size check
+  if (nSize > 0) { // size could be stored as smaller than expected value, therefore the size check
 
-    m_pData = new (std::nothrow) icUInt8Number[m_nSize];
-    if (!m_pData)
+    icUInt8Number *pData = new (std::nothrow) icUInt8Number[nSize];
+    if (!pData)
       return false;
 
-    if (pIO->Read8(m_pData, m_nSize) != m_nSize) {
+    if (pIO->Read8(pData, nSize) != nSize) {
+      delete [] pData;
       return false;
     }
+
+    m_pData = pData;
+    m_nSize = nSize;
   } else {
       return false;
   }
@@ -3035,6 +3048,10 @@ icValidateStatus CIccTagSignature::Validate(std::string sigPath, std::string &sR
     case icSigCRTDisplay:
     case icSigPMDisplay:
     case icSigAMDisplay:
+    // ICC.1:2022 Table 29 lists these between 'AMD ' and 'KPCD'; both Validate()
+    // lists rejected them as NonCompliant because the enum had no row (#2101).
+    case icSigLCDDisplay:
+    case icSigOLEDDisplay:
     case icSigPhotoCD:
     case icSigPhotoImageSetter:
     case icSigGravure:
@@ -3119,8 +3136,8 @@ CIccTagNamedColor2::CIccTagNamedColor2(int nSize/*=1*/, int nDeviceCoords/*=0*/)
   if (nDeviceCoords>0)
     nDeviceCoords--;
 
-  m_szPrefix[0] = '\0';
-  m_szSufix[0] = '\0';
+  memset(m_szPrefix, 0, sizeof(m_szPrefix));
+  memset(m_szSufix, 0, sizeof(m_szSufix));
   m_csPCS = icSigUnknownData;
   m_csDevice = icSigUnknownData;
 
@@ -3755,6 +3772,13 @@ icInt32Number CIccTagNamedColor2::FindColor(const icChar *szColor) const
   j = (icInt32Number)strlen(m_szSufix);
   i = (icInt32Number)strlen(szColor);
   if (j != 0) {
+    // CWE-125 (#2534): the suffix compare starts j bytes from the end of
+    // szColor, so a name shorter than the suffix makes szColor+(i-j) point
+    // before the buffer and strncmp reads out of bounds.  A name that short
+    // cannot equal prefix+rootName+suffix -- that is at least j bytes long --
+    // so the answer is "not found" without inspecting any memory.
+    if (i < j)
+      return -1;
     if (strncmp(szColor+(i-j), m_szSufix, j))
       return -1;    
   }
@@ -4706,6 +4730,42 @@ icValidateStatus CIccTagChromaticity::Validate(std::string sigPath, std::string 
           if ( (m_xy[0].x != icDtoUF((icFloatNumber)0.625)) || (m_xy[0].y != icDtoUF((icFloatNumber)0.340)) ||
                (m_xy[1].x != icDtoUF((icFloatNumber)0.280)) || (m_xy[1].y != icDtoUF((icFloatNumber)0.605)) ||
                (m_xy[2].x != icDtoUF((icFloatNumber)0.155)) || (m_xy[2].y != icDtoUF((icFloatNumber)0.070)) ) {
+              sReport += icMsgValidateNonCompliant;
+              sReport += sSigPathName;
+              sReport += " - Chromaticity data does not match specification.\n";
+              rv = icMaxStatus(rv, icValidateNonCompliant);
+            }
+            break;
+        }
+
+      // P3 and ITU-R BT.2020 are the two encodings ICC.1:2022 added to Table 31.
+      // Until they were listed here, both fell to the default case below, so a
+      // profile using either with the table's own values was reported as having
+      // an invalid encoding.
+      case icColorantP3:
+        {
+          if ( (m_xy[0].x != icDtoUF((icFloatNumber)0.680)) || (m_xy[0].y != icDtoUF((icFloatNumber)0.320)) ||
+               (m_xy[1].x != icDtoUF((icFloatNumber)0.265)) || (m_xy[1].y != icDtoUF((icFloatNumber)0.690)) ||
+               (m_xy[2].x != icDtoUF((icFloatNumber)0.150)) || (m_xy[2].y != icDtoUF((icFloatNumber)0.060)) ) {
+              sReport += icMsgValidateNonCompliant;
+              sReport += sSigPathName;
+              sReport += " - Chromaticity data does not match specification.\n";
+              rv = icMaxStatus(rv, icValidateNonCompliant);
+            }
+            break;
+        }
+
+      // ICC.1:2022 Table 31 prints the BT.2020 red primary as (0,780, 0,292).
+      // The standard it names, Recommendation ITU-R BT.2020-2 (Table 3, "System
+      // colorimetry"), gives red as x 0.708, y 0.292, and ICC.1:2022 cites that
+      // edition as reference [17]. Green and blue agree in both documents. The
+      // 0.780 reads as transposed digits, so the check uses the ITU value: a
+      // correct BT.2020 profile must not be reported non-compliant because of it.
+      case icColorantBT2020:
+        {
+          if ( (m_xy[0].x != icDtoUF((icFloatNumber)0.708)) || (m_xy[0].y != icDtoUF((icFloatNumber)0.292)) ||
+               (m_xy[1].x != icDtoUF((icFloatNumber)0.170)) || (m_xy[1].y != icDtoUF((icFloatNumber)0.797)) ||
+               (m_xy[2].x != icDtoUF((icFloatNumber)0.131)) || (m_xy[2].y != icDtoUF((icFloatNumber)0.046)) ) {
               sReport += icMsgValidateNonCompliant;
               sReport += sSigPathName;
               sReport += " - Chromaticity data does not match specification.\n";
@@ -5803,7 +5863,7 @@ bool CIccTagSparseMatrixArray::Reset(icUInt32Number nNumMatrices, icUInt16Number
 */
 bool CIccTagSparseMatrixArray::GetSparseMatrix(CIccSparseMatrix &mtx, int nIndex, bool bInitFromData/*=true*/)
 {
-  if (nIndex<0 || nIndex>(int)m_nSize) {
+  if (!m_RawData || nIndex<0 || nIndex>=(int)m_nSize) {
     mtx.Reset(NULL, 0, icSparseMatrixFloatNum, false);
     return false;
   }
@@ -7596,6 +7656,7 @@ template class CIccTagFloatNum<icFloat64Number, icSigFloat64ArrayType>;
 CIccTagMeasurement::CIccTagMeasurement()
 {
   memset(&m_Data, 0, sizeof(m_Data));
+  m_nMeasurementCondition = 0;
 }
 
 
@@ -7612,6 +7673,7 @@ CIccTagMeasurement::CIccTagMeasurement()
 CIccTagMeasurement::CIccTagMeasurement(const CIccTagMeasurement &ITM)
 {
   memcpy(&m_Data, &ITM.m_Data, sizeof(m_Data));
+  m_nMeasurementCondition = ITM.m_nMeasurementCondition;
 }
 
 
@@ -7631,6 +7693,7 @@ CIccTagMeasurement &CIccTagMeasurement::operator=(const CIccTagMeasurement &Meas
     return *this;
 
   memcpy(&m_Data, &MeasTag.m_Data, sizeof(m_Data));
+  m_nMeasurementCondition = MeasTag.m_nMeasurementCondition;
 
   return *this;
 }
@@ -7688,6 +7751,14 @@ bool CIccTagMeasurement::Read(icUInt32Number size, CIccIO *pIO)
   if (pIO->Read32(&m_Data,nSize) != nSize)
     return false;
 
+  // ICC.2 Table 56: bytes 36-39 are an optional measurement condition, and a
+  // 36-byte tag has none.
+  m_nMeasurementCondition = 0;
+  if (size >= sizeof(icTagTypeSignature) + sizeof(icUInt32Number) + sizeof(m_Data) + sizeof(icUInt32Number)) {
+    if (!pIO->Read32(&m_nMeasurementCondition))
+      return false;
+  }
+
   return true;
 }
 
@@ -7723,6 +7794,10 @@ bool CIccTagMeasurement::Write(CIccIO *pIO)
   if (pIO->Write32(&m_Data,nSize) != nSize)
     return false;
 
+  // Written only when set, so a tag without one keeps the 36-byte ICC.1 layout.
+  if (m_nMeasurementCondition && !pIO->Write32(&m_nMeasurementCondition))
+    return false;
+
   return true;
 }
 
@@ -7752,6 +7827,13 @@ void CIccTagMeasurement::Describe(std::string &sDescription, int /* nVerboseness
    sDescription += Fmt.GetMeasurementGeometryName(m_Data.geometry); sDescription += "\n";
    sDescription += Fmt.GetMeasurementFlareName(m_Data.flare); sDescription += "\n";
    sDescription += Fmt.GetIlluminantName(m_Data.illuminant); sDescription += "\n";
+   if (m_nMeasurementCondition) {
+     if (m_nMeasurementCondition <= 4)
+       snprintf(buf, bufSize, "Measurement condition: M%u\n", (unsigned int)(m_nMeasurementCondition - 1));
+     else
+       snprintf(buf, bufSize, "Measurement condition: unknown encoding %08Xh\n", (unsigned int)m_nMeasurementCondition);
+     sDescription += buf;
+   }
 }
 
 
@@ -7802,6 +7884,9 @@ icValidateStatus CIccTagMeasurement::Validate(std::string sigPath, std::string &
     rv = icMaxStatus(rv, icValidateNonCompliant);
   }
 
+  // ICC.2 Table 60 adds encodings 9h-16h to ICC.1's 0h-8h.
+  bool bIcc2 = pProfile && pProfile->m_Header.version >= icVersionNumberV5;
+
   switch(m_Data.illuminant) {
   case icIlluminantUnknown:
   case icIlluminantD50:
@@ -7814,11 +7899,49 @@ icValidateStatus CIccTagMeasurement::Validate(std::string sigPath, std::string &
   case icIlluminantF8:
     break;
 
+  case icIlluminantBlackBody:
+  case icIlluminantDaylight:
+  case icIlluminantB:
+  case icIlluminantC:
+  case icIlluminantF1:
+  case icIlluminantF3:
+  case icIlluminantF4:
+  case icIlluminantF5:
+  case icIlluminantF6:
+  case icIlluminantF7:
+  case icIlluminantF9:
+  case icIlluminantF10:
+  case icIlluminantF11:
+  case icIlluminantF12:
+    if (bIcc2)
+      break;
+    sReport += icMsgValidateNonCompliant;
+    sReport += sSigPathName;
+    sReport += " - Standard illuminant encoding is defined by ICC.2 only.\n";
+    rv = icMaxStatus(rv, icValidateNonCompliant);
+    break;
+
   default:
     sReport += icMsgValidateNonCompliant;
     sReport += sSigPathName;
     sReport += " - Invalid standard illuminant encoding.\n";
     rv = icMaxStatus(rv, icValidateNonCompliant);
+  }
+
+  // ICC.2 Table 61: 0 unknown, 1-4 = M0-M3.  ICC.1 has no such field.
+  if (m_nMeasurementCondition) {
+    if (!bIcc2) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Measurement condition is defined by ICC.2 only.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+    else if (m_nMeasurementCondition > 4) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Invalid measurement condition encoding.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
   }
 
   return rv;
@@ -8848,10 +8971,14 @@ void CIccTagMultiLocalizedUnicode::SetText(const icUInt32Number *sszUnicode32Tex
  */
 CIccTagData::CIccTagData(int nSize/*=1*/)
 {
+  // Clamp the signed argument, then allocate the clamped size.  The clamp used
+  // to test the unsigned m_nSize, so a negative nSize skipped it and the
+  // allocation failed, leaving an empty tag; and nSize 0 was recorded as 1
+  // over a zero-byte allocation that Write() read one byte past (#2572).
+  if (nSize < 1)
+    nSize = 1;
   m_nSize = nSize;
-  if (m_nSize <1)
-    m_nSize = 1;
-  m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
   if (!m_pData)
     m_nSize = 0;
   m_nDataFlag = icAsciiData;
@@ -9605,7 +9732,12 @@ bool CIccTagColorantOrder::Read(icUInt32Number size, CIccIO *pIO)
 
   icUInt32Number nNum = (size - 3*sizeof(icUInt32Number))/sizeof(icUInt8Number);
 
-  if (nNum < nCount)
+  // SetSize() takes an icUInt16Number and the read below is of m_nCount, the
+  // narrowed count, so a declared count above 0xffff used to load silently as
+  // a shorter tag -- 65537 became one position and the rest of the element was
+  // never read.  CIccTagColorantTable::Read() has always refused such a count,
+  // and every JSON and XML reader of these tags now does too.
+  if (nNum < nCount || nCount > 0xffff)
     return false;
 
   if (!SetSize((icUInt16Number)nCount))
@@ -9750,7 +9882,25 @@ icValidateStatus CIccTagColorantOrder::Validate(std::string sigPath, std::string
     return rv;
   }
 
-  if (m_nCount != icGetSpaceSamples(pProfile->m_Header.colorSpace)) {
+  // colorantOrderOutTag ('cloo') gives the laydown order of the colorants of
+  // the header's PCS field, and is for DeviceLink profiles only (ICC.2:2023
+  // 9.2.52).  colorantOrderTag follows the data colour space.  This mirrors
+  // CIccTagColorantTable::Validate()'s colorantTableOutTag branch.
+  if (icGetFirstSigPathSig(sigPath)==icSigColorantOrderOutTag) {
+    if (pProfile->m_Header.deviceClass!=icSigLinkClass) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Use of this tag is allowed only in DeviceLink Profiles.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+    if (m_nCount != icGetSpaceSamples(pProfile->m_Header.pcs)) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Incorrect number of colorants.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+  }
+  else if (m_nCount != icGetSpaceSamples(pProfile->m_Header.colorSpace)) {
     sReport += icMsgValidateNonCompliant;
     sReport += sSigPathName;
     sReport += " - Incorrect number of colorants.\n";
@@ -9775,6 +9925,10 @@ icValidateStatus CIccTagColorantOrder::Validate(std::string sigPath, std::string
  */
 CIccTagColorantTable::CIccTagColorantTable(int nSize/*=1*/)
 {
+  // A standalone colorant table has no profile header from which to obtain its
+  // PCS. Lab preserves Describe()'s historical fallback; CIccProfile replaces
+  // it with the profile PCS when attaching or loading colorantTableTag.
+  m_PCS = icSigLabData;
   m_nCount = nSize;
   if (m_nCount<1)
     m_nCount = 1;
@@ -10947,12 +11101,26 @@ icValidateStatus CIccTagProfileSeqDesc::Validate(std::string sigPath, std::strin
     case icSigCRTDisplay:
     case icSigPMDisplay:
     case icSigAMDisplay:
+    // ICC.1:2022 Table 29 lists these between 'AMD ' and 'KPCD'; both Validate()
+    // lists rejected them as NonCompliant because the enum had no row (#2101).
+    case icSigLCDDisplay:
+    case icSigOLEDDisplay:
     case icSigPhotoCD:
     case icSigPhotoImageSetter:
     case icSigGravure:
     case icSigOffsetLithography:
     case icSigSilkscreen:
     case icSigFlexography:
+
+    // The same four ICC.1 v4.3 rows CIccTagSignature::Validate already accepts.  Without
+    // them a profileSequenceDesc entry recording a legal technology was reported
+    // NonCompliant here while the identical signature in a technologyTag validated, and
+    // once GetSigName() names them the message read "MotionPictureFilmScanner: Unknown
+    // Technology" -- naming the signature and calling it unknown in one line (#2101).
+    case icSigMotionPictureFilmScanner:
+    case icSigMotionPictureFilmRecorder:
+    case icSigDigitalMotionPictureCamera:
+    case icSigDigitalCinemaProjector:
       break;
 
     default:
@@ -11476,8 +11644,17 @@ bool CIccTagResponseCurveSet16::Read(icUInt32Number size, CIccIO *pIO)
       delete[] nOffset;
       return false;
     }
+    // nOffset[i] is TAG-RELATIVE and is already bounded against the tag length by the
+    // check above.  offsetCalc is an ABSOLUTE file position, so the only thing left to
+    // bound it against is what the IO layer can address; comparing it with `size` -- the
+    // tag's byte length -- rejected every ordinary profile carrying this tag.  The resp
+    // tag iccFromXml writes sits at file offset 396 with size 44 and curve offset 16, so
+    // this computed 412 > 44 and returned false: iccToXml and iccToJson both reported
+    // "Unable to read" and iccDumpProfile reported the tag "not found", for a tag whose
+    // bytes are correct (#2399).  A tag can only fail this way when its own file offset
+    // exceeds its length, which is true of essentially every real tag.
     size_t offsetCalc = startPos + nOffset[i];
-    if (offsetCalc > size || offsetCalc > 0xFFFFFFFFULL) {
+    if (offsetCalc > 0xFFFFFFFFULL) {
       delete[] nOffset;
       return false;
     }
@@ -12689,7 +12866,7 @@ icValidateStatus CIccTagSpectralViewingConditions::Validate(std::string sigPath,
   if (getObserver(range)) {
     rv = icMaxStatus(rv, Info.CheckData(sReport, range, sSigPathName + ":>observerRange"));
 
-    if (!m_observer && pProfile && pProfile->m_Header.version < icVersionNumberV5_1) {
+    if (!m_observer && pProfile && pProfile->m_Header.version < icVersionNumberV5) {
       sReport += icMsgValidateNonCompliant;
       sReport += sSigPathName;
       sReport += " - Missing Observer CMF not supported by profile version!\r\n";
@@ -12708,7 +12885,7 @@ icValidateStatus CIccTagSpectralViewingConditions::Validate(std::string sigPath,
   if (getIlluminant(range)) {
     rv = icMaxStatus(rv, Info.CheckData(sReport, range, sSigPathName + ":>illuminantRange"));
 
-    if (!m_illuminant && pProfile && pProfile->m_Header.version < icVersionNumberV5_1) {
+    if (!m_illuminant && pProfile && pProfile->m_Header.version < icVersionNumberV5) {
       sReport += icMsgValidateNonCompliant;
       sReport += sSigPathName;
       sReport += " - Missing illuminant SPD not supported by profile version!\r\n";
@@ -13154,10 +13331,11 @@ bool icGetTagText(const CIccTag *pTag, std::string &text)
 */
 CIccTagEmbeddedHeightImage::CIccTagEmbeddedHeightImage(int nSize/*=1*/)
 {
+  // Same as CIccTagData: clamp nSize, then allocate the clamped size (#2572).
+  if (nSize < 1)
+    nSize = 1;
   m_nSize = nSize;
-  if (m_nSize <1)
-    m_nSize = 1;
-  m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
   if (!m_pData)
     m_nSize = 0;
   m_nSeamlesIndicator = 0;
@@ -13318,6 +13496,12 @@ bool CIccTagEmbeddedHeightImage::Write(CIccIO *pIO)
   icTagTypeSignature sig = GetType();
 
   if (!pIO)
+    return false;
+
+  // A zero-byte image used to be written as a 24-byte tag, which Read() above
+  // refuses (it needs at least one image byte), so the saved profile could not
+  // be opened again.  There is no form of it that loads (#2572).
+  if (!m_nSize)
     return false;
 
   if (!pIO->Write32(&sig))
@@ -13489,10 +13673,11 @@ icValidateStatus CIccTagEmbeddedHeightImage::Validate(std::string sigPath, std::
 */
 CIccTagEmbeddedNormalImage::CIccTagEmbeddedNormalImage(int nSize/*=1*/)
 {
+  // Same as CIccTagData: clamp nSize, then allocate the clamped size (#2572).
+  if (nSize < 1)
+    nSize = 1;
   m_nSize = nSize;
-  if (m_nSize < 1)
-    m_nSize = 1;
-  m_pData = (icUInt8Number*)calloc(nSize, sizeof(icUInt8Number));
+  m_pData = (icUInt8Number*)calloc(m_nSize, sizeof(icUInt8Number));
   if (!m_pData)
     m_nSize = 0;
   m_nSeamlesIndicator = 0;
@@ -13639,6 +13824,11 @@ bool CIccTagEmbeddedNormalImage::Write(CIccIO *pIO)
   icTagTypeSignature sig = GetType();
 
   if (!pIO)
+    return false;
+
+  // Same as CIccTagEmbeddedHeightImage::Write: a zero-byte image has no form
+  // Read() accepts (#2572).
+  if (!m_nSize)
     return false;
 
   if (!pIO->Write32(&sig))

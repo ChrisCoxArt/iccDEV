@@ -10,6 +10,9 @@ ICC color profile library, built as a MEX extension.
 - **Thread-safe apply** - create per-thread apply handles
 - **MATLAB OOP** - classes in `+iccdev` package namespace
 - **Profile plots** - render data from the `iccProfilePlot` visualization model
+- **CIEDE2000** - compare one or more corresponding CIELAB colour pairs
+- **IccJSON conversion** - convert profiles to editable JSON and JSON back to ICC bytes
+- **HEIF ICC inspection** - report embedded ICC properties in HEIF, HEIC, and AVIF images
 - **PAWG Q1 audit** - independently calculate metrics over shared CMM transforms and compare structured native results
 - **NumPy-compatible** - handles column-major <-> row-major transpose automatically
 - **Compatible** - MATLAB R2015b+ and GNU Octave 6+
@@ -23,7 +26,9 @@ ICC color profile library, built as a MEX extension.
 `iccdev.plot` additionally requires MATLAB R2016b+ or GNU Octave 7.1+ for
 `jsondecode`, plus a Java-enabled runtime for shell-free process execution.
 The PAWG Q1 audit has the same runtime requirements and also requires the
-`iccPawgReport` executable.
+`iccPawgReport` executable. IccJSON conversion requires the same Java-enabled
+runtime plus `iccToJson` and `iccFromJson`.
+`iccdev.heif_dump` requires the same Java-enabled runtime plus `iccHeifDump`.
 
 ## Quick Start
 
@@ -121,11 +126,11 @@ cmm.close();
 
 ### Classes
 
-| Class | Description |
-|-------|-------------|
-| `iccdev.IccProfile` | Read/open ICC profiles, inspect header |
-| `iccdev.IccCmm` | Color Management Module - build & apply transforms |
-| `iccdev.IccApply` | Thread-safe per-thread apply handle |
+| Class or constructor | Description |
+|----------------------|-------------|
+| `iccdev.IccProfile(profile_path, ...)` | Open an ICC profile and inspect its header |
+| `iccdev.IccCmm()` | Build and apply a multi-profile transform |
+| `cmm.get_apply()` | Create an `iccdev.IccApply` thread-safe handle; do not construct it directly |
 
 ### Constants
 
@@ -140,7 +145,11 @@ cmm.close();
 | Function | Description |
 |----------|-------------|
 | `iccdev.sig_to_str(sig)` | Convert 4-byte ICC signature to ASCII string |
+| `iccdev.to_json(profile, ...)` | Convert an ICC profile to IccJSON text with `iccToJson` |
+| `iccdev.from_json(json, ...)` | Convert IccJSON text or a JSON file to ICC bytes with `iccFromJson` |
+| `iccdev.heif_dump(image, ...)` | Report HEIF, HEIC, or AVIF ICC properties with `iccHeifDump` |
 | `iccdev.plot(profile, ...)` | Render all graph visualizations exposed by `iccProfilePlot` |
+| `iccdev.qa.delta_e_2000(lab1, lab2)` | Calculate CIEDE2000 for equal-sized `N`-by-3 CIELAB arrays |
 | `iccdev.qa.audit_pawg_q1(profile, ...)` | Calculate PAWG Q1 metrics and compare them with `iccPawgReport --json` |
 | `iccdev.qa.check_luminance_normalization()` | Reproduce spectral-viewing luminance scaling and warning-window checks |
 | `iccdev.qa.check_colorimetry_issue_1475()` | Compare legacy and registry D50 spectral reductions |
@@ -151,6 +160,81 @@ cmm.close();
 | `run_local_qa()` | Run local MEX regression and stress checks |
 | `run_gamma_qa()` | Verify issue #815 curveType u8Fixed8 gamma decoding |
 | `run_docker_qa(image)` | Validate the published container and output contract |
+
+Constructors and functions require the arguments shown above. Only enum classes
+such as `iccdev.RenderingIntent` and `iccdev.Interpolation` are intended to be
+entered by name for direct display. Missing required arguments produce an
+actionable error containing a working invocation. See the verified
+[interactive API smoke examples](../docs/matlab-bindings.md#interactive-api-smoke-examples)
+for complete commands covering profiles, CMM transforms, `IccApply`,
+signatures, and plots.
+
+### IccJSON conversion
+
+Build `iccToJson` and `iccFromJson`, then convert a checked-in profile:
+
+```matlab
+json_text = iccdev.to_json(fullfile('Testing', ...
+  'sRGB_v4_ICC_preference.icc'));
+profile_bytes = iccdev.from_json(json_text);
+```
+
+`from_json` also accepts an existing JSON file path. It treats other scalar
+text as UTF-8 JSON content and returns a `uint8` column vector. Both functions
+run the native tools through a Java process without a shell, preserve the
+native parser diagnostics, and do not produce an ICC result after a parse
+failure.
+
+`test_json_bindings` exercises checked-in ICC.1/v4 and ICC.2/v5 profiles. It
+checks the specification-defined profile size, `acsp` signature, BCD version,
+version-specific reserved fields, creation date/time ranges, tag-table bounds,
+four-byte alignment, shared data, overlap and padding rules, and Profile ID
+MD5 when an ID is present. These are binary container checks, not a claim of
+complete class-specific or tag-type conformance.
+
+### HEIF ICC inspection
+
+`iccdev.heif_dump` invokes `iccHeifDump` through Java `ProcessBuilder`, never
+a shell. It returns the native carrier metadata and IccProfLib parse statuses.
+The MATLAB example opens a visible file chooser because the repository does not
+ship a generic HEIF input fixture:
+
+```matlab
+run(fullfile('matlab', 'examples', 'heif_dump.m'));
+```
+
+To select a configured build without changing the process environment:
+
+```matlab
+report = iccdev.heif_dump(image_path, ...
+  'BuildDir', fullfile(repo_root, 'build-matlab-full'));
+fprintf('%s\n', report);
+```
+
+### CIEDE2000 colour difference
+
+Each CIELAB colour is a row in `[L* a* b*]` order. Compare one pair with two
+1-by-3 row vectors:
+
+```matlab
+delta_e = iccdev.qa.delta_e_2000( ...
+  [50 2.6772 -79.7751], [50 0 -82.7485]);
+```
+
+Compare multiple corresponding pairs with equal-sized `N`-by-3 arrays. The
+result contains one Delta E value per row:
+
+```matlab
+lab1 = [50 2.6772 -79.7751; 50 3.1571 -77.2803];
+lab2 = [50 0 -82.7485; 50 0 -82.7485];
+delta_e = iccdev.qa.delta_e_2000(lab1, lab2);
+```
+
+For a narrated, executable example:
+
+```matlab
+run('matlab/examples/ciede2000.m');
+```
 
 ### iccdev.IccProfile
 
@@ -171,7 +255,7 @@ Header struct fields:
 - `magic`, `platform`, `flags`, `manufacturer`, `model`
 - `attributes`, `renderingIntent`, `creator`
 - `illuminantX/Y/Z`, `dateYear/Month/Day/Hours/Minutes/Seconds`
-- `profileId` (16-element uint8)
+- `profileId` (16-element uint8; all zero means the ID was not calculated)
 - `versionString` (computed, e.g., `'4.3.0'`)
 
 ### iccdev.IccCmm
@@ -228,7 +312,8 @@ cmake @ConfigureArgs
 $BuildArgs = @(
   '--build', $Build
   '--config', 'Release'
-  '--target', 'IccProfLib2-static', 'iccProfilePlot', 'iccPawgReport',
+  '--target', 'IccProfLib2-static', 'IccJSON2-static', 'iccToJson',
+    'iccFromJson', 'iccProfilePlot', 'iccPawgReport',
     'iccPawgQ1QualityContractTest'
   '--', '/m'
 )
@@ -238,7 +323,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 $PlotTool = Join-Path $Build 'bin\Release\iccProfilePlot.exe'
 $PawgTool = Join-Path $Build 'bin\Release\iccPawgReport.exe'
-foreach ($RequiredTool in @($PlotTool, $PawgTool)) {
+$ToJsonTool = Join-Path $Build 'bin\Release\iccToJson.exe'
+$FromJsonTool = Join-Path $Build 'bin\Release\iccFromJson.exe'
+foreach ($RequiredTool in @($PlotTool, $PawgTool, $ToJsonTool, $FromJsonTool)) {
   if (-not (Test-Path $RequiredTool -PathType Leaf)) {
     throw "Required MATLAB QA tool was not built: $RequiredTool"
   }
@@ -252,8 +339,9 @@ build_mex('BuildDir', fullfile(repo_root, 'msvc'));
 
 When `ICC_USE_ZLIB=ON`, `build_mex` reads `CMakeCache.txt`, links the matching
 vcpkg zlib import library, and copies its runtime DLL beside `icc_mex`.
-`iccProfilePlot` and `iccPawgReport` are required QA prerequisites; do not
-defer either target until after MATLAB testing starts.
+`iccToJson`, `iccFromJson`, `iccProfilePlot`, and `iccPawgReport` are required
+QA prerequisites; do not defer any of these targets until after MATLAB testing
+starts.
 
 Then render every graph exposed by a profile:
 
@@ -261,7 +349,16 @@ Then render every graph exposed by a profile:
 plots = iccdev.plot(profile_path);
 ```
 
-Use `'Visible', 'off'` for automated checks. `iccdev.plot` searches
+`Visible` defaults to `on`, so this displays figures interactively. Use
+`'Visible', 'off'` only for automated checks or export, and close the hidden
+figures when finished:
+
+```matlab
+plots = iccdev.plot(profile_path, 'Visible', 'off');
+close([plots.figure]);
+```
+
+`iccdev.plot` searches
 `ICCDEV_BUILD_DIR`, common repository build directories, and `PATH`; use the
 `BuildDir` or `PlotTool` option to select an explicit build.
 
@@ -294,8 +391,14 @@ assert(isfile(fullfile(build_dir, 'bin', 'Release', ...
   'iccProfilePlot.exe')), 'Build iccProfilePlot before MATLAB QA.');
 assert(isfile(fullfile(build_dir, 'bin', 'Release', ...
   'iccPawgReport.exe')), 'Build iccPawgReport before MATLAB QA.');
+assert(isfile(fullfile(build_dir, 'bin', 'Release', ...
+  'iccToJson.exe')), 'Build iccToJson before MATLAB QA.');
+assert(isfile(fullfile(build_dir, 'bin', 'Release', ...
+  'iccFromJson.exe')), 'Build iccFromJson before MATLAB QA.');
 addpath('matlab');
 addpath('matlab/tests');
+test_usage_guidance();
+test_delta_e_2000();
 test_iccdev();
 ```
 
@@ -305,6 +408,7 @@ missing-profile smoke checks with:
 ```matlab
 run_local_qa();
 test_plot();
+run('matlab/examples/ciede2000.m');
 ```
 
 Run the PAWG Q1 audit directly when investigating round-trip quality:
@@ -357,6 +461,13 @@ Validate the same profile with the published container:
 run_docker_qa();
 run('matlab/examples/docker_interop.m');
 ```
+
+Interactive QA selects
+`ghcr.io/internationalcolorconsortium/iccdev:latest` by default, pulls it once,
+and executes its resolved repository digest. The result records the requested
+selector in `image`, the executed digest in `resolvedImage`, and the OCI source
+revision in `sourceRevision`. Hosted CI passes an immutable digest so repeated
+workflow runs test the same image.
 
 If Docker is installed but is not on the PATH inherited by MATLAB Desktop,
 select its CLI directory explicitly:

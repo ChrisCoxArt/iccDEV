@@ -99,7 +99,8 @@ if ($LASTEXITCODE -ne 0) {
 $BuildArgs = @(
   '--build', $Build
   '--config', 'Release'
-  '--target', 'IccProfLib2-static', 'iccProfilePlot', 'iccPawgReport',
+  '--target', 'IccProfLib2-static', 'IccJSON2-static', 'iccToJson',
+    'iccFromJson', 'iccHeifDump', 'iccProfilePlot', 'iccPawgReport',
     'iccPawgQ1QualityContractTest'
   '--', '/m'
 )
@@ -110,15 +111,16 @@ if ($LASTEXITCODE -ne 0) {
 
 $PlotTool = Join-Path $Build 'bin\Release\iccProfilePlot.exe'
 $PawgTool = Join-Path $Build 'bin\Release\iccPawgReport.exe'
-foreach ($RequiredTool in @($PlotTool, $PawgTool)) {
+$HeifTool = Join-Path $Build 'bin\Release\iccHeifDump.exe'
+foreach ($RequiredTool in @($PlotTool, $PawgTool, $HeifTool)) {
   if (-not (Test-Path $RequiredTool -PathType Leaf)) {
     throw "Required MATLAB QA tool was not built: $RequiredTool"
   }
 }
 ```
 
-The preceding target list is the minimum for MEX, plotting, PAWG Q1 audit
-interoperability, and native Q1 contract evidence. Do not remove
+The preceding target list is the minimum for MEX, IccJSON conversion, plotting,
+PAWG Q1 audit interoperability, and native Q1 contract evidence. Do not remove
 `iccPawgReport`: `run_local_qa()` invokes `test_pawg_q1()`, which requires that
 executable.
 To build every enabled Windows library, tool, and helper instead:
@@ -161,9 +163,26 @@ tree, the R2026a MEX gateway, and its zlib runtime. It also preserves the
 repository-relative support paths used by QA and examples:
 
 - `Testing/` for profile and luminance fixtures.
+- `Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc` for ICC.2/v5
+  IccJSON structure coverage.
+- `iccToJson.exe` and `iccFromJson.exe` at the bundle root for IccJSON
+  conversion.
+- `iccHeifDump.exe` at the bundle root for MATLAB HEIF ICC inspection.
+- `matlab/tests/test_heif_dump_native.m` and its three fixtures under
+  `.github/ci/tooling/heif/img/`: `valid-prof.heic`, `nclx-only.heif`, and
+  `invalid-ipma-index.heic` for valid ICC, no-ICC, and malformed-input checks.
 - `iccPawgReport.exe` at the bundle root for MATLAB/native Q1 comparison.
 - `matlab/+iccdev/+qa/audit_pawg_q1.m`, its calculation helpers, and
   `matlab/tests/test_pawg_q1.m`.
+- `matlab/tests/test_json_bindings.m` for ICC-to-JSON-to-ICC round-trip and
+  malformed-input coverage.
+- `matlab/tests/test_lut_type_range.m` for the complete IccProfLib
+  `icXformLutType` boundary.
+- `matlab/tests/test_usage_guidance.m` and
+  `matlab/tests/fixtures/default_usage_examples.txt` for actionable default
+  command errors.
+- `matlab/tests/test_delta_e_2000.m` and `matlab/examples/ciede2000.m` for
+  single- and multiple-pair CIEDE2000 teaching and regression coverage.
 - `.github/ci/regression/gamma-2.20703125.icc` for gamma QA.
 - `IccProfLib/IccTagBasic.cpp` and `IccProfLib/IccColorimetry.cpp` for the
   independent issue #1475 table check.
@@ -171,6 +190,8 @@ repository-relative support paths used by QA and examples:
 Keep those paths intact when extracting or relocating the bundle. Release CI
 runs MATLAB from the staged archive tree before upload; testing only the source
 checkout does not prove that the published payload is self-contained.
+Run `test_heif_dump_native(bundle_root)` from the extracted MATLAB test tree
+with the bundle root on `PATH` to verify its HEIF tool and fixtures together.
 
 To make the checkout available to new MATLAB Desktop sessions without replacing
 existing entries:
@@ -217,7 +238,17 @@ assert(exist(fullfile(build_dir, 'bin', 'Release', ...
   'iccProfilePlot.exe'), 'file') == 2, 'Build iccProfilePlot before MATLAB QA.');
 assert(exist(fullfile(build_dir, 'bin', 'Release', ...
   'iccPawgReport.exe'), 'file') == 2, 'Build iccPawgReport before MATLAB QA.');
+assert(exist(fullfile(build_dir, 'bin', 'Release', ...
+  'iccToJson.exe'), 'file') == 2, 'Build iccToJson before MATLAB QA.');
+assert(exist(fullfile(build_dir, 'bin', 'Release', ...
+  'iccFromJson.exe'), 'file') == 2, 'Build iccFromJson before MATLAB QA.');
+assert(exist(fullfile(build_dir, 'bin', 'Release', ...
+  'iccHeifDump.exe'), 'file') == 2, 'Build iccHeifDump before MATLAB QA.');
 
+test_usage_guidance();
+test_delta_e_2000();
+test_json_bindings();
+test_lut_type_range();
 test_pawg_q1();
 run_local_qa();
 test_add_docker_path();
@@ -234,6 +265,146 @@ setenv('ICCDEV_BUILD_DIR', fullfile(repo_root, 'msvc'));
 
 Shell `export` is Unix-shell syntax and must not be entered in MATLAB or
 PowerShell.
+
+### IccJSON specification QA scope
+
+`test_json_bindings` covers both ICC.1/v4 and ICC.2/v5 checked-in profiles. It
+validates the binary container requirements from ICC.1:2022 clauses 7.2 and
+7.3 and the corresponding ICC.2:2023 clauses: exact profile size, `acsp`,
+BCD version encoding, version-aware reserved fields, date/time ranges,
+tag-table bounds and uniqueness, four-byte tag alignment, shared data ranges,
+non-overlap, contiguous padding, and Profile ID MD5 when present.
+
+This focused test does not claim complete profile conformance. Required tags,
+class-specific constraints, and every tag-type payload remain the
+responsibility of the native validation and dedicated conformance tooling.
+
+### Interactive API smoke examples
+
+Package names alone are not a universal smoke test. `iccdev.RenderingIntent`
+and `iccdev.Interpolation` display their constants directly. Constructors and
+functions that require arguments return an actionable error with a working
+example when invoked without them.
+
+Start from the repository root with the MATLAB package on the path:
+
+```matlab
+repo_root = pwd;
+if exist(fullfile(repo_root, 'Build', 'Cmake'), 'dir') ~= 7
+  repo_root = fileparts(repo_root);
+end
+assert(exist(fullfile(repo_root, 'Build', 'Cmake'), 'dir') == 7);
+cd(repo_root);
+addpath(fullfile(repo_root, 'matlab'));
+addpath(fullfile(repo_root, 'matlab', 'tests'));
+
+profile_path = fullfile(repo_root, 'Testing', ...
+  'sRGB_v4_ICC_preference.icc');
+assert(exist(profile_path, 'file') == 2);
+```
+
+Inspect the enum constants:
+
+```matlab
+iccdev.RenderingIntent
+iccdev.Interpolation
+```
+
+Open and inspect a profile:
+
+```matlab
+profile = iccdev.IccProfile(profile_path);
+header = profile.header();
+disp(header.versionString);
+disp(iccdev.sig_to_str(uint32(header.colorSpace)));
+profile.close();
+```
+
+Create an `IccApply` handle through an initialized `IccCmm`. Do not call
+`iccdev.IccApply` directly; its constructor is internal to `get_apply()`:
+
+```matlab
+cmm = iccdev.IccCmm();
+cmm.attach(profile_path, ...
+  'intent', iccdev.RenderingIntent.Perceptual, ...
+  'interp', iccdev.Interpolation.Linear);
+cmm.attach(profile_path);
+cmm.begin();
+
+apply_handle = cmm.get_apply();
+result = apply_handle.apply([0.5 0.3 0.1]);
+disp(result);
+
+apply_handle.close();
+cmm.close();
+```
+
+Convert a known ICC signature:
+
+```matlab
+rgb_signature = uint32(hex2dec('52474220'));
+disp(iccdev.sig_to_str(rgb_signature));
+```
+
+Compare one CIELAB colour pair, then multiple corresponding pairs:
+
+```matlab
+single_delta = iccdev.qa.delta_e_2000( ...
+  [50 2.6772 -79.7751], [50 0 -82.7485]);
+
+lab1 = [50 2.6772 -79.7751; 50 3.1571 -77.2803];
+lab2 = [50 0 -82.7485; 50 0 -82.7485];
+multiple_delta = iccdev.qa.delta_e_2000(lab1, lab2);
+disp(single_delta);
+disp(multiple_delta);
+```
+
+Display the profile graphs interactively. `Visible` defaults to `on`:
+
+```matlab
+plots = iccdev.plot(profile_path);
+```
+
+For automated checks or export, create hidden figures and close them when
+finished:
+
+```matlab
+plots = iccdev.plot(profile_path, 'Visible', 'off');
+disp({plots.title});
+close([plots.figure]);
+```
+
+Run the focused and complete automated checks:
+
+```matlab
+test_usage_guidance();
+test_delta_e_2000();
+test_plot();
+summary = test_iccdev();
+assert(summary.failed == 0 && summary.skipped == 0);
+```
+
+Inspect an HEIF, HEIC, or AVIF input through the shell-free MATLAB wrapper.
+The interactive example requests a real user-selected image because the
+repository does not ship a generic HEIF fixture:
+
+```matlab
+run(fullfile(repo_root, 'matlab', 'examples', 'heif_dump.m'));
+```
+
+For automation, pass an existing image path and an explicit build:
+
+```matlab
+report = iccdev.heif_dump(image_path, 'BuildDir', build_dir);
+disp(report);
+```
+
+The checked-in HEIF carrier QA fixtures also cover a native MATLAB smoke:
+
+```matlab
+addpath(fullfile(repo_root, 'matlab', 'tests'));
+test_heif_dump_native(build_dir);
+```
 
 ## Profiles
 
@@ -283,7 +454,9 @@ plots = iccdev.plot(profile_path);
 
 The function renders curves, chromaticity diagrams, named-color plots, and
 other graph descriptors. Raster CLUT descriptors are intentionally left to
-`iccProfilePlot raster` or `iccProfileVisualizePlot`. For noninteractive use:
+`iccProfilePlot raster` or `iccProfileVisualizePlot`. The default `Visible`
+value is `on`, so the first command above opens figures on the desktop. For
+noninteractive checks or export, explicitly hide and then close the figures:
 
 ```matlab
 plots = iccdev.plot(profile_path, 'Visible', 'off');
@@ -293,6 +466,33 @@ close([plots.figure]);
 The tool is discovered through `ICCDEV_BUILD_DIR`, common repository build
 directories, or `PATH`. Pass `BuildDir` or `PlotTool` when selecting another
 build explicitly.
+
+## CIEDE2000 Colour Difference
+
+`iccdev.qa.delta_e_2000` compares corresponding CIELAB colours. Both inputs
+must be equal-sized `N`-by-3 arrays, and every row must use `[L* a* b*]`
+ordering. A single pair therefore uses two 1-by-3 row vectors:
+
+```matlab
+delta_e = iccdev.qa.delta_e_2000( ...
+  [50 2.6772 -79.7751], [50 0 -82.7485]);
+```
+
+For multiple pairs, row 1 is compared with row 1, row 2 with row 2, and so on.
+The result is an `N`-by-1 column vector:
+
+```matlab
+lab1 = [50 2.6772 -79.7751; 50 3.1571 -77.2803];
+lab2 = [50 0 -82.7485; 50 0 -82.7485];
+delta_e = iccdev.qa.delta_e_2000(lab1, lab2);
+```
+
+Run the focused teaching example and regression with:
+
+```matlab
+run(fullfile(repo_root, 'matlab', 'examples', 'ciede2000.m'));
+test_delta_e_2000();
+```
 
 ## PAWG Check Q1 Audit
 
@@ -376,6 +576,7 @@ Run the demonstrations:
 run(fullfile(repo_root, 'matlab', 'examples', 'read_profile.m'));
 run(fullfile(repo_root, 'matlab', 'examples', 'color_transform.m'));
 run(fullfile(repo_root, 'matlab', 'examples', 'gamma_curve.m'));
+run(fullfile(repo_root, 'matlab', 'examples', 'ciede2000.m'));
 ```
 
 Reproduce the spectral-viewing luminance calculations from issue #1811
@@ -580,16 +781,26 @@ MATLAB interoperates with the published Linux image through the Docker CLI and
 profile files. It does not load Linux libraries into the Windows MATLAB
 process.
 
-Download the image:
+Interactive MATLAB QA selects the published `latest` tag by default. Each
+`run_docker_qa` invocation pulls that mutable tag once, resolves it to a
+repository digest, and executes the digest so both validation commands use the
+same image:
 
 ```powershell
-docker pull ghcr.io/internationalcolorconsortium/iccdev@sha256:2f4230308320b60106c2675b2c50aa7c22e0b50fe56045080ce480c6232b2672
+docker pull ghcr.io/internationalcolorconsortium/iccdev:latest
 ```
+
+Hosted CI resolves that release to an immutable digest. The current hosted
+reference is
+`ghcr.io/internationalcolorconsortium/iccdev@sha256:0504c43e0204e36aa36377fceee1de9c5f49468d578202c388525c75d42da079`.
+Pass the same digest through the `Image` option when reproducing CI exactly.
 
 Run the MATLAB validation:
 
 ```matlab
 result = run_docker_qa();
+disp(result.resolvedImage);
+disp(result.sourceRevision);
 disp(result.imageId);
 repo_root = fileparts(fileparts(which('build_mex')));
 run(fullfile(repo_root, 'matlab', 'examples', 'docker_interop.m'));
@@ -620,11 +831,17 @@ disables container networking, drops Linux capabilities, enables
 `iccDumpProfile` and
 `iccRoundTrip` commands. Image references are limited to the official
 `ghcr.io/internationalcolorconsortium/iccdev` repository and may use a tag or
-an immutable SHA-256 digest.
+an immutable SHA-256 digest. The returned `image` is the requested selector,
+`resolvedImage` is the immutable reference actually executed, and
+`sourceRevision` is the image's OCI source-revision label. Direct calls to
+`iccdev.docker_validate` resolve a locally available selector before execution;
+pass `'Pull', true` when a mutable tag must first be refreshed.
 
 The output contract is recorded in
-`matlab/tests/fixtures/docker_expected.txt`. Hosted CI and interactive local use
-the same digest-pinned image by default.
+`matlab/tests/fixtures/docker_expected.txt`. Interactive local QA refreshes the
+published `latest` tag and pins that invocation to its resolved digest. Hosted
+CI supplies the documented immutable digest so a repeated workflow tests the
+same image.
 
 ## Troubleshooting
 
@@ -661,8 +878,9 @@ the same digest-pinned image by default.
 `.github/workflows/ci-matlab.yml` runs for MATLAB-related pull requests to
 `master` and manual dispatch. It uses read-only
 permissions, trusted-base sanitizer helpers, SHA-pinned actions, a focused
-dependency-free MATLAB calculation stage, native luminance and colorimetry
-CTests, the native PAWG Q1 quality-contract CTest, the MATLAB/native structured
-Q1 comparison over a checked-in profile, a
+dependency-free MATLAB calculation stage, the checksum-verified v2.3.1 vcpkg
+dependency export, current-source native luminance and colorimetry CTests, the
+native PAWG Q1 quality-contract CTest, the MATLAB/native structured Q1
+comparison over a checked-in profile, a
 digest-pinned container interoperability job, and no cache or artifact
 publication.

@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // IccFromJson.cpp : Convert a JSON ICC profile to a binary ICC profile file.
 //
 
@@ -8,9 +37,11 @@
 #include "IccIO.h"
 #include "IccUtil.h"
 #include "IccProfLibVer.h"
+#include "IccFileUtil.h"
 #include "IccLibJSONVer.h"
 #include <cstring>
 #include <cstdlib>
+#include <string>
 
 #ifdef _WIN32
   #define ICC_STRICMP _stricmp
@@ -19,13 +50,44 @@
   #define ICC_STRICMP strcasecmp
 #endif
 
+// The usage screen, shared by the help path and the incomplete-invocation path so
+// the two cannot drift.  The STREAM separates them, as in iccFromXml (#2387): a help
+// request prints to stdout and succeeds, a malformed invocation prints to stderr and
+// fails.
+static void Usage(FILE *out)
+{
+  fprintf(out, "IccFromJson built with IccProfLib Version " ICCPROFLIBVER ", IccLibJSON Version " ICCLIBJSONVER "\n\n");
+  fprintf(out, "Usage: IccFromJson json_file saved_profile_file {-noid}\n");
+  fprintf(out, "       IccFromJson -h | --help\n");
+}
+
+static bool isHelpRequest(const char *szArg)
+{
+  return !ICC_STRICMP(szArg, "-h") || !ICC_STRICMP(szArg, "--help") ||
+         !ICC_STRICMP(szArg, "-help") || !ICC_STRICMP(szArg, "-?");
+}
+
 int main(int argc, char* argv[])
 {
-  if (argc <= 2) {
-    printf("IccFromJson built with IccProfLib Version " ICCPROFLIBVER ", IccLibJSON Version " ICCLIBJSONVER "\n\n");
-    printf("Usage: IccFromJson json_file saved_profile_file {-noid}\n");
-    return 0;
+  // The same contract as iccFromXml (#2387), applied here for #2676: this tool
+  // printed its usage and returned 0 for a bare invocation and for one missing
+  // its output path, so `iccFromJson base.json` reported success to automation
+  // while converting nothing.  Only the lone-argument form is a help request.
+  if (argc == 2 && isHelpRequest(argv[1])) {
+    Usage(stdout);
+    return EXIT_SUCCESS;
   }
+
+  if (argc <= 2) {
+    Usage(stderr);
+    fprintf(stderr, "\nError: an input JSON file and an output profile path are both required\n");
+    return EXIT_FAILURE;
+  }
+
+  // Sanitized once here rather than at each print site; the paths handed to
+  // LoadJson()/SaveIccProfile() stay untouched (#2406).
+  std::string srcName = icSanitizeConsoleText(argv[1]);
+  std::string dstName = icSanitizeConsoleText(argv[2]);
 
   CIccTagCreator::PushFactory(new(std::nothrow) CIccTagJsonFactory());
   CIccMpeCreator::PushFactory(new(std::nothrow) CIccMpeJsonFactory());
@@ -35,15 +97,35 @@ int main(int argc, char* argv[])
 
   bool bNoId = false;
   for (int i = 3; i < argc; i++) {
-    if (!ICC_STRICMP(argv[i], "-noid"))
+    if (!ICC_STRICMP(argv[i], "-noid")) {
       bNoId = true;
+    }
+    else {
+      // An unrecognised option used to be skipped in silence, so the "-no-id"
+      // typo converted with the ID left in and reported success (#2676).  The
+      // XML twin refuses it.
+      Usage(stderr);
+      fprintf(stderr, "Error: unrecognized option '%s'\n",
+              icSanitizeConsoleText(argv[i]).c_str());
+      return EXIT_FAILURE;
+    }
   }
 
+  // On stderr, like the XML twin: this returned EXIT_FAILURE already but answered
+  // on stdout, so a caller that separates the streams saw nothing (#2384).
   if (!profile.LoadJson(argv[1], &reason)) {
-    printf("%s", reason.c_str());
-    printf("Unable to Parse '%s'\n", argv[1]);
+    fprintf(stderr, "%s", reason.c_str());
+    fprintf(stderr, "Unable to Parse '%s'\n", srcName.c_str());
     return EXIT_FAILURE;
   }
+
+  // -noid has to mean the saved profile carries NO profile ID.  icNeverWriteID
+  // alone does not achieve that: CIccProfile::Write() emits m_Header.profileID as
+  // part of the header and the switch only decides whether CalcProfileID() then
+  // recalculates it, so a document carrying a ProfileID kept it through -noid
+  // (#2676).  Cleared here, as iccFromXml clears it (#2387).
+  if (bNoId)
+    memset(&profile.m_Header.profileID, 0, sizeof(profile.m_Header.profileID));
 
   std::string valid_report;
 
@@ -57,24 +139,32 @@ int main(int argc, char* argv[])
       printf("Profile parsed and saved correctly\n");
     }
     else {
-      printf("Unable to save profile as '%s'\n", argv[2]);
+      fprintf(stderr, "Unable to save profile as '%s'\n", dstName.c_str());
       return EXIT_FAILURE;
     }
   }
   else {
+    // The same contract as the XML twin, changed in the same commit rather than
+    // left to drift: an above-warning profile is still written, but the report
+    // goes to stderr and the status is EXIT_FAILURE instead of EXIT_SUCCESS
+    // (#2384).  See IccFromXml.cpp for the reasoning.  Fixing only one of the two
+    // parsers is what makes a defect like this outlive its fix -- the JSON side
+    // has its own control fixtures (#1901/#1902) and its own callers.
     int i;
     for (i = 0; i < 16; i++) {
       if (profile.m_Header.profileID.ID8[i])
         break;
     }
     if (SaveIccProfile(argv[2], &profile, bNoId ? icNeverWriteID : (i < 16 ? icAlwaysWriteID : icVersionBasedID))) {
-      printf("Profile parsed. Profile is invalid, but saved correctly\n");
+      fprintf(stderr, "Profile parsed. Profile is invalid, but saved correctly\n");
     }
     else {
-      printf("Unable to save profile - profile is invalid!\n");
+      fprintf(stderr, "Unable to save profile - profile is invalid!\n");
       return EXIT_FAILURE;
     }
-    printf("%s", valid_report.c_str());
+    fprintf(stderr, "%s", valid_report.c_str());
+    fprintf(stderr, "\n");
+    return EXIT_FAILURE;
   }
 
   printf("\n");

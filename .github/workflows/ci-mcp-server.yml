@@ -14,21 +14,21 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - master
-      - ci-qa-mcp-server
-    paths:
-      - "Dockerfile"
-      - "iccdev-mcp/**"
-      - ".github/codeql-queries/iccdev-mcp/**"
-      - ".github/workflows/ci-mcp-server.yml"
   pull_request:
     branches:
       - master
     paths:
       - "Dockerfile"
       - "iccdev-mcp/**"
+      - ".github/ci/regression/tiff-tiles.cpp"
+      - "Build/Cmake/Testing/CMakeLists.txt"
+      - "IccConnect/IccLibConnect/IccCmmConfig.*"
+      - "Tools/CmdLine/IccApplyProfiles/**"
+      - "Tools/CmdLine/IccSpecSepToTiff/**"
+      - "Tools/CmdLine/IccTiffDump/**"
+      - ".github/scripts/icc-*-qa-*"
+      - ".github/scripts/iccdev-container-smoke.py"
+      - ".github/ci/docker/build-validation-library.sh"
       - ".github/codeql-queries/iccdev-mcp/**"
       - ".github/workflows/ci-mcp-server.yml"
   workflow_dispatch:
@@ -85,6 +85,51 @@ jobs:
           unset GITHUB_TOKEN || true
           python -m pytest iccdev-mcp/tests -q
 
+      - name: Install native TIFF test dependencies
+        if: matrix.python-version == '3.14'
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libjpeg-dev libpng-dev libtiff-dev \
+            libxml2-dev nlohmann-json3-dev zlib1g-dev
+
+      - name: Build native TIFF test tools
+        if: matrix.python-version == '3.14'
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          cmake -S Build/Cmake -B build-mcp-tiff \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=ON \
+            -DENABLE_IMAGE_TOOLS=ON \
+            -DENABLE_WXWIDGETS=OFF
+          cmake --build build-mcp-tiff --parallel 4 --target \
+            iccTiffTilesTest iccTiffDump iccSpecSepToTiff \
+            iccApplyProfiles iccFromXml
+
+      - name: Run native TIFF MCP and REST contracts
+        if: matrix.python-version == '3.14'
+        env:
+          BASH_ENV: /dev/null
+          ICCDEV_TOOLS_DIR: ${{ github.workspace }}/build-mcp-tiff/Tools
+          ICCDEV_TIFF_FIXTURE: ${{ github.workspace }}/build-mcp-tiff/Testing/iccTiffTilesTest
+          ICCDEV_TESTING_DIR: ${{ github.workspace }}/Testing
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          test -x "$ICCDEV_TIFF_FIXTURE"
+          python -m pytest iccdev-mcp/tests/test_tiff_contracts.py -q \
+            -k 'test_native_tiff_binding_alignment or test_native_stdio_tiff_contract'
+
       - name: Build MCP wheel
         env:
           BASH_ENV: /dev/null
@@ -110,6 +155,11 @@ jobs:
         uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
         with:
           persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          cache-binary: false
 
       - name: Validate unified Dockerfile parses
         env:

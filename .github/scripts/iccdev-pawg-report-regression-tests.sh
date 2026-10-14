@@ -36,6 +36,7 @@ export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=0,print_stacktrace=1}"
 export LLVM_PROFILE_FILE="${LLVM_PROFILE_FILE:-/dev/null}"
 
 PAWG="$TOOLS_DIR/IccPawgReport/iccPawgReport"
+FROM_XML="$TOOLS_DIR/IccFromXml/iccFromXml"
 GOOD_PROFILE="$TESTING_DIR/sRGB_v4_ICC_preference.icc"
 TRUNCATED="$OUTDIR/truncated.icc"
 MALWARE="$OUTDIR/private-pe-signature.icc"
@@ -50,6 +51,11 @@ STD_SHEBANG_TRUE_POSITIVE="$OUTDIR/standard-tag-valid-shebang-signature.icc"
 STD_TEXTSIG_FALSE_POSITIVE="$OUTDIR/standard-tag-invalid-textsig-signature.icc"
 STD_TEXTSIG_TRUE_POSITIVE="$OUTDIR/standard-tag-valid-textsig-signature.icc"
 REGISTERED_PRIVATE="$OUTDIR/registered-private-tag.icc"
+INVALID_TAG_TYPE="$OUTDIR/invalid-tag-type.icc"
+VALID_HYBRID="$OUTDIR/valid-hybrid.icc"
+NESTED_SIZE_MISMATCH="$OUTDIR/nested-size-mismatch.icc"
+MALFORMED_MPE="$OUTDIR/malformed-mpe.icc"
+CALCULATOR_PROFILE="$TESTING_DIR/CalcTest/calcExercizeOps.icc"
 
 PASS=0
 FAIL=0
@@ -430,6 +436,384 @@ run_truncated_profile() {
   pass_case "$name" "truncated input rejected without crash and with truthful report counts"
 }
 
+generate_invalid_tag_type_profile() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$INVALID_TAG_TYPE" <<'PY'
+import pathlib
+import struct
+import sys
+
+dst = pathlib.Path(sys.argv[1])
+size = 156
+data = bytearray(size)
+data[0:4] = struct.pack(">I", size)
+data[8:12] = bytes.fromhex("04400000")
+data[12:16] = b"mntr"
+data[16:20] = b"RGB "
+data[20:24] = b"XYZ "
+data[36:40] = b"acsp"
+data[68:72] = struct.pack(">I", 0x0000F6D6)
+data[72:76] = struct.pack(">I", 0x00010000)
+data[76:80] = struct.pack(">I", 0x0000D32D)
+data[128:132] = struct.pack(">I", 1)
+data[132:136] = b"A2B0"
+data[136:140] = struct.pack(">I", 144)
+data[140:144] = struct.pack(">I", 12)
+data[144:148] = b"text"
+data[152:153] = b"x"
+dst.write_bytes(data)
+PY
+}
+
+run_invalid_tag_type_profile() {
+  local name="pawg-critical-tag-fail-closed"
+  local logfile="$OUTDIR/invalid-tag-type.log"
+  local jsonfile="$OUTDIR/invalid-tag-type.json"
+  local stderrfile="$OUTDIR/invalid-tag-type-json.stderr"
+  local exit_code=0
+
+  TOTAL=$((TOTAL + 1))
+  rm -f "$logfile" "$jsonfile" "$stderrfile" "$INVALID_TAG_TYPE"
+
+  if ! generate_invalid_tag_type_profile; then
+    fail_case "$name" "failed to generate profile with forbidden A2B0 tag type"
+    return
+  fi
+
+  timeout 60 "$PAWG" "$INVALID_TAG_TYPE" > "$logfile" 2>&1 || exit_code=$?
+  if ! check_sanitizers "$name" "$logfile"; then
+    fail_case "$name" "sanitizer finding in text report"
+    return
+  fi
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "text report returned unexpected status $exit_code"
+    return
+  fi
+  if ! assert_report_truth "$name" "$logfile"; then
+    fail_case "$name" "text report count or section mismatch"
+    return
+  fi
+  if ! grep -F -q "[FAIL] C1" "$logfile" ||
+     ! grep -F -q "IccProfLib critical validation: Error! -" "$logfile"; then
+    fail_case "$name" "critical parser rejection was not exposed as C1 FAIL"
+    return
+  fi
+
+  exit_code=0
+  timeout 60 "$PAWG" --json "$INVALID_TAG_TYPE" > "$jsonfile" 2> "$stderrfile" || exit_code=$?
+  if ! check_sanitizers "$name" "$stderrfile"; then
+    fail_case "$name" "sanitizer finding in JSON report"
+    return
+  fi
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "JSON report returned unexpected status $exit_code"
+    return
+  fi
+  if ! python3 - "$jsonfile" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="ascii") as handle:
+    report = json.load(handle)
+
+c1 = next(item for item in report["items"] if item["id"] == "C1")
+assert report["summary"]["total"] == 32
+assert report["summary"]["fail"] >= 1
+assert c1["verdict"] == "FAIL"
+assert c1["detail"].startswith("IccProfLib critical validation: Error! - ")
+PY
+  then
+    fail_case "$name" "JSON report did not expose the critical C1 failure"
+    return
+  fi
+
+  pass_case "$name" "critical tag rejection fails C1 and exits nonzero in text and JSON modes"
+}
+
+generate_malformed_mpe_profile() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$MALFORMED_MPE" <<'PY'
+import pathlib
+import struct
+import sys
+
+dst = pathlib.Path(sys.argv[1])
+data = bytearray(160)
+data[0:4] = struct.pack(">I", len(data))
+data[8:12] = struct.pack(">I", 0x05000000)
+data[12:16] = b"mntr"
+data[16:20] = b"RGB "
+data[20:24] = b"XYZ "
+data[36:40] = b"acsp"
+data[68:72] = struct.pack(">I", 0x0000F6D6)
+data[72:76] = struct.pack(">I", 0x00010000)
+data[76:80] = struct.pack(">I", 0x0000D32D)
+data[128:132] = struct.pack(">I", 1)
+data[132:136] = b"D2B0"
+data[136:140] = struct.pack(">I", 144)
+data[140:144] = struct.pack(">I", 16)
+data[144:148] = b"mpet"
+data[152:156] = struct.pack(">HH", 3, 3)
+data[156:160] = struct.pack(">I", 1)
+dst.write_bytes(data)
+PY
+}
+
+run_malformed_mpe_profile() {
+  local name="pawg-malformed-mpe-fail-closed"
+  local logfile="$OUTDIR/malformed-mpe.log"
+  local jsonfile="$OUTDIR/malformed-mpe.json"
+  local stderrfile="$OUTDIR/malformed-mpe-json.stderr"
+  local exit_code=0
+
+  TOTAL=$((TOTAL + 1))
+  rm -f "$logfile" "$jsonfile" "$stderrfile" "$MALFORMED_MPE"
+
+  if ! generate_malformed_mpe_profile; then
+    fail_case "$name" "failed to generate malformed DToB0/mpe profile"
+    return
+  fi
+
+  timeout 60 "$PAWG" "$MALFORMED_MPE" > "$logfile" 2>&1 || exit_code=$?
+  if ! check_sanitizers "$name" "$logfile"; then
+    fail_case "$name" "sanitizer finding in text report"
+    return
+  fi
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "text report returned unexpected status $exit_code"
+    return
+  fi
+  if ! assert_report_truth "$name" "$logfile"; then
+    fail_case "$name" "text report count or section mismatch"
+    return
+  fi
+  if ! grep -F -q "[FAIL] C1" "$logfile" ||
+     ! grep -F -q "raw checks only; IccProfLib parse failed" "$logfile"; then
+    fail_case "$name" "malformed MPE was not rejected through C1"
+    return
+  fi
+
+  exit_code=0
+  timeout 60 "$PAWG" --json "$MALFORMED_MPE" > "$jsonfile" 2> "$stderrfile" || exit_code=$?
+  if ! check_sanitizers "$name" "$stderrfile"; then
+    fail_case "$name" "sanitizer finding in JSON report"
+    return
+  fi
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "JSON report returned unexpected status $exit_code"
+    return
+  fi
+  if ! python3 - "$jsonfile" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="ascii") as handle:
+    report = json.load(handle)
+
+c1 = next(item for item in report["items"] if item["id"] == "C1")
+assert report["summary"]["total"] == 32
+assert report["summary"]["fail"] >= 1
+assert c1["verdict"] == "FAIL"
+assert c1["detail"].startswith("IccProfLib critical validation: Error! - ")
+PY
+  then
+    fail_case "$name" "JSON report did not expose the malformed MPE C1 failure"
+    return
+  fi
+
+  pass_case "$name" "malformed DToB0/mpe fails closed in text and JSON modes"
+}
+
+generate_nested_size_mismatch_profile() {
+  if [ ! -x "$FROM_XML" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  # CMYK_Hybrid_Profile embeds a CMYK child in a CMYK host, which validates
+  # clean; MultSpectralRGB (8CLR in RGB) no longer does (#2693).
+  if ! "$FROM_XML" "$TESTING_DIR/hybrid/CMYK_Hybrid_Profile.xml" "$VALID_HYBRID" >/dev/null; then
+    return 1
+  fi
+
+  python3 - "$VALID_HYBRID" "$NESTED_SIZE_MISMATCH" <<'PY'
+import pathlib
+import struct
+import sys
+
+src = pathlib.Path(sys.argv[1]).read_bytes()
+data = bytearray(src)
+count = struct.unpack(">I", data[128:132])[0]
+for index in range(count):
+    entry = 132 + index * 12
+    signature, offset, size = struct.unpack(">4sII", data[entry:entry + 12])
+    if signature == b"ICC5":
+        assert size >= 8 + 128
+        assert data[offset:offset + 4] == b"ICCp"
+        embedded = offset + 8
+        declared = struct.unpack(">I", data[embedded:embedded + 4])[0]
+        assert declared == size - 8
+        data[embedded:embedded + 4] = struct.pack(">I", declared + 4)
+        pathlib.Path(sys.argv[2]).write_bytes(data)
+        break
+else:
+    raise AssertionError("generated hybrid profile has no ICC5 tag")
+PY
+}
+
+run_nested_size_mismatch_profile() {
+  local name="pawg-nested-profile-size-mismatch"
+  local logfile="$OUTDIR/nested-size-mismatch.log"
+  local baseline="$OUTDIR/valid-hybrid.json"
+  local exit_code=0
+
+  TOTAL=$((TOTAL + 1))
+  rm -f "$logfile" "$baseline" "$VALID_HYBRID" "$NESTED_SIZE_MISMATCH"
+
+  if ! generate_nested_size_mismatch_profile; then
+    fail_case "$name" "failed to generate the ICC.1/ICC.2 hybrid profile"
+    return
+  fi
+  if ! timeout 60 "$PAWG" --json "$VALID_HYBRID" > "$baseline" 2>&1; then
+    fail_case "$name" "unmodified generated hybrid profile did not pass"
+    return
+  fi
+  if ! check_sanitizers "$name" "$baseline"; then
+    fail_case "$name" "sanitizer finding in unmodified hybrid baseline"
+    return
+  fi
+
+  timeout 60 "$PAWG" "$NESTED_SIZE_MISMATCH" > "$logfile" 2>&1 || exit_code=$?
+  if ! check_sanitizers "$name" "$logfile"; then
+    fail_case "$name" "sanitizer finding"
+    return
+  fi
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "nested size mismatch returned unexpected status $exit_code"
+    return
+  fi
+  if ! assert_report_truth "$name" "$logfile"; then
+    fail_case "$name" "report count or section mismatch"
+    return
+  fi
+  if ! grep -F -q "[FAIL] C1" "$logfile" ||
+     ! grep -F -q "raw checks only; IccProfLib parse failed" "$logfile"; then
+    fail_case "$name" "embedded profile size mismatch was not rejected through C1"
+    return
+  fi
+
+  pass_case "$name" "ICC.2 exact profile-size mismatch in ICC5 is rejected through C1"
+}
+
+run_calculator_operation_count() {
+  local name="pawg-s10-calculator-operation-count"
+  local logfile="$OUTDIR/calculator-operations.log"
+  local operations
+  local exit_code=0
+
+  TOTAL=$((TOTAL + 1))
+  rm -f "$logfile"
+
+  if [ ! -f "$CALCULATOR_PROFILE" ]; then
+    fail_case "$name" "generated profile is missing: $CALCULATOR_PROFILE"
+    return
+  fi
+
+  timeout 60 "$PAWG" "$CALCULATOR_PROFILE" > "$logfile" 2>&1 || exit_code=$?
+  if ! check_sanitizers "$name" "$logfile"; then
+    fail_case "$name" "sanitizer finding"
+    return
+  fi
+  if [ "$exit_code" -ne 0 ]; then
+    fail_case "$name" "report returned unexpected status $exit_code"
+    return
+  fi
+  if ! assert_report_truth "$name" "$logfile"; then
+    fail_case "$name" "report count or section mismatch"
+    return
+  fi
+  if ! grep -F -q "[WARN] S10" "$logfile" ||
+     ! grep -F -q "local warning threshold=65536 operations" "$logfile"; then
+    fail_case "$name" "S10 did not report the local operation-count warning"
+    return
+  fi
+  operations="$(sed -n 's/.* \([0-9][0-9]*\) calculator operation(s).*/\1/p' "$logfile" | head -n 1)"
+  if [ -z "$operations" ] || [ "$operations" -le 65536 ]; then
+    fail_case "$name" "S10 operation count was missing or below the warning threshold"
+    return
+  fi
+
+  pass_case "$name" "S10 reported $operations calculator operations and applied the local warning threshold"
+}
+
+HYBRID_CALC_XML="$TESTING_DIR/hybrid/CMYK-W_Overprint_Profile.xml"
+HYBRID_CALC="$OUTDIR/hybrid-embedded-calculator.icc"
+# #2694: a v4 host whose embedded v5 sub-profile carries the calculators.  S10
+# returned "not an iccMAX profile" from the outer version without looking
+# inside; it now measures the child and says so.
+run_hybrid_embedded_calculator_cost() {
+  local name="pawg-s10-hybrid-embedded-calculator"
+  local logfile="$OUTDIR/hybrid-embedded-calculator.log"
+  local calculators
+  local exit_code=0
+  TOTAL=$((TOTAL + 1))
+  rm -f "$logfile" "$HYBRID_CALC"
+  if [ ! -x "$FROM_XML" ]; then
+    fail_case "$name" "iccFromXml is not built, cannot generate the hybrid profile"
+    return
+  fi
+  if [ ! -f "$HYBRID_CALC_XML" ]; then
+    fail_case "$name" "tracked fixture is missing: $HYBRID_CALC_XML"
+    return
+  fi
+  # From the fixture's own directory: the document resolves relative paths.
+  # The exit status is not checked: this host embeds an nc0005 child, which
+  # the device-space check from #2693 validates invalid, and iccFromXml then
+  # exits 1 while still writing the profile.  S10 is measured on the file.
+  ( cd "$(dirname "$HYBRID_CALC_XML")" && "$FROM_XML" "$(basename "$HYBRID_CALC_XML")" "$HYBRID_CALC" >/dev/null 2>&1 ) || true
+  if [ ! -s "$HYBRID_CALC" ]; then
+    fail_case "$name" "iccFromXml could not build the hybrid profile"
+    return
+  fi
+  timeout 120 "$PAWG" "$HYBRID_CALC" > "$logfile" 2>&1 || exit_code=$?
+  if ! check_sanitizers "$name" "$logfile"; then
+    fail_case "$name" "sanitizer finding"
+    return
+  fi
+  # The generated host deliberately retains the fixture's embedded-profile
+  # device-space mismatch. PAWG must therefore fail C1 and return 1 while
+  # still assessing S10 against the loaded embedded v5 sub-profile.
+  if [ "$exit_code" -ne 1 ]; then
+    fail_case "$name" "report returned unexpected status $exit_code (expected 1 for the fixture's C1 failure)"
+    return
+  fi
+  if ! assert_report_truth "$name" "$logfile"; then
+    fail_case "$name" "report count or section mismatch"
+    return
+  fi
+  if ! grep -F -q "[FAIL] C1" "$logfile"; then
+    fail_case "$name" "expected C1 failure for the deliberate embedded-profile device-space mismatch"
+    return
+  fi
+  if grep -F -q "[N/A ] S10" "$logfile"; then
+    fail_case "$name" "S10 still reports the v4 host as not an iccMAX profile"
+    return
+  fi
+  if ! grep -F -q "embedded v5 sub-profile:" "$logfile"; then
+    fail_case "$name" "S10 does not say it measured the embedded v5 sub-profile"
+    return
+  fi
+  calculators="$(sed -n 's/.*embedded v5 sub-profile: .* \([0-9][0-9]*\) calculator element(s).*/\1/p' "$logfile" | head -n 1)"
+  if [ -z "$calculators" ] || [ "$calculators" -lt 1 ]; then
+    fail_case "$name" "S10 measured the child but found no calculator element"
+    return
+  fi
+  pass_case "$name" "S10 measured $calculators calculator element(s) inside the embedded v5 sub-profile of a v4 host"
+}
 generate_private_pe_signature_profile() {
   if ! command -v python3 >/dev/null 2>&1; then
     return 1
@@ -1497,6 +1881,62 @@ run_s3_header_signature_tests() {
     "00000000" "49434320" "WARN" "International Color Consortium reference-profile signature"
 }
 
+# #2562: ICC.2-2023 8.10 names a v5 NamedColor profile's tag namedColorTag
+# ("nmcl"); ICC.1's is namedColor2Tag ("ncl2").  The class rule tables in
+# PawgReport are ICC.1's, so C4 and C5 have to match the named colour tag under
+# the spelling the profile's version defines.  Without that, a conforming v5
+# profile reported "missing 'ncl2'" at C4 and listed 'nmcl' at C5.  The v4
+# profile is the control: its verdicts must not move.
+run_named_colour_version_spelling() {
+  local name="pawg-named-colour-version-spelling"
+  local v5="$TESTING_DIR/Named/NamedColor.icc"
+  local v4="$TESTING_DIR/Named/NamedColorV4.icc"
+  local profile jsonfile
+
+  TOTAL=$((TOTAL + 1))
+  if [ ! -x "$PAWG" ]; then
+    fail_case "$name" "missing executable: $PAWG"
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail_case "$name" "python3 is required to read the JSON report"
+    return
+  fi
+  for profile in "$v5" "$v4"; do
+    if [ ! -f "$profile" ]; then
+      fail_case "$name" "missing generated profile: $profile"
+      return
+    fi
+  done
+
+  for profile in "$v5" "$v4"; do
+    jsonfile="$OUTDIR/$name-$(basename "$profile" .icc).json"
+    timeout 60 "$PAWG" --json "$profile" > "$jsonfile" 2> "$jsonfile.stderr"
+    if ! check_sanitizers "$name" "$jsonfile.stderr"; then
+      fail_case "$name" "sanitizer finding for $(basename "$profile")"
+      return
+    fi
+    if ! python3 - "$jsonfile" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="ascii") as handle:
+    report = json.load(handle)
+
+items = {item["id"]: item for item in report["items"]}
+assert items["C4"]["verdict"] == "OK", items["C4"]
+assert "'nmcl'" not in items["C5"]["detail"], items["C5"]
+assert "'ncl2'" not in items["C5"]["detail"], items["C5"]
+PY
+    then
+      fail_case "$name" "$(basename "$profile"): C4 not OK, or C5 lists the named colour tag"
+      return
+    fi
+  done
+
+  pass_case "$name" "C4 finds the named colour tag under its version's spelling (v5 nmcl, v4 ncl2)"
+}
+
 echo "=== iccPawgReport PAWG regression and security tests ==="
 run_static_source_audit
 run_binary_size_guard
@@ -1505,6 +1945,15 @@ run_good_profile "pawg-valid-profile-fidelity" ""
 run_retired_read_option_rejected
 run_json_report
 run_truncated_profile
+run_invalid_tag_type_profile
+run_malformed_mpe_profile
+if [ -x "$FROM_XML" ]; then
+  run_nested_size_mismatch_profile
+else
+  echo "  [SKIP] pawg-nested-profile-size-mismatch -- iccFromXml is unavailable"
+fi
+run_calculator_operation_count
+run_hybrid_embedded_calculator_cost
 run_private_malware_profile
 run_invalid_gzip_signature_profile
 run_valid_gzip_signature_profile
@@ -1517,6 +1966,7 @@ run_standard_tag_valid_shebang_signature_profile
 run_standard_tag_invalid_textsig_signature_profile
 run_standard_tag_valid_textsig_signature_profile
 run_registered_private_profile
+run_named_colour_version_spelling
 run_s3_header_signature_tests
 echo "iccPawgReport PAWG regression and security tests: $PASS passed, $FAIL failed, $TOTAL total"
 

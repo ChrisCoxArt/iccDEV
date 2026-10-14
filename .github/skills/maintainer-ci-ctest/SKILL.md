@@ -33,6 +33,7 @@ Choose the smallest maintainer-owned surface that proves the behavior:
 | Add focused Linux regression | `.github/scripts/*.sh` | `.github/ci/regression/README.md` or `docs/ctest.md` |
 | Register CTest suite | `Build/Cmake/Testing/CMakeLists.txt` | `docs/ctest.md` |
 | Change workflow gate | `.github/workflows/*.yml` | `docs/regression-workflow-governance.md` |
+| Change Apple mobile core gate | `Build/Cmake/CMakePresets.json`, `Build/AppleMobile/**`, `.github/workflows/ci-apple-*.yml` | `docs/build.md` and `docs/regression-workflow-governance.md` |
 | Change maintainer Dockerfile | `Dockerfile*` | `docs/build.md` and `docs/regression-workflow-governance.md` |
 | Change sanitizer policy | `Build/Cmake/CMakeLists.txt`, `.github/scripts/sanitize-*` | `.github/instructions/*` |
 | Change CPack/release packaging | `Build/Cmake/**`, release workflows | `docs/build.md` or release docs |
@@ -50,6 +51,10 @@ when practical.
   current total.
 - Adding checks inside `iccdev-tool-coverage-baseline.sh` does not change that
   count; validate the direct script and `ctest -R '^iccdev\.tool-coverage$'`.
+- If a change touches legacy packed intent decoding or named-color overprint
+  variants, include both `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`
+  and `.github/scripts/iccdev-applysearch-cli-args-regression.sh`, plus
+  `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`.
 - Windows full builds include focused executable regressions, batch-backed
   suites, dump/profile smoke coverage, shared-export coverage, and PAWG report
   coverage.
@@ -74,20 +79,25 @@ when practical.
 ## Workflow Rules
 
 - Follow `.github/instructions/workflow-governance.instructions.md`.
-- Treat `ci-pr-action` `full` as the explicit long-cycle maintainer gate. It runs
+- Treat `ci-pr-action` `full` as the deterministic core maintainer gate. It runs
   Unix GCC/Clang Release and Debug builds, exact GCC 15.2 strict Release LTO in
-  the regression container, GCC 15.2 ASAN+UBSAN tool tests, Windows, and Docker.
-  Its tool-test caller excludes the `pr-extended` CTest label to stay within
-  the PR runtime budget; `ci-regression-checks` continues to run the labelled
-  tests.
+  the regression container, non-sanitized GCC core tool tests, and Windows.
+  Its tool-test caller excludes `pr-extended` and `ci-infrastructure` CTests.
 - `ci_scope=auto` is the default. It selects the full matrix for source, build,
-  test, and container changes; workflow-only changes run the preflight and
-  workflow-security gates.
-- Use `ci_scope=fast-lane` for the exact GCC 15.2 Release LTO and ASAN+UBSAN
-  Release tool lanes. Fast lane defaults to the latest CTest with Windows
-  disabled; Docker runs when the PR changes the container surface.
-- Container changes require the Docker PR verification lane. Do not claim the
-  container surface is verified until its local image build and hosted lane pass.
+  and test changes; documentation-only changes use the constrained fast-lane
+  settings. Workflow-only changes keep the core orchestrator limited to setup
+  and finalization while the standalone preflight and risk-analysis workflows
+  provide their required contexts. Container-only changes use those standalone
+  security gates and local container validation.
+- Use `ci_scope=fast-lane` for the exact GCC 15.2 Release LTO and non-sanitized
+  core tool lanes. Fast lane defaults to the latest CTest with Windows
+  disabled; it does not run a Docker verification job.
+- Container changes require the local canonical-image build and smoke in
+  `docs/regression-container.md`; the Docker PR verification job is disabled.
+- Apple mobile core changes must keep the dependency-free `apple-*-core`
+  presets available, align matching `apple-*-extended-core` presets with SDK
+  and dependency discovery, and keep simulator app capability/gap reporting in
+  `Build/AppleMobile` synchronized with `docs/build.md`.
 - Do not use `|| true` around profile generation, CTest discovery, regression
   execution, sanitizer checks, or packaging verification.
 - Use least-privilege permissions and credential cleanup.
@@ -98,8 +108,8 @@ when practical.
   both PR and manual-dispatch events, so a manual lane cannot cancel its PR
   counterpart.
 - Trigger shared-concurrency workflows sequentially to avoid canceling your own
-  run. Use `ci-pr-action` for normal maintainer validation and
-  `ci-regression-checks` through that orchestrator for ASAN/UBSAN CTest coverage.
+  run. Use `ci-pr-action` for normal core validation and the standalone
+  path-scoped/manual `ci-regression-checks` workflow for ASAN/UBSAN coverage.
 
 ## Local Validation
 
@@ -133,12 +143,32 @@ ICCDEV_TEST_OUTDIR=/tmp/iccdev-tool-output \
 ctest --test-dir build -R '^iccdev\.tool-coverage$' --output-on-failure
 ```
 
+For `ci-pr-lint.yml` updates, install `clang-tidy`, `clang-tools`, and
+`cppcheck`, then follow the canonical component-partitioned local reproduction
+in `docs/build.md#maintainer-static-analysis`. Verify that every selected
+component has its own cppcheck and clang-tidy report, and that the combined
+reports preserve the sum of the component output.
+
 For workflow YAML:
 
 ```bash
 python3 -c "import yaml; [yaml.safe_load(open(p)) for p in ['.github/workflows/<workflow>.yml']]; print('YAML parse OK')"
 actionlint -no-color .github/workflows/<workflow>.yml
 ```
+
+For Apple mobile core and simulator workflow changes on macOS:
+
+```bash
+cmake --list-presets=configure -S Build/Cmake | grep -E 'apple-.*(extended-core|core)'
+bash .github/scripts/iccdev-apple-simulator-smoke.sh ios
+bash .github/scripts/iccdev-apple-simulator-smoke.sh watchos
+bash .github/scripts/iccdev-xcode-ctest-smoke.sh
+```
+
+Set `ICCDEV_APPLE_CORE_FLAVOR=minimal` only when explicitly validating the
+dependency-free app path. The default simulator smoke should use the extended
+core and require the app's JSON report to include built-library checks, the
+public invalid-profile substitution control, and non-failing mobile gap notes.
 
 For CPack, install/export, vcpkg, or release packaging changes, run the nearest
 packaging smoke test and inspect logs for missing files, duplicate install
@@ -151,9 +181,13 @@ docker build -t iccdev-container-check -f <Dockerfile> .
 docker run --rm iccdev-container-check <smoke-command>
 ```
 
-For the unified `Dockerfile`, also run a no-cache build and smoke
-`clang`, `clang++`, `gcc`, `g++`, `cmake`, `afl-fuzz`, and `/usr/bin/time`. If the image is
-published, pass the published branch or SHA tag to `ci-iccdev-tool-tests.yml`.
+For the unified `Dockerfile`, follow the complete local development-environment
+preflight in `docs/regression-container.md#maintainer-preflight-and-security-checks`.
+Cached builds are permitted for development iterations. The final pre-push
+proof requires workflow and Dockerfile policy checks, a no-cache build,
+analyzer inventory and runtime smoke, a healthy image, and Trivy
+vulnerability/secret triage. If the image is published, pass the published
+branch or SHA tag to `ci-iccdev-tool-tests.yml`.
 
 ## GitHub Validation
 
@@ -184,7 +218,8 @@ Report:
   as authoritative evidence. Note whether per-run logs were bounded by
   `registry_qa_log_tail_lines`; use `0` only when full raw logs are needed.
   Developer reports must preserve downloaded profile payloads so reviewers can
-  inspect and rerun failing inputs without a second download step.
+  inspect and rerun failing inputs without a second download step. Package and
+  upload that report with `always()` so failed scans retain their evidence.
 - Remaining Windows, packaging, or release validation that requires hosted
   runners.
 

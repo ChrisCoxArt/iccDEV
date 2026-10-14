@@ -22,17 +22,101 @@ single index for common command shapes and shared option tables.
 | Tool | Purpose | Example |
 |------|---------|---------|
 | `iccApplyNamedCmm` | Apply named CMM profile chains to text data | `iccApplyNamedCmm -cfg config.json` |
-| `iccApplyProfiles` | Apply profile chains to TIFF images | `iccApplyProfiles -cfg config.json` |
-| `iccApplySearch` | Apply a profile sequence using inverse search | `iccApplySearch -cfg config.json` |
+| `iccApplyProfiles` | Apply profile chains to TIFF images | `iccApplyProfiles --cfg config.json` |
+| `iccApplySearch` | Apply a profile sequence using inverse search | `iccApplySearch --cfg config.json` |
 | `iccApplyToLink` | Build DeviceLink profiles or `.cube` LUTs | `iccApplyToLink output.icc 0 33 1 "Link" 0.0 1.0 1 1 src.icc 1 dst.icc 1` |
 | `iccRoundTrip` | Evaluate round-trip behavior | `iccRoundTrip profile.icc` |
+
+`iccApplySearch` accepts an optional leading `--threads N`. `N=0` uses hardware
+concurrency, `N=1` is scalar, and larger values select workers up to
+`CIccThreadedCmm::GetMaxThreads()`; `-debugcalc` requires `N=1`. Legacy
+single-dash forms remain accepted.
+
+### iccApplySearch export and replay
+
+`iccApplySearch --exportcfg FILE` saves resolved settings. Use
+`--exportcfganddata FILE` when the configuration must include the input color
+data for standalone `--cfg FILE` replay:
+
+```sh
+cd Testing/hybrid
+iccApplySearch --exportcfganddata config/cmykGraysEst.json \
+  Results/cmykGraysRef.txt 0 1 \
+  ICC/Spec380_10_730-D50_2deg.icc 3 \
+  ICC/Lab_float-D50_2deg.icc 3 \
+  ICC/CMYK_Hybrid_Profile.icc 10003 -INIT 3 \
+  ICC/Lab_float-D50_2deg.icc 1 \
+  ICC/Lab_float-D93_2deg-MAT.icc 1 \
+  ICC/Lab_float-F11_2deg-MAT.icc 1 \
+  ICC/Lab_float-IllumA_2deg-MAT.icc 1 \
+  > Results/cmykGraysEst.txt
+iccApplySearch --cfg config/cmykGraysEst.json > Results/cmykGraysEst-replay.txt
+```
+
+When configured with `ICCDEV_ENABLE_TELEMETRY=ON`, `iccApplySearch` also accepts
+`--telemetry=off|human|jsonl`,
+`--telemetry-file FILE`, and `--evidence-file FILE` in any order with its
+configuration or positional form. Its human telemetry uses UTC timestamps and
+goes to stderr, so transform data on stdout remains byte-compatible. Lifecycle
+lines and JSONL include input/output record counts and requested/effective
+threads.
+
+`iccApplyProfiles` also accepts `"useSearch": true` inside the JSON `connect`
+block, which builds a `CIccCmmSearch` inverse-search chain instead of a forward
+one. It is `--cfg` only and reads the chain from a `searchApply` block -- the
+same object `iccApplySearch` uses -- requiring 2 or 3 entries in its
+`profileSequence` (3 requires at least one `pccWeights` entry), with an optional
+`initial`. An
+empty first `iccFile` still means the source TIFF's embedded profile. A
+per-stage `pccFile` is ignored by the search CMM except on the last entry --
+use `pccWeights` instead -- and the tool warns on stderr where it is inert. A
+search apply is orders of magnitude slower per pixel than a forward chain since
+every pixel runs a Nelder-Mead search, so `connect.threads` matters more here
+than for a forward chain. See
+[the tool Readme](../Tools/CmdLine/IccApplyProfiles/Readme.md) for the full
+schema.
+
+### iccApplyProfiles headless receipts
+
+`iccApplyProfiles` preserves its existing default stdout progress. In a build
+configured with `ICCDEV_ENABLE_TELEMETRY=ON`, use
+`--version` for stable tool and library identity, `--verbose` for a concise
+stderr receipt, `--debug` for rate-limited batch progress on stderr, and
+`--quiet` to suppress normal progress. Human telemetry and debug progress use
+UTC timestamps and replace the legacy percentage display so they do not report
+the same progress twice. `--telemetry-interval-ms N` controls their minimum
+interval and defaults to 1000 ms.
+Threaded receipts distinguish `requested_threads` from `effective_threads`;
+`--threads 0` resolves to the runtime worker-pool size. The final receipt also
+reports `throughput_pixels_per_second`, while progress telemetry records batch
+rows, pixels, percentage, elapsed time, measured throughput, estimated remaining
+and total time, execution mode, thread counts, and total batch count. Time
+estimates remain unavailable until measurable work has completed.
+
+For machine evidence, use a separate sidecar rather than stdout or stderr:
+
+```sh
+iccApplyProfiles --telemetry=jsonl --telemetry-file run.jsonl \
+  --evidence-file receipt.json --quiet --cfg config.json
+```
+
+The JSONL sidecar records lifecycle events with monotonically increasing
+sequence numbers and omits raw argv. The final evidence JSON is written only
+after TIFF output is finalized and reopened, and includes its output digest.
+Both sidecars use owner-only permissions on POSIX. Both paths must be new and must not
+alias any transform input or output. A partial sidecar without a terminal event
+is interruption evidence, not a crash classification; the outer QA runner owns
+signal and sanitizer classification.
 
 For `iccApplyToLink`, `link_type=0` writes an ICC DeviceLink and `option`
 selects profile version (`0` for v4, `1` for v5). `link_type=1` writes a
 `.cube` text LUT and `option` is the precision (`0` through `20`). Other
 `link_type` values are rejected. `lut_size` must be `2` through `255`.
 `first_transform=1` uses the source transform from the first profile; `0` uses
-its destination transform.
+its destination transform. It accepts the same telemetry/evidence options in
+any order; human telemetry uses UTC timestamps and goes to stderr, while
+JSONL/evidence record the link output, grid size/node count, elapsed time, and
+node throughput.
 
 ## Image and Specialty Tools
 
@@ -40,7 +124,8 @@ its destination transform.
 |------|---------|---------|
 | `iccTiffDump` | Inspect TIFF metadata and embedded ICC | `iccTiffDump image.tif` |
 | `iccPngDump` | Inspect PNG metadata and embedded ICC | `iccPngDump image.png` |
-| `iccJpegDump` | Inspect JPEG metadata and embedded ICC | `iccJpegDump image.jpg` |
+| `iccJpegDump` | Inspect JPEG size and embedded ICC APP2 information without writing files | `iccJpegDump image.jpg` |
+| `iccHeifDump` | Locally compare HEIF carrier ICC blobs with IccProfLib parsing | See [the tool Readme](../Tools/CmdLine/IccHeifDump/Readme.md) |
 | `iccPawgReport` | Emit an ICC PAWG profile assessment checklist report for security, conformance, and quality review | `iccPawgReport Testing/sRGB_v4_ICC_preference.icc` |
 | `iccPawgReport` | Emit machine-readable assessment results; Q1 includes structured, unrounded round-trip metrics | `iccPawgReport --json Testing/sRGB_v4_ICC_preference.icc` |
 | `iccPawgReport` | Emit gated QA evidence flags | `iccPawgReport --qa-flags --evidence-json Testing/sRGB_v4_ICC_preference.icc` |
@@ -49,10 +134,30 @@ its destination transform.
 | `iccFromCube` | Convert `.cube` 3D LUT to ICC.2 DeviceLink | `iccFromCube input.cube output.icc` |
 | `iccBenchApply` | Measure profile-chain apply throughput and checksums | `iccBenchApply -suite -csv -threads 1,2,8` |
 
+`iccTiffDump` inspects classic/BigTIFF metadata without decoding pixel data.
+Use `--ifd N` to select a zero-based main-chain directory for inspection or ICC
+extraction, and `--list-directories` to inventory directories and SubIFD offsets.
+Inventory JSON uses `--evidence-json --list-directories`; SubIFDs are not followed.
+
+`iccApplyProfiles` accepts tiled input and enables tiled output with paired
+`imageFiles.dstTileWidth`/`dstTileHeight` (positive multiples of 16); set
+`dstBigTiff: true` for BigTIFF output. `iccSpecSepToTiff` accepts tiled grayscale
+inputs and offers `--tiles WIDTH HEIGHT` and `--bigtiff` for output. Defaults
+remain classic stripped TIFF with the existing NONE/LZW compression controls.
+Tiles support 8/16-bit unsigned and 32-bit float samples; tile-band buffers are
+capped at 256 MiB per image. `iccSpecSepToTiff` also caps the combined decoded
+tile bands of its concurrently open inputs at 256 MiB and rejects an input
+before allocating a band that would exceed the remaining budget. These options
+do not imply SVS-specific decoding, ROI, SubIFD processing, or pyramid rewriting.
+
 `iccSpecSepToTiff` treats the input argument as a filename prefix and appends
 each channel number from `start` through `end`. For a single input named
 `spec_3`, pass prefix `spec_` with `start=3` and `end=3`. The prefix is literal,
 not a `printf` pattern: `spec_%03d.tif` opens `spec_%03d.tif1`, not `spec_001.tif`.
+
+Run `.github/scripts/iccdev-specsep-corpus-matrix.sh` to exercise every
+checked-in numbered spectral fixture as a one-channel output under all
+compression and planar layouts, with TIFF metadata validation.
 
 When `{profile}` is provided, the file is parsed and validated as an ICC profile
 before any output is written. ICC.2 spectral PCS profiles must have spectral PCS
@@ -134,12 +239,25 @@ tools separately (#2268) -- before that a negative code whose units digit was
 zero, such as `-10`, was accepted by them and produced the same output as its
 positive twin.
 
-The sign rule is the only column the two tools are known to share. `iccBenchApply`
-discards the hundreds column rather than reading it as a luminance request, and
-passes a tens digit of `4` straight through as `icXformLutBPC` instead of mapping
-it to a black-point-compensation hint -- so `iccBenchApply <profile> 40` fails with
-`Invalid Look-Up Table type` where `iccApplyToLink <profile> 40` succeeds. See
-[`Tools/CmdLine/IccBenchApply/Readme.md`](../Tools/CmdLine/IccBenchApply/Readme.md).
+Until #2271 the sign rule was the only column the two tools shared:
+`iccBenchApply` discarded the hundreds column rather than reading it as a
+luminance request, and passed a tens digit of `4` straight through as
+`icXformLutBPC` instead of mapping it to a black-point-compensation hint -- so
+`iccBenchApply <profile> 40` failed with `Invalid Look-Up Table type` where
+`iccApplyToLink <profile> 40` succeeded. Both columns now match, asserted by the
+`iccdev.bench-apply-bpc-*` and `iccdev.bench-apply-luminance-column` tests. See
+<a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/Tools/CmdLine/IccBenchApply/Readme.md">Tools/CmdLine/IccBenchApply/Readme.md</a>.
+
+One divergence is real and by design, and it is the trap worth knowing about:
+`iccApplyToLink` and `iccBenchApply` strip `% 100` and spend the hundreds column
+on a luminance request, while `CIccCfgProfileSequence::fromArgs()` -- the decode
+behind `iccApplyNamedCmm`, `iccApplyProfiles` and `iccApplySearch` -- strips
+`% 1000`, so there the hundreds column is part of the transform type. Measured
+with `iccApplyNamedCmm -exportcfg`, `100`/`110`/`120`/`130` resolve to
+`spectral`/`namedColorimetric`/`namedSpectral`/`namedDevice` and `140` is
+refused. So `100` means a spectral transform to one family of tools and luminance
+matching to the other; the four `icXformLutType` values above `9` are reachable
+only from the first (#2270).
 
 The over-black / over-gray flags only affect chains that include a v5
 NamedColor profile. JSON callers prefer the `transform` field values,
@@ -147,7 +265,7 @@ which combine an output-side stem (`named` / `namedColorimetric` /
 `namedSpectral` / `namedDevice`) with an overprint suffix
 (`OnBlack` / `OnGray`, only meaningful on the spectral path) - see
 [`docs/icc-connect-config.schema.json`](icc-connect-config.schema.json)
-and [`Tools/CmdLine/IccApplyNamedCmm/Readme.md`](../Tools/CmdLine/IccApplyNamedCmm/Readme.md).
+and <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/Tools/CmdLine/IccApplyNamedCmm/Readme.md">Tools/CmdLine/IccApplyNamedCmm/Readme.md</a>.
 
 Tool-specific details remain in each `Tools/CmdLine/*/Readme.md` file.
 

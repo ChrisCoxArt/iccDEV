@@ -4,11 +4,11 @@
 # BSD 3-Clause License. See LICENSE.md for details.
 
 """
-FastMCP server exposing 26 tools for ICC color profile operations.
+MCP server exposing ICC color profile operations.
 
 Phase 1 (Python-native): inspect_header, profile_summary, validate_profile,
-    color_transform, roundtrip_delta, sig_to_str, enum_spaces
-Phase 2 (subprocess): 17 CLI tool wrappers (see cli_tools.py)
+    color_transform, roundtrip_delta, icc_sig_to_str, enum_spaces
+Phase 2 (subprocess): CLI tool wrappers (see cli_tools.py)
 """
 
 from __future__ import annotations
@@ -20,27 +20,20 @@ import shlex
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.server import Settings as FastMCPSettings
+from mcp.server.mcpserver import MCPServer
 
-from iccdev_mcp import __version__, cli_tools
+from iccdev_mcp import __version__, _native, cli_tools
 from iccdev_mcp.profiles import list_profiles, resolve_profile_path
 
-# MCP 1.x's generic lifespan annotation needs resolution before pydantic-settings
-# reads environment sources on Python 3.14.
-FastMCPSettings.model_rebuild()
-
-mcp = FastMCP(
+mcp = MCPServer(
     "iccdev-mcp",
+    version=__version__,
     instructions=(
         "ICC color profile tools from the International Color Consortium's "
         "RefIccMAX (iccDEV) library. Provides profile inspection, color "
         "transforms, and format conversion for ICC.1 and ICC.2 profiles."
     ),
 )
-# FastMCP does not expose its low-level Server version parameter. Set the
-# application version explicitly so MCP initialize does not report the SDK version.
-mcp._mcp_server.version = __version__
 
 _NATIVE_TOOL_NAMES = (
     "inspect_header",
@@ -55,12 +48,34 @@ _SERVICE_TOOL_NAMES = ("health_check", "list_available_profiles")
 
 
 def _check_iccdev():
-    """Verify iccdev is importable; raise clear error if not."""
+    """Check whether the bundled header and validation helpers are available."""
+    return _native is not None
+
+
+class NativeBindingsUnavailable(RuntimeError):
+    """The optional compiled transform backend cannot be loaded."""
+
+
+def _transform_bindings():
+    """Require the compiled IccProfLib binding for pixel transforms."""
     try:
-        import iccdev  # noqa: F401
-        return True
-    except ImportError:
+        import iccdev
+        import iccdev._iccdev  # noqa: F401
+    except ImportError as exc:
+        raise NativeBindingsUnavailable(
+            "Color transforms require the compiled iccdev Python bindings "
+            "and their runtime libraries; install the python/ package in "
+            "this environment"
+        ) from exc
+    return iccdev
+
+
+def _transform_available() -> bool:
+    try:
+        _transform_bindings()
+    except NativeBindingsUnavailable:
         return False
+    return True
 
 
 def _validate_pixels(pixels: list[list[float]]) -> None:
@@ -109,7 +124,7 @@ def inspect_header(path: str) -> dict:
     Args:
         path: ICC profile path (absolute, relative, or filename to search).
     """
-    import iccdev
+    iccdev = _native
 
     resolved = resolve_profile_path(path)
     profile = iccdev.open_profile(str(resolved))
@@ -146,7 +161,7 @@ def profile_summary(path: str) -> dict:
     Args:
         path: ICC profile path (absolute, relative, or filename to search).
     """
-    import iccdev
+    iccdev = _native
 
     resolved = resolve_profile_path(path)
     profile = iccdev.open_profile(str(resolved))
@@ -196,7 +211,7 @@ def validate_profile(path: str) -> dict:
         Dict with the resolved file path, numeric status, status name, and
         native validation report.
     """
-    import iccdev
+    iccdev = _native
 
     resolved = resolve_profile_path(path)
     result = iccdev.validate_profile_file(str(resolved))
@@ -240,7 +255,7 @@ def color_transform(
     """
     _validate_pixels(pixels)
 
-    import iccdev
+    iccdev = _transform_bindings()
 
     intent_map = {
         "perceptual": iccdev.RenderingIntent.Perceptual,
@@ -274,6 +289,8 @@ def color_transform(
         cmm.attach(str(src_path), intent=ri, interp=interp)
         cmm.attach(str(dst_path), intent=ri, interp=interp)
         cmm.begin()
+        if any(len(pixel) != cmm.src_channels for pixel in pixels):
+            raise ValueError(f"Each pixel must have {cmm.src_channels} source channels")
         transformed = cmm.apply_multi(pixels)
         return {
             "pixels": transformed,
@@ -295,10 +312,10 @@ def roundtrip_delta(
     pixels: list[list[float]],
     intent: str = "perceptual",
 ) -> dict:
-    """Compute round-trip delta-E for an ICC profile.
+    """Compute round-trip device-channel distance for an ICC profile.
 
-    Transforms pixels device -> PCS -> device and measures the difference
-    between original and round-tripped values (Euclidean distance).
+    Transforms pixels device -> PCS -> device and measures Euclidean distance
+    in device-channel units. This is not a CIE Delta E measurement.
 
     Args:
         profile: ICC profile path.
@@ -311,7 +328,7 @@ def roundtrip_delta(
     """
     _validate_pixels(pixels)
 
-    import iccdev
+    iccdev = _transform_bindings()
 
     intent_map = {
         "perceptual": iccdev.RenderingIntent.Perceptual,
@@ -331,16 +348,22 @@ def roundtrip_delta(
     try:
         fwd.attach(path_str, intent=ri)
         fwd.begin()
+        if any(len(pixel) != fwd.src_channels for pixel in pixels):
+            raise ValueError(f"Each pixel must have {fwd.src_channels} device channels")
         pcs_values = fwd.apply_multi(pixels)
     finally:
         fwd.close()
 
     # Reverse transform: PCS -> device
-    rev = iccdev.IccCmm()
+    rev = iccdev.IccCmm(first_is_input=False)
     try:
         rev.attach(path_str, intent=ri)
         rev.begin()
+        if any(len(pixel) != rev.src_channels for pixel in pcs_values):
+            raise RuntimeError("Forward PCS channels do not match reverse source channels")
         roundtripped = rev.apply_multi(pcs_values)
+        if rev.dst_channels != len(pixels[0]):
+            raise RuntimeError("Reverse device channels do not match input pixels")
     finally:
         rev.close()
 
@@ -392,7 +415,7 @@ def icc_sig_to_str(signature: int) -> dict:
     Returns:
         Dict with 'signature' (int), 'string' (4-char), and 'hex'.
     """
-    import iccdev
+    iccdev = _native
 
     s = iccdev.sig_to_str(signature)
     return {
@@ -416,7 +439,7 @@ def enum_spaces() -> dict:
     Returns:
         Dict with 'color_spaces' list of {name, value} entries and 'count'.
     """
-    import iccdev
+    iccdev = _native
 
     spaces = []
     for member in iccdev.ColorSpace:
@@ -471,12 +494,7 @@ def health_check() -> dict:
     python_ok = _check_iccdev()
     validation_ok = False
     if python_ok:
-        import iccdev
-        validation_ok = getattr(
-            iccdev,
-            "native_validation_available",
-            lambda: hasattr(iccdev, "validate_profile_file"),
-        )()
+        validation_ok = _native.native_validation_available()
     profiles = list_profiles()
 
     # Check CLI tools availability
@@ -487,6 +505,9 @@ def health_check() -> dict:
         cli_status = {"available": [], "missing": [], "tools_dir": None}
 
     native_tools = list(_NATIVE_TOOL_NAMES) if python_ok else []
+    if not _transform_available():
+        native_tools = [name for name in native_tools
+                        if name not in ("color_transform", "roundtrip_delta")]
     if validation_ok:
         native_tools.extend(_VALIDATION_TOOL_NAMES)
     available_cli_tools = cli_status.get("available", [])
@@ -514,7 +535,7 @@ def health_check() -> dict:
 
 
 # -------------------------------------------------------------------------
-# Subprocess tools (Phase 2) -- 17 CLI tool wrappers
+# Subprocess tools (Phase 2) -- CLI tool wrappers
 # -------------------------------------------------------------------------
 
 @mcp.tool()
@@ -611,14 +632,20 @@ def json_to_profile(json_path: str) -> dict:
 
 
 @mcp.tool()
-def tiff_dump(path: str) -> dict:
+def tiff_dump(
+    path: str, ifd: Optional[int] = None,
+    list_directories: bool = False, evidence_json: bool = False,
+) -> dict:
     """Dump TIFF image metadata and embedded ICC profile (iccTiffDump).
 
     Args:
         path: TIFF image path.
+        ifd: Zero-based main-chain IFD index (0..4095); omitted selects IFD 0.
+        list_directories: Inventory main IFDs without parsing ICC or pixels.
+        evidence_json: Emit native JSON metadata/inventory evidence.
     """
     p = resolve_profile_path(path)
-    return cli_tools.run_tiff_dump(str(p))
+    return cli_tools.run_tiff_dump(str(p), ifd, list_directories, evidence_json)
 
 
 @mcp.tool()
@@ -641,6 +668,17 @@ def png_dump(path: str) -> dict:
     """
     p = resolve_profile_path(path)
     return cli_tools.run_png_dump(str(p))
+
+
+@mcp.tool()
+def heif_dump(path: str) -> dict:
+    """Dump HEIF, HEIC, or AVIF metadata and embedded ICC profiles (iccHeifDump).
+
+    Args:
+        path: HEIF, HEIC, or AVIF image path.
+    """
+    p = resolve_profile_path(path)
+    return cli_tools.run_heif_dump(str(p))
 
 
 @mcp.tool()
@@ -784,35 +822,45 @@ def v5_to_v4(display_profile: str, observer_profile: str) -> dict:
 
 @mcp.tool()
 def spec_sep_to_tiff(
-    reflectance_tiff: str,
-    separation_profile: str,
-    illuminant_profiles: Optional[list[str]] = None,
+    input_prefix: str,
+    start: int,
+    end: int,
+    increment: int,
+    compress: int = 0,
+    planar: int = 0,
+    profile: Optional[str] = None,
+    tile_width: int = 0,
+    tile_height: int = 0,
+    bigtiff: bool = False,
 ) -> dict:
-    """Spectral separation to TIFF (iccSpecSepToTiff).
+    """Combine numbered grayscale TIFF channels (iccSpecSepToTiff).
 
-    Applies spectral separation using reflectance data and separation
-    profile to produce a color-separated TIFF.
+    The literal prefix plus each channel number names a single-channel TIFF.
+    This does not apply a separation/illuminant profile transform.
 
     Args:
-        reflectance_tiff: Input reflectance TIFF path.
-        separation_profile: Separation ICC profile path.
-        illuminant_profiles: Optional list of illuminant profile paths.
+        input_prefix: Literal channel filename prefix, e.g. spectral/spec_.
+        start: First channel number.
+        end: Last channel number, inclusive.
+        increment: Nonzero step landing exactly on end.
+        compress: 0=none, 1=LZW.
+        planar: 0=interleaved, 1=separate planes.
+        profile: Optional conformant ICC profile matching the channel count.
+        tile_width: Zero for strips, or a positive multiple of 16.
+        tile_height: Zero for strips, or a positive multiple of 16.
+        bigtiff: Write BigTIFF instead of classic TIFF.
 
     Returns:
         Dict with 'output_base64', 'stdout', 'stderr', 'returncode'.
     """
     import tempfile
-    ref = str(resolve_profile_path(reflectance_tiff))
-    sep = str(resolve_profile_path(separation_profile))
-    illum = (
-        [str(resolve_profile_path(p)) for p in illuminant_profiles]
-        if illuminant_profiles
-        else None
-    )
     fd, tmp_output = tempfile.mkstemp(suffix=".tif")
     os.close(fd)
     try:
-        result = cli_tools.run_spec_sep_to_tiff(ref, sep, tmp_output, illum)
+        result = cli_tools.run_spec_sep_to_tiff(
+            input_prefix, tmp_output, start, end, increment, compress, planar,
+            profile, tile_width, tile_height, bigtiff,
+        )
         if result["returncode"] == 0 and Path(tmp_output).exists():
             import base64
             result["output_base64"] = base64.b64encode(
@@ -894,11 +942,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # Set port on the server instance for network transports
-    if args.transport != "stdio":
-        mcp.settings.port = args.port
-
-    mcp.run(transport=args.transport)
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(transport=args.transport, port=args.port)
 
 
 if __name__ == "__main__":

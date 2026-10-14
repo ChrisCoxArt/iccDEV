@@ -7,58 +7,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #include "PawgReport.h"
 
 #include <algorithm>
@@ -74,11 +50,13 @@
 #include "IccCmdLineUtil.h"
 #include "IccProfile.h"
 #include "IccMpeCalc.h"
+#include "IccTagEmbedIcc.h"
 #include "IccTag.h"
 #include "IccTagBasic.h"
 #include "IccTagLut.h"
 #include "IccUtil.h"
 #include "IccProfLibVer.h"
+#include "IccFileUtil.h"
 #include "IccQualityMetrics.h"
 #include "IccSignatureRegistry.h"
 
@@ -464,6 +442,14 @@ bool TagInBounds(const RawTag &tag, uint64_t fileSize)
   return tag.offset >= 132 && end >= tag.offset && end <= fileSize;
 }
 
+// GCC 15 at -O3 without LTO reports -Wfree-nonheap-object on this function's
+// vectors once it is inlined into EvaluatePawg, which other changes to this
+// file or IccQualityMetrics.h can bring about.  The allocations are ordinary;
+// the warning is a false positive.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
+#endif
 std::vector<RawTag> SortedUniqueTagRegions(const RawProfile &raw)
 {
   std::vector<RawTag> tags = raw.tags;
@@ -486,6 +472,9 @@ std::vector<RawTag> SortedUniqueTagRegions(const RawProfile &raw)
   }
   return unique;
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 int CountPrivateTags(const RawProfile &raw)
 {
@@ -575,6 +564,37 @@ std::string FirstReportLine(const std::string &report)
     }
   }
   return "validation reported an issue without detail";
+}
+
+std::string FirstCriticalReportLine(const std::string &report)
+{
+  const std::string criticalPrefix = icMsgValidateCriticalError;
+  std::istringstream in(report);
+  std::string line;
+  while (std::getline(in, line)) {
+    const size_t pos = line.find(criticalPrefix);
+    if (pos != std::string::npos)
+      return FirstReportLine(line.substr(pos));
+  }
+  return FirstReportLine(report);
+}
+
+// The first line of the report at the level of the status given, so that a
+// verdict is explained by a line of its own level and not by whichever line
+// the report happens to begin with.
+std::string FirstReportLineAt(const std::string &report, icValidateStatus status)
+{
+  const std::string prefix = status == icValidateWarning ? icMsgValidateWarning :
+                             status == icValidateNonCompliant ? icMsgValidateNonCompliant :
+                             icMsgValidateCriticalError;
+  std::istringstream in(report);
+  std::string line;
+  while (std::getline(in, line)) {
+    const size_t pos = line.find(prefix);
+    if (pos != std::string::npos)
+      return FirstReportLine(line.substr(pos));
+  }
+  return FirstReportLine(report);
 }
 
 typedef bool (*SigValidator)(const RawProfile &raw, size_t offset, size_t end);
@@ -972,8 +992,16 @@ PawgVerdict ChannelCountVerdict(CIccProfile *pIcc, std::string &detail)
     return PawgVerdict::NotApplicable;
   }
 
-  const icUInt32Number dataChannels = icGetSpaceSamples((icColorSpaceSignature)pIcc->m_Header.colorSpace);
+  // The A side as the tag validators take it: the data colour space, or the
+  // spectral PCS of a v5 abstract profile whose data colour space is zero
+  // (ICC.2:2023 7.2.8, #2725).
+  const icUInt32Number dataChannels = icGetDataSpaceSamples(&pIcc->m_Header);
   const icUInt32Number pcsChannels = icGetSpaceSamples((icColorSpaceSignature)pIcc->m_Header.pcs);
+  // The DToBx and BToDx tags connect to the spectral PCS in a v5 profile whose
+  // header sets one (ICC.2:2023 9.2.42, "from a spectrally-based PCS ... to
+  // Device"), and to the colorimetric PCS otherwise, as in ICC.1:2022.
+  const icUInt32Number dPcsChannels = pIcc->m_Header.version >= icVersionNumberV5 ?
+    icGetSpectralSpaceSamples(&pIcc->m_Header) : pcsChannels;
   int checked = 0;
 
   auto check_mbb = [&](icTagSignature sig, icUInt32Number expectedIn, icUInt32Number expectedOut) -> bool {
@@ -1000,12 +1028,14 @@ PawgVerdict ChannelCountVerdict(CIccProfile *pIcc, std::string &detail)
   ok = check_mbb(icSigBToA0Tag, pcsChannels, dataChannels) && ok;
   ok = check_mbb(icSigBToA1Tag, pcsChannels, dataChannels) && ok;
   ok = check_mbb(icSigBToA2Tag, pcsChannels, dataChannels) && ok;
-  ok = check_mpe(icSigDToB0Tag, dataChannels, pcsChannels) && ok;
-  ok = check_mpe(icSigDToB1Tag, dataChannels, pcsChannels) && ok;
-  ok = check_mpe(icSigDToB2Tag, dataChannels, pcsChannels) && ok;
-  ok = check_mpe(icSigBToD0Tag, pcsChannels, dataChannels) && ok;
-  ok = check_mpe(icSigBToD1Tag, pcsChannels, dataChannels) && ok;
-  ok = check_mpe(icSigBToD2Tag, pcsChannels, dataChannels) && ok;
+  ok = check_mpe(icSigDToB0Tag, dataChannels, dPcsChannels) && ok;
+  ok = check_mpe(icSigDToB1Tag, dataChannels, dPcsChannels) && ok;
+  ok = check_mpe(icSigDToB2Tag, dataChannels, dPcsChannels) && ok;
+  ok = check_mpe(icSigDToB3Tag, dataChannels, dPcsChannels) && ok;
+  ok = check_mpe(icSigBToD0Tag, dPcsChannels, dataChannels) && ok;
+  ok = check_mpe(icSigBToD1Tag, dPcsChannels, dataChannels) && ok;
+  ok = check_mpe(icSigBToD2Tag, dPcsChannels, dataChannels) && ok;
+  ok = check_mpe(icSigBToD3Tag, dPcsChannels, dataChannels) && ok;
 
   if (!ok) {
     detail = "one or more transform tags have channel counts inconsistent with data colour space or PCS";
@@ -1016,9 +1046,37 @@ PawgVerdict ChannelCountVerdict(CIccProfile *pIcc, std::string &detail)
   return PawgVerdict::Ok;
 }
 
+// The ICC.2 profile an ICC.1 profile embeds under 'ICC5' (ICC Technical Note
+// 04-2018), when the outer profile is below v5 and carries one that loaded.
+static CIccProfile *EmbeddedV5Profile(CIccProfile *pIcc)
+{
+  if (!pIcc)
+    return NULL;
+  CIccTagEmbeddedProfile *pTag = dynamic_cast<CIccTagEmbeddedProfile*>(pIcc->FindTag(icSigEmbeddedV5ProfileTag));
+  if (!pTag || !pTag->GetProfile())
+    return NULL;
+  if ((pTag->GetProfile()->m_Header.version >> 24) < 5)
+    return NULL;
+  return pTag->GetProfile();
+}
+
 PawgVerdict CalculatorCostVerdict(CIccProfile *pIcc, const RawProfile &raw, std::string &detail)
 {
-  if (!raw.hasHeader || ((raw.version >> 24) < 5)) {
+  // A v4 host with an embedded v5 sub-profile is where the calculators are:
+  // the outer tags carry none, and this returned "not an iccMAX profile"
+  // without looking inside (#2694).  The child is measured in its place,
+  // and the detail says so.
+  const char *scope = "";
+  if (raw.hasHeader && ((raw.version >> 24) < 5)) {
+    CIccProfile *pChild = EmbeddedV5Profile(pIcc);
+    if (!pChild) {
+      detail = "not an iccMAX profile";
+      return PawgVerdict::NotApplicable;
+    }
+    pIcc = pChild;
+    scope = "embedded v5 sub-profile: ";
+  }
+  else if (!raw.hasHeader) {
     detail = "not an iccMAX profile";
     return PawgVerdict::NotApplicable;
   }
@@ -1030,6 +1088,7 @@ PawgVerdict CalculatorCostVerdict(CIccProfile *pIcc, const RawProfile &raw, std:
   int mpeTags = 0;
   uint64_t elements = 0;
   uint64_t calculatorElements = 0;
+  uint64_t calculatorOperations = 0;
   uint64_t estimatedCost = 0;
   for (TagEntryList::iterator it = pIcc->m_Tags.begin(); it != pIcc->m_Tags.end(); ++it) {
     CIccTagMultiProcessElement *mpe = dynamic_cast<CIccTagMultiProcessElement*>(pIcc->FindTag(*it));
@@ -1044,22 +1103,30 @@ PawgVerdict CalculatorCostVerdict(CIccProfile *pIcc, const RawProfile &raw, std:
       CIccMpeCalculator *calc = dynamic_cast<CIccMpeCalculator*>(elem);
       if (calc) {
         ++calculatorElements;
-        estimatedCost += (uint64_t)std::max<icUInt16Number>(calc->NumInputChannels(), 1) *
-                         (uint64_t)std::max<icUInt16Number>(calc->NumOutputChannels(), 1) *
-                         64ULL;
+        const uint64_t operations = calc->GetTotalOps();
+        calculatorOperations = operations > UINT64_MAX - calculatorOperations ?
+                               UINT64_MAX : calculatorOperations + operations;
+        const uint64_t elementCost =
+            (uint64_t)std::max<icUInt16Number>(calc->NumInputChannels(), 1) *
+            (uint64_t)std::max<icUInt16Number>(calc->NumOutputChannels(), 1) * 64ULL;
+        estimatedCost = elementCost > UINT64_MAX - estimatedCost ?
+                        UINT64_MAX : estimatedCost + elementCost;
       }
       else {
-        estimatedCost += 1;
+        if (estimatedCost != UINT64_MAX)
+          ++estimatedCost;
       }
     }
   }
 
   std::ostringstream oss;
-  oss << mpeTags << " MPE tag(s), " << elements << " process element(s), "
-      << calculatorElements << " calculator element(s), estimated relative cost="
-      << estimatedCost;
+  oss << scope << mpeTags << " MPE tag(s), " << elements << " process element(s), "
+      << calculatorElements << " calculator element(s), "
+      << calculatorOperations << " calculator operation(s), estimated relative cost="
+      << estimatedCost << "; local warning threshold=65536 operations";
   detail = oss.str();
-  return (elements > 4096 || calculatorElements > 256 || estimatedCost > 65536) ?
+  return (elements > 4096 || calculatorElements > 256 ||
+          calculatorOperations > 65536 || estimatedCost > 65536) ?
          PawgVerdict::Warn : PawgVerdict::Ok;
 }
 
@@ -1111,6 +1178,16 @@ static const icTagSignature kA2B0Required[] = {
   icSigAToB0Tag
 };
 
+// ICC.2-2023 8.10 (#2562): a v5 NamedColor profile carries namedColorTag
+// ('nmcl') where ICC.1 has namedColor2Tag ('ncl2').  The rule tables here are
+// ICC.1's, so the named colour tag is matched under the spelling the profile's
+// version defines.
+static icTagSignature NamedColorTagFor(const CIccProfile *pIcc)
+{
+  return (pIcc && pIcc->m_Header.version >= icVersionNumberV5) ?
+    icSigNamedColorTag : icSigNamedColor2Tag;
+}
+
 static const icTagSignature kNamedColorRequired[] = {
   icSigProfileDescriptionTag,
   icSigCopyrightTag,
@@ -1118,45 +1195,86 @@ static const icTagSignature kNamedColorRequired[] = {
   icSigNamedColor2Tag
 };
 
-static const icTagSignature kCommonOptional[] = {
-  icSigCalibrationDateTimeTag,
-  icSigCharTargetTag,
-  // #2000-adjacent, filed as #2001: cicpTag was missing here, so C5 warned on
-  // every profile that carries one. The reason it reached the warning rather
-  // than the private-tag bucket is not obvious from this array: IsSpecTag()
-  // asks CIccInfo::GetTagSigName, which resolves 'cicp' to "cicpTag" via
-  // CIccTagCreator, so the name does not begin with "Unknown" and the tag is
-  // never treated as private -- it falls straight through IsAllowedForClass()
-  // to the C5 warning. This affects ordinary SDR profiles, not just HDR ones.
-  icSigCicpTag,
-  icSigChromaticAdaptationTag,
-  icSigChromaticityTag,
-  icSigColorantTableTag,
-  icSigColorantTableOutTag,
-  icSigDeviceMfgDescTag,
-  icSigDeviceModelDescTag,
-  icSigGamutTag,
-  icSigLuminanceTag,
-  icSigMeasurementTag,
-  icSigMediaBlackPointTag,
-  icSigMetaDataTag,
-  icSigOutputResponseTag,
-  icSigPerceptualRenderingIntentGamutTag,
-  icSigProfileSequceIdTag,
-  icSigSaturationRenderingIntentGamutTag,
-  icSigTechnologyTag,
-  icSigViewingConditionsTag,
-  icSigAToB1Tag,
-  icSigAToB2Tag,
-  icSigBToA1Tag,
-  icSigBToA2Tag,
-  icSigDToB0Tag,
-  icSigDToB1Tag,
-  icSigDToB2Tag,
-  icSigBToD0Tag,
-  icSigBToD1Tag,
+// The optional tags every class allows, expanded into kCommonOptional and into
+// the per-class lists below, so the lists cannot drift apart.
+//
+// #2000-adjacent, filed as #2001: cicpTag was missing here, so C5 warned on
+// every profile that carries one. The reason it reached the warning rather
+// than the private-tag bucket is not obvious from this array: IsSpecTag()
+// asks CIccInfo::GetTagSigName, which resolves 'cicp' to "cicpTag" via
+// CIccTagCreator, so the name does not begin with "Unknown" and the tag is
+// never treated as private -- it falls straight through IsAllowedForClass()
+// to the C5 warning. This affects ordinary SDR profiles, not just HDR ones.
+#define PAWG_COMMON_OPTIONAL_TAGS \
+  icSigCalibrationDateTimeTag, \
+  icSigCharTargetTag, \
+  icSigCicpTag, \
+  icSigChromaticAdaptationTag, \
+  icSigChromaticityTag, \
+  icSigColorantTableTag, \
+  icSigColorantTableOutTag, \
+  icSigDeviceMfgDescTag, \
+  icSigDeviceModelDescTag, \
+  icSigGamutTag, \
+  icSigLuminanceTag, \
+  icSigMeasurementTag, \
+  icSigMediaBlackPointTag, \
+  icSigMetaDataTag, \
+  icSigOutputResponseTag, \
+  icSigPerceptualRenderingIntentGamutTag, \
+  icSigProfileSequceIdTag, \
+  icSigSaturationRenderingIntentGamutTag, \
+  icSigTechnologyTag, \
+  icSigViewingConditionsTag, \
+  icSigAToB1Tag, \
+  icSigAToB2Tag, \
+  icSigBToA1Tag, \
+  icSigBToA2Tag, \
+  icSigDToB0Tag, \
+  icSigDToB1Tag, \
+  icSigDToB2Tag, \
+  icSigBToD0Tag, \
+  icSigBToD1Tag, \
   icSigBToD2Tag
+
+static const icTagSignature kCommonOptional[] = {
+  PAWG_COMMON_OPTIONAL_TAGS
 };
+
+// ICC.1:2022 permits DToB0Tag to DToB3Tag and BToD0Tag to BToD3Tag in an
+// N-component LUT-based Input, Display or Output profile and in a ColorSpace
+// profile (8.3.2, 8.4.2, 8.5.2, 8.7), DToB0Tag alone in a DeviceLink or
+// Abstract profile (8.6, 8.8), and none in a NamedColor profile.  The 3 pair,
+// which 9.1 gives the absolute rendering intent, is added here for the four
+// classes that allow it; as for the 0 to 2 pairs, C5 cannot tell a LUT-based
+// profile from a matrix-based or monochrome one by class alone.
+// kCommonOptional is not narrowed here: it still lets every class, DeviceLink,
+// Abstract and NamedColor included, carry the 0 to 2 pairs.
+static const icTagSignature kOutputColorSpaceOptional[] = {
+  PAWG_COMMON_OPTIONAL_TAGS,
+  icSigDToB3Tag,
+  icSigBToD3Tag
+};
+
+// kOutputColorSpaceOptional plus BToA0Tag, for Input and Display.  Only C5 reads
+// optional lists; C4 reads the required and alternative ones.
+//
+// BToA0Tag: ICC.1:2022 permits it in every Input and Display profile (8.3.2 to
+// 8.3.4, 8.4.3, 8.4.4) and requires it of an N-component LUT-based Display
+// profile (8.4.2), so C5 reported a profile doing what the specification
+// demands as carrying a "standard tag outside the local class rule table".
+// C4 does not require it for 8.4.2: by class alone it cannot tell a LUT-based
+// Display profile from a matrix-based one.  It cannot go in kCommonOptional,
+// which every class reads, or in kMatrixTrcAlternative, C4's any-of set, where
+// it would let C4 pass an Input or Display profile with no forward transform.
+static const icTagSignature kInputDisplayOptional[] = {
+  PAWG_COMMON_OPTIONAL_TAGS,
+  icSigDToB3Tag,
+  icSigBToD3Tag,
+  icSigBToA0Tag
+};
+
+#undef PAWG_COMMON_OPTIONAL_TAGS
 
 bool ContainsTag(const icTagSignature *tags, size_t count, icTagSignature sig)
 {
@@ -1188,21 +1306,21 @@ const RuleTable *GetRuleTable(icProfileClassSignature cls)
   static const RuleTable inputRule = {
     kCommonRequired, CountOf(kCommonRequired),
     kMatrixTrcAlternative, CountOf(kMatrixTrcAlternative),
-    kCommonOptional, CountOf(kCommonOptional),
+    kInputDisplayOptional, CountOf(kInputDisplayOptional),
     "A2B0 or matrix/TRC transform",
     "ICC.1-2022-05 section 8.2"
   };
   static const RuleTable displayRule = {
     kCommonRequired, CountOf(kCommonRequired),
     kMatrixTrcAlternative, CountOf(kMatrixTrcAlternative),
-    kCommonOptional, CountOf(kCommonOptional),
+    kInputDisplayOptional, CountOf(kInputDisplayOptional),
     "A2B0 or matrix/TRC transform",
     "ICC.1-2022-05 section 8.3"
   };
   static const RuleTable outputRule = {
     kOutputRequired, CountOf(kOutputRequired),
     NULL, 0,
-    kCommonOptional, CountOf(kCommonOptional),
+    kOutputColorSpaceOptional, CountOf(kOutputColorSpaceOptional),
     NULL,
     "ICC.1-2022-05 section 8.4"
   };
@@ -1216,7 +1334,7 @@ const RuleTable *GetRuleTable(icProfileClassSignature cls)
   static const RuleTable colorSpaceRule = {
     kA2B0B2A0Required, CountOf(kA2B0B2A0Required),
     NULL, 0,
-    kCommonOptional, CountOf(kCommonOptional),
+    kOutputColorSpaceOptional, CountOf(kOutputColorSpaceOptional),
     NULL,
     "ICC.1-2022-05 section 8.6"
   };
@@ -1302,7 +1420,10 @@ bool HasRequiredTags(CIccProfile *pIcc, std::string &detail)
   const size_t nMaxRuleTags = 64;
   size_t nReq = (rule->requiredCount > nMaxRuleTags) ? nMaxRuleTags : rule->requiredCount;
   for (size_t i = 0; i < nReq; ++i) {
-    requireTag(rule->required[i], SigString(rule->required[i]).c_str());
+    icTagSignature sig = rule->required[i];
+    if (sig == icSigNamedColor2Tag)
+      sig = NamedColorTagFor(pIcc);
+    requireTag(sig, SigString(sig).c_str());
   }
 
   if (!HasAnyRequiredAlternative(pIcc, *rule)) {
@@ -1379,15 +1500,47 @@ PawgVerdict TagTypeAllowedVerdict(CIccProfile *pIcc, std::string &detail)
     return PawgVerdict::NotRun;
   }
 
+  // C3 asks about tag types alone.  Validate() also reports on the header, the
+  // required tags and every tag's contents, so its status and first line put
+  // any validation finding under C3: a negative colorant Z, which C1 already
+  // reports, showed here as a tag-type warning (#2806).  CheckTagTypes() is the
+  // step of Validate() that answers this question.
   std::string report;
-  const icValidateStatus status = pIcc->Validate(report);
+  const icValidateStatus status = pIcc->CheckTagTypes(report);
   if (status == icValidateOK) {
-    detail = "profile validation confirms tag signatures use allowed tag types";
+    detail = "tag signatures use allowed tag types";
   }
   else {
-    detail = FirstReportLine(report);
+    detail = FirstReportLineAt(report, status);
   }
   return ValidationStatusVerdict(status);
+}
+
+// What Validate() finds about the profile as a whole, when it is worse than
+// anything the tags (C1) or their types (C3) account for: a header field, a
+// tag the library requires, duplicate tags.  Such a finding belongs to no tag,
+// so the per-tag pass does not see it.  C3 showed it while it reported
+// Validate()'s whole verdict; C1, which already carries a critical finding of
+// this kind, carries the rest now, so narrowing C3 loses no verdict (#2080).
+bool WholeProfileFinding(CIccProfile *pIcc, PawgVerdict tagVerdict, PawgVerdict &verdict, std::string &detail)
+{
+  if (!pIcc)
+    return false;
+
+  std::string typeReport;
+  const PawgVerdict typeVerdict = ValidationStatusVerdict(pIcc->CheckTagTypes(typeReport));
+
+  std::string report;
+  const icValidateStatus status = pIcc->Validate(report);
+  const PawgVerdict whole = ValidationStatusVerdict(status);
+
+  // Ok < Warn < Fail in the enum; nothing here yields the other verdicts.
+  if (whole <= tagVerdict || whole <= typeVerdict)
+    return false;
+
+  verdict = whole;
+  detail = "IccProfLib validation: " + FirstReportLineAt(report, status);
+  return true;
 }
 
 // True for the three DEFLATE-backed tag TYPE signatures.  The compression
@@ -1608,7 +1761,9 @@ PawgVerdict TagsVersionVerdict(CIccProfile *pIcc, std::string &detail)
 
   if (version < 0x05000000 &&
       HasAnyTag(pIcc, {
-        icSigAToB3Tag, icSigBToA3Tag, icSigDToB3Tag, icSigBToD3Tag,
+        // DToB3Tag and BToD3Tag are not here: ICC.1:2022 defines them (9.2.27
+        // and 9.2.12).  AToB3Tag and BToA3Tag are ICC.2's.
+        icSigAToB3Tag, icSigBToA3Tag,
         icSigBRDFMToB0Tag, icSigBRDFMToB1Tag, icSigBRDFMToB2Tag,
         icSigBRDFMToB3Tag, icSigBRDFAToB0Tag, icSigBRDFAToB1Tag,
         icSigBRDFAToB2Tag, icSigBRDFAToB3Tag
@@ -1918,6 +2073,8 @@ PawgVerdict QualityCharacterization(CIccProfile *pIcc, std::string &detail)
                 kCharacterizationWarnAvg, kCharacterizationWarnMax,
                 kCharacterizationFailAvg, kCharacterizationFailMax);
   detail = buf;
+  if (metrics.viaDToBx)
+    detail += "; forward transform taken from the DToBx tags (no AToBx, matrix/TRC or grayTRC present)";
   if (metrics.avgDe00 > kCharacterizationFailAvg ||
       metrics.maxDe00 > kCharacterizationFailMax) {
     return PawgVerdict::Fail;
@@ -1929,7 +2086,9 @@ PawgVerdict QualityCharacterization(CIccProfile *pIcc, std::string &detail)
   return PawgVerdict::Ok;
 }
 
-std::vector<PawgItem> EvaluatePawg(const RawProfile &raw, CIccProfile *pIcc)
+std::vector<PawgItem> EvaluatePawg(const RawProfile &raw, CIccProfile *pIcc,
+                                   icValidateStatus validationStatus,
+                                   const std::string &validationReport)
 {
   std::vector<PawgItem> items;
   const uint64_t fileSize = raw.data.size();
@@ -2076,7 +2235,16 @@ std::vector<PawgItem> EvaluatePawg(const RawProfile &raw, CIccProfile *pIcc)
           compressionDetail);
 
   std::string tagValueDetail;
-  PawgVerdict tagValueVerdict = TagValueEncodingVerdict(pIcc, tagValueDetail);
+  PawgVerdict tagValueVerdict;
+  if (validationStatus == icValidateCriticalError) {
+    tagValueVerdict = PawgVerdict::Fail;
+    tagValueDetail = "IccProfLib critical validation: " + FirstCriticalReportLine(validationReport);
+  }
+  else {
+    tagValueVerdict = TagValueEncodingVerdict(pIcc, tagValueDetail);
+    if (tagValueVerdict == PawgVerdict::Ok || tagValueVerdict == PawgVerdict::Warn)
+      WholeProfileFinding(pIcc, tagValueVerdict, tagValueVerdict, tagValueDetail);
+  }
   AddItem(items, "C1",
           "Are tag types correctly encoded (signature, structure, data types, ranges, encoded values)?",
           tagValueVerdict,
@@ -2108,7 +2276,10 @@ std::vector<PawgItem> EvaluatePawg(const RawProfile &raw, CIccProfile *pIcc)
   if (pIcc) {
     icProfileClassSignature cls = (icProfileClassSignature)pIcc->m_Header.deviceClass;
     for (TagEntryList::iterator it = pIcc->m_Tags.begin(); it != pIcc->m_Tags.end(); ++it) {
-      if (IsSpecTag(it->TagInfo.sig) && !IsAllowedForClass(cls, it->TagInfo.sig)) {
+      icTagSignature ruleSig = it->TagInfo.sig;
+      if (ruleSig == NamedColorTagFor(pIcc))
+        ruleSig = icSigNamedColor2Tag;
+      if (IsSpecTag(it->TagInfo.sig) && !IsAllowedForClass(cls, ruleSig)) {
         if (extraTags) {
           extraTagDetail << ", ";
         }
@@ -2403,16 +2574,14 @@ int DumpPawgReport(const char *szFilename, bool bJson)
   RawProfile raw;
   LoadRawProfile(szFilename, raw);
 
-  // sReport/nStatus exist only to satisfy ValidateIccProfile's out-parameters:
-  // this entry point reports the PAWG checklist, not the validation log, and the
-  // checklist derives its own verdict from the profile.  TagTypeAllowedVerdict()
-  // re-runs Validate() on the parsed profile and turns that status into the C-item
-  // the report actually prints, so nothing downstream of here reads either local.
+  // Preserve the library verdict even when parsing fails. Raw checks still run,
+  // but a critical validation result is an unusable profile and therefore makes
+  // C1 fail instead of allowing the report to succeed with only NOT RUN items.
   std::string sReport;
   icValidateStatus nStatus = icValidateOK;
   CIccProfile *pIcc = ValidateIccProfile(szFilename, sReport, nStatus);
 
-  std::vector<PawgItem> items = EvaluatePawg(raw, pIcc);
+  std::vector<PawgItem> items = EvaluatePawg(raw, pIcc, nStatus, sReport);
 
   if (bJson) {
     PrintJsonReport(szFilename, raw, pIcc, items);
@@ -2427,7 +2596,21 @@ int DumpPawgReport(const char *szFilename, bool bJson)
   printf("            Goals for profile assessment\n");
   printf("URL:        %s\n", kPawgUrl);
   printf("Tool:       iccPawgReport (IccProfLib " ICCPROFLIBVER ")\n");
-  printf("Profile:    %s\n", szFilename ? szFilename : "(null)");
+  // #2414: the report header echoes the operand, so a path carrying terminal
+  // control sequences reached the console verbatim (#2406).
+  //
+  // The JSON writer above used NOT to be equivalent cover: icJsonEscape()
+  // escaped ESC as \u001b but appended well-formed UTF-8 unchanged, so U+202E
+  // RIGHT-TO-LEFT OVERRIDE and the C1 controls still reached a terminal that
+  // cats the --json output.  That was filed as #2454 rather than fixed here,
+  // because widening a shared helper changes every JSON consumer's input.
+  //
+  // #2454 has since landed: icJsonEscape() (Tools/CmdLine/IccCmdLineUtil.h) now
+  // escapes by codepoint using the same icDecodeUtf8() this text path reaches
+  // through icSanitizeConsoleText(), so both sinks carry one whitelist and the
+  // JSON output is pure ASCII.  The two paths agree; neither is a gap.
+  printf("Profile:    %s\n",
+         szFilename ? icSanitizeConsoleText(szFilename).c_str() : "(null)");
   printf("Size:       %zu bytes\n", raw.data.size());
   printf("Load:       %s\n", pIcc ? "parsed by IccProfLib" : "raw checks only; IccProfLib parse failed");
   printf("\n");
@@ -2483,7 +2666,7 @@ int AssessPawgFromMemory(const unsigned char *data, size_t size)
       ? ValidateIccProfile((const icUInt8Number *)data, (icUInt32Number)size, sReport, nStatus)
       : nullptr;
 
-  std::vector<PawgItem> items = EvaluatePawg(raw, pIcc);
+  std::vector<PawgItem> items = EvaluatePawg(raw, pIcc, nStatus, sReport);
   const bool fail = HasFail(items);
   delete pIcc;
   return fail ? 1 : 0;

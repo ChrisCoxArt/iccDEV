@@ -60,6 +60,8 @@ iccFromXml Rec2020rgbSpectral.xml Rec2020rgbSpectral.icc
 iccFromXml Rec2100HlgFull.xml Rec2100HlgFull.icc
 iccFromXml Rec2100HlgNarrow.xml Rec2100HlgNarrow.icc
 iccFromXml RgbGSDF.xml RgbGSDF.icc
+iccFromXml SpectralObserverElements.xml SpectralObserverElements.icc
+iccFromXml SpectralRangeTags.xml SpectralRangeTags.icc
 iccFromXml sRGB_D65_MAT-300cdm2.xml sRGB_D65_MAT-300cdm2.icc
 iccFromXml sRGB_D65_MAT-500cdm2.xml sRGB_D65_MAT-500cdm2.icc
 iccFromXml sRGB_D65_MAT.xml       sRGB_D65_MAT.icc
@@ -111,6 +113,7 @@ goto end_Named
 iccFromXml FluorescentNamedColor.xml FluorescentNamedColor.icc
 iccFromXml NamedColor.xml NamedColor.icc
 iccFromXml SparseMatrixNamedColor.xml SparseMatrixNamedColor.icc
+iccFromXml SparseMatrixNamedColorTint.xml SparseMatrixNamedColorTint.icc
 iccFromXml NamedColorV4.xml NamedColorV4.icc
 @echo off
 :end_Named
@@ -144,6 +147,7 @@ goto end_Flexo-CMYKOGP
 :do_Flexo-CMYKOGP
 @echo on
 iccFromXml 4ChanSelect-MID.xml 4ChanSelect-MID.icc
+iccFromXml 4ChanLink-MLNK.xml 4ChanLink-MLNK.icc
 iccFromXml 7ChanSelect-MID.xml 7ChanSelect-MID.icc
 iccFromXml CGYK-SelectMID.xml  CGYK-SelectMID.icc
 iccFromXml CMPK-SelectMID.xml  CMPK-SelectMID.icc
@@ -247,6 +251,23 @@ iccFromXml RefIncW.xml RefIncW.icc
 @echo off
 REM RefEstimationImport.xml is not a standalone XML file
 :end_SpecRef
+
+cd ..
+
+cd HDR
+if not "%1"=="clean" goto do_HDR
+del /F/Q *.icc 2>NUL:
+goto end_HDR
+:do_HDR
+REM #2328: HDR\mkprofiles.bat already builds exactly these ten profiles, so call it
+REM rather than keeping a second copy of the same command list here -- a duplicate
+REM list drifts silently and leaves iccdev.qa-profile-manifest short a profile or a
+REM manifest row depending on which copy was edited. CALL is required: invoking a
+REM .bat without it transfers control and never returns to this script.
+@echo on
+call .\mkprofiles.bat
+@echo off
+:end_HDR
 
 cd ..
 

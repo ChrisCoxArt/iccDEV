@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2010 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #ifndef ICC_CMD_LINE_UTIL_H
 #define ICC_CMD_LINE_UTIL_H
 
@@ -168,6 +144,12 @@ inline std::string icSanitizeFileName(const std::string& text)
 // start one.  This is Unicode 15.0 table 3-7 verbatim, so it rejects the things
 // a naive "0xC0-0xFF starts a sequence" test lets through: over-long encodings,
 // UTF-16 surrogates (ED A0..BF), and anything above U+10FFFF.
+//
+// RETAINED DELIBERATELY, do not remove as dead code: #2454 moved icJsonEscape()
+// -- its only in-tree caller -- onto icDecodeUtf8(), so nothing in this repo
+// calls this any more.  It ships in the installed public header, so dropping it
+// is an API change for downstream consumers and needs a maintainer call rather
+// than a dead-code sweep.
 inline size_t icUtf8SequenceLength(const unsigned char* p)
 {
   const unsigned char c = p[0];
@@ -205,23 +187,35 @@ inline size_t icUtf8SequenceLength(const unsigned char* p)
 
 // Escape a string for use as a JSON string value.
 //
-// Bytes at or above 0x80 are passed through when, and only when, they form a
-// well-formed UTF-8 sequence.  Both halves of that rule are load-bearing (#1853):
+// A byte at or above 0x80 is decoded to its CODE POINT and escaped as \uXXXX
+// (a surrogate pair above the BMP).  #1853 and #2454 each rule out one of the
+// two simpler options, and the distinction between them is load-bearing:
 //
-//   - Escaping them as \u00XX, which PawgReport.cpp used to do, reads a UTF-8
-//     byte as if it were a code point.  U+00E9 is the two bytes C3 A9, which
-//     come out as \u00c3\u00a9 -- the two code points U+00C3 U+00A9 -- so
-//     "cafe" with an acute e reads back with two wrong characters in its place.
-//     The document is valid JSON and the text in it is wrong.
-//   - Passing them through unconditionally is no better.  A JSON text must be
+//   - Escaping each BYTE as \u00XX, which PawgReport.cpp used to do, reads a
+//     UTF-8 byte as if it were a code point.  U+00E9 is the two bytes C3 A9,
+//     which come out as \u00c3\u00a9 -- the two code points U+00C3 U+00A9 --
+//     so "cafe" with an acute e reads back with two wrong characters in its
+//     place.  The document is valid JSON and the text in it is wrong (#1853).
+//     Escaping by code point is NOT that mistake: U+00E9 becomes \u00e9, one
+//     escape, and it decodes back to the character that went in.
+//   - Passing a well-formed sequence through unchanged is what this used to do,
+//     and it left the JSON sinks emitting live U+202E RIGHT-TO-LEFT OVERRIDE
+//     and the C1 controls while the text sink escaped the same name -- one
+//     input, two sinks, opposite answers (#2454).  A JSON text must also be
 //     valid UTF-8 (RFC 8259 section 8.1), and these strings include paths taken
 //     straight from argv, which on POSIX are byte strings that need not be UTF-8
-//     at all.  A Latin-1 filename would put a lone 0xE9 inside a string and the
+//     at all; a Latin-1 filename would put a lone 0xE9 inside a string and the
 //     document would not decode.
 //
-// A byte that is not part of a well-formed sequence is therefore replaced with
-// U+FFFD.  Substituting \u00XX instead would assert the byte was Latin-1, which
-// is a guess; U+FFFD records that the input was not text, which is the fact.
+// Escaping by code point settles both: the output is pure ASCII, so it is valid
+// UTF-8 by construction, and it decodes back to exactly the input text.
+//
+// A byte that is not part of a well-formed sequence is replaced with U+FFFD.
+// Substituting \u00XX instead would assert the byte was Latin-1, which is a
+// guess; U+FFFD records that the input was not text, which is the fact.
+//
+// DEL (0x7F) is escaped too, so that this sink and icSanitizeConsoleText()
+// agree on the whole control set rather than only on the parts above 0x80.
 inline std::string icJsonEscape(const char* szText)
 {
   static const char hex[] = "0123456789abcdef";
@@ -274,24 +268,71 @@ inline std::string icJsonEscape(const char* szText)
       continue;
     }
 
+    // #2454: DEL is terminal-active and icSanitizeConsoleText() escapes it, so
+    // letting it through here would leave exactly the sink-divergence this fix
+    // is filed against, just at 0x7F instead of above 0x80.
+    if (ch == 0x7f) {
+      result += "\\u007f";
+      p++;
+      continue;
+    }
+
     if (ch < 0x80) {
       result += (char)ch;
       p++;
       continue;
     }
 
-    // icUtf8SequenceLength() reads up to three bytes past p.  That is safe here
-    // because it stops at the first byte outside the continuation range, and the
-    // terminating NUL is outside it -- a truncated sequence at the end of the
-    // string returns 0 rather than reading past the terminator.
-    size_t len = icUtf8SequenceLength(p);
-    if (!len) {
+    // #2454: escape non-ASCII by codepoint instead of appending it verbatim.
+    // Well-formed UTF-8 used to be copied through unchanged, so --json and
+    // --evidence-json still emitted U+202E RIGHT-TO-LEFT OVERRIDE and the C1
+    // controls -- the exact codepoints the text sink has escaped since #2419,
+    // and the ones #2437 re-spelled by codepoint.  One name reached two sinks
+    // and got opposite answers.
+    //
+    // This is transparent to a machine consumer: the raw bytes and the \uXXXX
+    // escape are the same string to any conformant JSON parser (RFC 8259 s7).
+    // What changes is that a human cat-ing the output no longer receives live
+    // terminal-active codepoints (CVE-2021-42574).  Output is now pure ASCII.
+    //
+    // icDecodeUtf8() is the decoder #2437 added, so both sinks now share one
+    // whitelist rather than two implementations of the same table.  It reads up
+    // to three bytes past p, which is safe for the same reason the previous
+    // length helper was: it stops at the first byte outside the continuation
+    // range, and the terminating NUL is outside it, so a truncated sequence at
+    // the end of the string returns 0 rather than reading past the terminator.
+    unsigned int cp = 0;
+    int len = icDecodeUtf8(p, &cp);
+    if (len < 1) {
       result += "\\ufffd";
       p++;
       continue;
     }
 
-    result.append((const char*)p, len);
+    // JSON has no \U escape.  A codepoint above the BMP must be spelled as a
+    // UTF-16 surrogate pair, which is why this cannot reuse the text sink's
+    // \U0001F600 spelling from icSanitizeConsoleText() -- that is valid there
+    // and would be invalid JSON here.
+    if (cp > 0xffffu) {
+      const unsigned int v = cp - 0x10000u;
+      const unsigned int hiSur = 0xd800u + (v >> 10);
+      const unsigned int loSur = 0xdc00u + (v & 0x3ffu);
+      int shift;
+
+      result += "\\u";
+      for (shift = 12; shift >= 0; shift -= 4)
+        result += hex[(hiSur >> shift) & 0xfu];
+      result += "\\u";
+      for (shift = 12; shift >= 0; shift -= 4)
+        result += hex[(loSur >> shift) & 0xfu];
+    }
+    else {
+      int shift;
+
+      result += "\\u";
+      for (shift = 12; shift >= 0; shift -= 4)
+        result += hex[(cp >> shift) & 0xfu];
+    }
     p += len;
   }
 
@@ -308,7 +349,8 @@ inline ICC_CMDLINE_NO_SANITIZE_INTEGER unsigned int icSha256Rotr(unsigned int x,
   return (x >> n) | (x << (32 - n));
 }
 
-inline ICC_CMDLINE_NO_SANITIZE_INTEGER std::string icSha256Bytes(const unsigned char* data, size_t len)
+inline ICC_CMDLINE_NO_SANITIZE_INTEGER void icSha256Block(
+    unsigned int h[8], const unsigned char* block)
 {
   static const unsigned int k[64] = {
     0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
@@ -328,26 +370,13 @@ inline ICC_CMDLINE_NO_SANITIZE_INTEGER std::string icSha256Bytes(const unsigned 
     0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
     0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U
   };
-  unsigned int h[8] = {
-    0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-    0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U
-  };
-  std::vector<unsigned char> msg(data, data + len);
-  unsigned long long bitLen = (unsigned long long)len * 8ULL;
-  msg.push_back(0x80);
-  while ((msg.size() % 64) != 56)
-    msg.push_back(0);
-  for (int i = 7; i >= 0; i--)
-    msg.push_back((unsigned char)((bitLen >> (i * 8)) & 0xff));
-
-  for (size_t chunk = 0; chunk < msg.size(); chunk += 64) {
     unsigned int w[64];
     for (int i = 0; i < 16; i++) {
-      size_t j = chunk + (size_t)i * 4;
-      w[i] = ((unsigned int)msg[j] << 24) |
-             ((unsigned int)msg[j + 1] << 16) |
-             ((unsigned int)msg[j + 2] << 8) |
-             ((unsigned int)msg[j + 3]);
+      size_t j = (size_t)i * 4;
+      w[i] = ((unsigned int)block[j] << 24) |
+             ((unsigned int)block[j + 1] << 16) |
+             ((unsigned int)block[j + 2] << 8) |
+             ((unsigned int)block[j + 3]);
     }
     for (int i = 16; i < 64; i++) {
       unsigned int s0 = icSha256Rotr(w[i - 15], 7) ^
@@ -379,13 +408,34 @@ inline ICC_CMDLINE_NO_SANITIZE_INTEGER std::string icSha256Bytes(const unsigned 
     }
     h[0] += a; h[1] += b; h[2] += c; h[3] += d;
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-  }
+}
 
+inline std::string icSha256Hex(const unsigned int h[8])
+{
   std::ostringstream out;
   out << "sha256:";
   for (int i = 0; i < 8; i++)
     out << std::hex << std::setfill('0') << std::setw(8) << h[i];
   return out.str();
+}
+
+inline ICC_CMDLINE_NO_SANITIZE_INTEGER std::string icSha256Bytes(const unsigned char* data, size_t len)
+{
+  unsigned int h[8] = {
+    0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+    0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U
+  };
+  std::vector<unsigned char> msg(data, data + len);
+  const unsigned long long bitLen = (unsigned long long)len * 8ULL;
+  msg.push_back(0x80);
+  while ((msg.size() % 64) != 56)
+    msg.push_back(0);
+  for (int i = 7; i >= 0; i--)
+    msg.push_back((unsigned char)((bitLen >> (i * 8)) & 0xff));
+
+  for (size_t chunk = 0; chunk < msg.size(); chunk += 64)
+    icSha256Block(h, msg.data() + chunk);
+  return icSha256Hex(h);
 }
 
 inline bool icReadFileBytes(const char* path, std::vector<unsigned char>& bytes)
@@ -408,14 +458,55 @@ inline bool icReadFileBytes(const char* path, std::vector<unsigned char>& bytes)
   return ok;
 }
 
-inline bool icSha256File(const char* path, std::string& digest)
+inline ICC_CMDLINE_NO_SANITIZE_INTEGER bool icSha256File(
+    const char* path, std::string& digest)
 {
-  std::vector<unsigned char> bytes;
-  if (!icReadFileBytes(path, bytes))
+  if (!path || !path[0])
+    return false;
+  FILE* f = fopen(path, "rb");
+  if (!f)
     return false;
 
-  digest = icSha256Bytes(bytes.empty() ? (const unsigned char*)"" : &bytes[0],
-                         bytes.size());
+  unsigned int h[8] = {
+    0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+    0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U
+  };
+  unsigned char block[64];
+  size_t used = 0;
+  unsigned long long totalBytes = 0;
+  unsigned char readBuffer[4096];
+  size_t n;
+  while ((n = fread(readBuffer, 1, sizeof(readBuffer), f)) > 0) {
+    totalBytes += (unsigned long long)n;
+    for (size_t offset = 0; offset < n;) {
+      const size_t take = (n - offset < sizeof(block) - used)
+        ? n - offset : sizeof(block) - used;
+      memcpy(block + used, readBuffer + offset, take);
+      used += take;
+      offset += take;
+      if (used == sizeof(block)) {
+        icSha256Block(h, block);
+        used = 0;
+      }
+    }
+  }
+  const bool readOk = ferror(f) == 0;
+  fclose(f);
+  if (!readOk)
+    return false;
+
+  block[used++] = 0x80;
+  if (used > 56) {
+    memset(block + used, 0, sizeof(block) - used);
+    icSha256Block(h, block);
+    used = 0;
+  }
+  memset(block + used, 0, 56 - used);
+  const unsigned long long bitLen = totalBytes * 8ULL;
+  for (int i = 7; i >= 0; i--)
+    block[56 + (7 - i)] = (unsigned char)((bitLen >> (i * 8)) & 0xff);
+  icSha256Block(h, block);
+  digest = icSha256Hex(h);
   return true;
 }
 

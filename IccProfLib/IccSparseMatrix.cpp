@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 #include "IccSparseMatrix.h"
 
 #include <cstring>
@@ -301,15 +330,32 @@ bool CIccSparseMatrix::MultiplyVector(icFloatNumber *pResult, const icFloatNumbe
 
   int r;
   icUInt32Number e, le;
-  icUInt16Number *ci=m_ColumnIndices;
 
+  // The row starts and column indices walked below come from the matrix data, which is
+  // pixel content on the CIccPcsStepSrcSparseMatrix path, so bound them here rather than
+  // trusting a caller to have validated them (#2581).
+  //
+  // Note the walk starts at slot 0 rather than at m_RowStart[0]: nothing requires a run
+  // of row starts to begin at zero, and the leading slots are read as row 0's entries,
+  // so they are bounded like every other entry (#2581 review).
   for (r=0, e=0; r<(int)m_nRows; r++) {
     icFloatNumber v=0.0f;
 
     le = m_RowStart[r+1];
 
-    for (; e<le; e++, ci++) {
-      v += m_Data->get(e)*pVector[*ci];
+    // m_nMaxEntries is the number of entry slots Init() sized from the raw buffer.
+    if (le>m_nMaxEntries)
+      return false;
+
+    for (; e<le; e++) {
+      // Column indices are zero-based, so m_nCols is one past the last column, and
+      // pVector holds m_nCols values by contract.
+      icUInt16Number c = m_ColumnIndices[e];
+
+      if (c>=m_nCols)
+        return false;
+
+      v += m_Data->get(e)*pVector[c];
     }
     pResult[r]=v;
   }
@@ -323,7 +369,16 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
     return false;
 
   if (mtx1.m_nRows != m_nRows || mtx2.m_nCols != m_nCols) {
-    if (!Init(mtx1.m_nRows, mtx2.m_nCols))
+    // bSetData=true: Init() otherwise allocates the accessor and points m_RowStart and
+    // m_ColumnIndices into the destination buffer without writing the two leading words
+    // that carry the row and column counts.  This function is the only thing that sizes
+    // that buffer, so leaving them unwritten produced a result whose shape no reader
+    // could recover -- every consumer takes the dimensions from those words, including
+    // the bInitFromData constructor CIccPcsStepSrcSparseMatrix::Apply() uses, which then
+    // saw a 0x0 matrix and silently multiplied nothing.  Reached from
+    // CIccTagSparseMatrixArray::Interpolate(), the tint path for a sparse-matrix named
+    // colour, whose entire output is this matrix.
+    if (!Init(mtx1.m_nRows, mtx2.m_nCols, /*bSetData=*/true))
       return false;
   }
 
@@ -335,7 +390,12 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
     fA = (int)mtx1.m_RowStart[r];
     fB = (int)mtx2.m_RowStart[r];
     nA = (int)(mtx1.m_RowStart[r+1] - fA);
-    nB = (int)(mtx2.m_RowStart[r+1] - fA);
+    // fB, not fA: this is mtx2's entry count for this row, so it must be measured from
+    // mtx2's own row offset.  Subtracting mtx1's made nB wrong by however far the two
+    // sparsity patterns had diverged -- zero only while both carry the identical
+    // pattern, which is exactly why interpolating two same-shaped matrices looked
+    // correct and two real ones did not.
+    nB = (int)(mtx2.m_RowStart[r+1] - fB);
 
     m_RowStart[r] = (icUInt16Number)pos;
 
@@ -376,6 +436,12 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
 
           m_ColumnIndices[pos] = iA;
           m_Data->set(pos, d1 * mtx1.m_Data->get(offA));
+          // Neither tail advanced i/j or pos, so once one side of a row ran out the
+          // while(i<nA || j<nB) condition could never change: the loop spun forever
+          // rewriting the same entry.  Only reachable when the two rows hold different
+          // column sets, so no same-shaped pair ever hit it.
+          i++;
+          pos++;
         }
         else {
           offB = fB+j;
@@ -383,6 +449,8 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
 
           m_ColumnIndices[pos] = iB;
           m_Data->set(pos, d2 * mtx2.m_Data->get(offB));
+          j++;
+          pos++;
         }
       }
     }
@@ -390,7 +458,10 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
       if (pos+nA >= m_nMaxEntries)
         return false;
 
-      memcpy(&m_ColumnIndices[pos], &mtx1.m_ColumnIndices[fA], nA);
+      // nA is an entry count; memcpy() wants bytes.  Copying nA bytes moved only half
+      // the column indices (and none of the upper index bytes), leaving the rest of the
+      // row pointing at whatever the destination buffer already held.
+      memcpy(&m_ColumnIndices[pos], &mtx1.m_ColumnIndices[fA], nA*sizeof(icUInt16Number));
       
       for (i=0; i<nA; i++) {
         m_Data->set(pos++, d1 * mtx1.m_Data->get(fA+i));
@@ -400,13 +471,21 @@ bool CIccSparseMatrix::Interp(icFloatNumber d1, const CIccSparseMatrix &mtx1, ic
       if (pos+nB >= m_nMaxEntries)
         return false;
 
-      memcpy(&m_ColumnIndices[pos], &mtx2.m_ColumnIndices[fB], nB);
+      memcpy(&m_ColumnIndices[pos], &mtx2.m_ColumnIndices[fB], nB*sizeof(icUInt16Number));
 
       for (i=0; i<nB; i++) {
         m_Data->set(pos++, d2 * mtx2.m_Data->get(fB+i));
       }
     }
-    m_RowStart[r]=(icUInt16Number)pos;
+    // [r+1], not [r]: this is the row's END offset, and the CSR convention every reader
+    // here follows is that m_RowStart[r]..m_RowStart[r+1] bracket row r.  Writing it back
+    // to [r] clobbered the start this iteration had just set, so each row's stored start
+    // became the previous row's end -- MultiplyVector(), which reads m_RowStart[r+1] as
+    // the row limit, then folded rows 0 and 1 into result[0] and shifted every later row
+    // down by one, while m_RowStart[m_nRows] was never written at all so the final row
+    // read a stale terminator and came out 0.  Also supplies the terminator that
+    // GetNumEntries() reads.
+    m_RowStart[r+1]=(icUInt16Number)pos;
   }
 
   return true;
@@ -419,7 +498,11 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
     return false;
 
   if (mtx1.m_nRows != m_nRows || mtx2.m_nCols != m_nCols) {
-    if (!Init(mtx1.m_nRows, mtx2.m_nCols))
+    // bSetData=true: Init() otherwise points m_RowStart and m_ColumnIndices into the
+    // destination buffer without writing the two leading words that carry the row and
+    // column counts, and every reader recovers the shape from those -- so the union
+    // came back describing a 0x0 matrix.  Same fault, and same fix, as Interp().
+    if (!Init(mtx1.m_nRows, mtx2.m_nCols, /*bSetData=*/true))
       return false;
   }
 
@@ -431,7 +514,9 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
     fA = (int)mtx1.m_RowStart[r];
     fB = (int)mtx2.m_RowStart[r];
     nA = (int)(mtx1.m_RowStart[r+1] - fA);
-    nB = (int)(mtx2.m_RowStart[r+1] - fA);
+    // fB, not fA: mtx2's entry count for this row has to be measured from mtx2's own
+    // row offset.  Correct only while both patterns are identical.
+    nB = (int)(mtx2.m_RowStart[r+1] - fB);
 
     m_RowStart[r] = (icUInt16Number)pos;
 
@@ -472,6 +557,12 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
 
           m_ColumnIndices[pos] = iA;
           m_Data->set(pos, 1.0f);
+          // Neither tail advanced i/j or pos, so once one side of a row ran out the
+          // while(i<nA || j<nB) condition could never change: an infinite loop
+          // (CWE-835), reachable from CIccTagSparseMatrixArray::Validate() on any
+          // sparse tag holding two or more differently-patterned matrices.
+          i++;
+          pos++;
         }
         else {
           offB = fB+j;
@@ -479,6 +570,8 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
 
           m_ColumnIndices[pos] = iB;
           m_Data->set(pos, 1.0f);
+          j++;
+          pos++;
         }
       }
     }
@@ -486,7 +579,8 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
       if (pos+nA >= m_nMaxEntries)
         return false;
 
-      memcpy(&m_ColumnIndices[pos], &mtx1.m_ColumnIndices[fA], nA);
+      // nA is an entry count; memcpy() wants bytes.
+      memcpy(&m_ColumnIndices[pos], &mtx1.m_ColumnIndices[fA], nA*sizeof(icUInt16Number));
 
       for (i=0; i<nA; i++) {
         m_Data->set(pos++, 1.0f);
@@ -496,13 +590,17 @@ bool CIccSparseMatrix::Union(const CIccSparseMatrix &mtx1, const  CIccSparseMatr
       if (pos+nB >= m_nMaxEntries)
         return false;
 
-      memcpy(&m_ColumnIndices[pos], &mtx2.m_ColumnIndices[fB], nB);
+      memcpy(&m_ColumnIndices[pos], &mtx2.m_ColumnIndices[fB], nB*sizeof(icUInt16Number));
 
       for (i=0; i<nB; i++) {
         m_Data->set(pos++, 1.0f);
       }
     }
-    m_RowStart[r]=(icUInt16Number)pos;
+    // [r+1], not [r]: this is the row's END offset, and m_RowStart[r]..m_RowStart[r+1]
+    // bracket row r.  Writing it to [r] clobbered the start set above, shifted every
+    // row by one, and left m_RowStart[m_nRows] -- the terminator GetNumEntries()
+    // reads -- never written.
+    m_RowStart[r+1]=(icUInt16Number)pos;
   }
 
   return true;
@@ -515,6 +613,7 @@ bool CIccSparseMatrix::IsValid()
     return false;
 
   int r, i;
+
   for (r=0; r<(int)m_nRows; r++) {
     // Bound every row-start against the allocated column-index capacity BEFORE
     // m_RowStart[r+1] is used as the inner-loop bound below. A corrupt, non-
@@ -539,10 +638,12 @@ bool CIccSparseMatrix::IsValid()
       continue;
 
     for (i=m_RowStart[r]; i<(int)m_RowStart[r+1]-1; i++) {
-      if (m_ColumnIndices[i]>=m_ColumnIndices[i+1] || m_ColumnIndices[i]>m_nCols)
+      if (m_ColumnIndices[i]>=m_ColumnIndices[i+1] || m_ColumnIndices[i]>=m_nCols)
         return false;
     }
-    if (m_ColumnIndices[i]>m_nCols)
+    // Column indices are zero-based, so m_nCols itself is one past the last column
+    // (#2581).
+    if (m_ColumnIndices[i]>=m_nCols)
       return false;
   }
   return true;

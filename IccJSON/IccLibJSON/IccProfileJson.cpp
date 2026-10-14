@@ -10,58 +10,39 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #include "IccProfileJson.h"
 #include "IccTagJson.h"
 #include "IccUtilJson.h"
 #include "IccUtil.h"
 #include "IccTagFactory.h"
+#include "IccArrayBasic.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -301,7 +282,22 @@ bool CIccProfileJson::ToJson(std::string &jsonString, int indent)
 // represented in type icUInt32Number". atoi() is also undefined on an
 // out-of-range input, which a digit-by-digit parse of at most two digits cannot
 // hit.
-static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut)
+// bFractional marks the minor component, whose digits are positional: "5.1" is
+// five-and-one-TENTH, so the digit belongs in the high nibble as 0x10, matching
+// the canonical "5.10" that CIccInfo::GetVersionName writes.  Encoding it as the
+// integer 1 gave 0x01 -- 5.01 -- which is #2383.  The XML twin (parseVersion in
+// IccProfileXml.cpp) carries the identical SCALING rule and the same one-or-two
+// digit contract, so a version the two both accept encodes to the same header
+// word.  That is the guarantee -- NOT that the two accept the same inputs.  The
+// XML side is deliberately the more tolerant of the pair, and measurably so:
+//   - it trims surrounding whitespace, because element text is subject to
+//     pretty-printing ("<ProfileVersion>\n  5.10\n</ProfileVersion>");
+//   - it accepts ',' as a component separator, so "5,1" parses there and not here;
+//   - it accepts third and fourth components ("5.10.12.34"), which this parser
+//     hands to a single byte helper that refuses more than two characters.
+// Each of those yields 0 here, which GetVersionName renders as a plain "0.00".
+static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut,
+                               bool bFractional)
 {
   if (sPart.empty() || sPart.size() > 2)
     return false;
@@ -312,6 +308,11 @@ static bool icJsonParseBCDByte(const std::string &sPart, icUInt32Number &nOut)
       return false;
     v = v * 10 + (unsigned int)(sPart[i] - '0');
   }
+
+  // Keyed on the digit COUNT, not the value, so an explicit "05" still means
+  // five hundredths and stays 0x05 while a bare "5" becomes 0x50.
+  if (bFractional && sPart.size() == 1)
+    v *= 10;
 
   nOut = (icUInt32Number)(((v / 10) % 10) * 16 + (v % 10));
   return true;
@@ -332,7 +333,7 @@ static icUInt32Number icJsonParseBCDVersionStr(const char *szVer)
   for (; *szVer && *szVer != '.'; szVer++) part += *szVer;
 
   icUInt32Number hi = 0, lo = 0;
-  if (!icJsonParseBCDByte(part, hi))
+  if (!icJsonParseBCDByte(part, hi, false))
     return 0;
 
   part.clear();
@@ -341,13 +342,13 @@ static icUInt32Number icJsonParseBCDVersionStr(const char *szVer)
 
   // A missing minor component stays 0 ("4" == "4.0"), matching the previous
   // behaviour; a present but malformed one rejects the whole version.
-  if (!part.empty() && !icJsonParseBCDByte(part, lo))
+  if (!part.empty() && !icJsonParseBCDByte(part, lo, true))
     return 0;
 
   return (hi << 8) | lo;
 }
 
-bool CIccProfileJson::ParseBasic(const IccJson &header, std::string & /*parseStr*/)
+bool CIccProfileJson::ParseBasic(const IccJson &header, std::string &parseStr)
 {
   CIccInfo info;
 
@@ -413,20 +414,34 @@ bool CIccProfileJson::ParseBasic(const IccJson &header, std::string & /*parseStr
   if (jGetString(header, "SpectralPCS", str))
     m_Header.spectralPCS = (icColorSpaceSignature)icGetSigVal(str.c_str());
 
-  auto parseSpectralRange = [&](const char *field, icSpectralRange &range) {
+  // steps is the sample count of the whole spectral PCS, stored in a
+  // uInt16Number.  This cast narrowed it modulo 65536, so "steps": 65567
+  // was stored, and written back out, as 31 while iccFromJson reported
+  // success; the XML reader rejects the same value with a checked 16-bit
+  // parse (#2674).  Out of range, or not an integer, is a parse failure here
+  // too, with the XML reader's wording.
+  auto parseSpectralRange = [&](const char *field, icSpectralRange &range) -> bool {
     if (header.contains(field) && header[field].is_object()) {
       const IccJson &sr = header[field];
-      double start = 0, end = 0; int steps = 0;
+      double start = 0, end = 0;
       jGetValue(sr, "start", start);
       jGetValue(sr, "end",   end);
-      jGetValue(sr, "steps", steps);
       range.start = icFtoF16((icFloat32Number)start);
       range.end   = icFtoF16((icFloat32Number)end);
-      range.steps = (icUInt16Number)steps;
+      if (sr.contains("steps")) {
+        const IccJson &st = sr["steps"];
+        if (!st.is_number_integer() || st.get<long long>() < 0 || st.get<long long>() > 0xFFFF) {
+          parseStr += std::string("Invalid ") + field + " Wavelengths steps\n";
+          return false;
+        }
+        range.steps = (icUInt16Number)st.get<long long>();
+      }
     }
+    return true;
   };
-  parseSpectralRange("SpectralRange",   m_Header.spectralRange);
-  parseSpectralRange("BiSpectralRange", m_Header.biSpectralRange);
+  if (!parseSpectralRange("SpectralRange",   m_Header.spectralRange) ||
+      !parseSpectralRange("BiSpectralRange", m_Header.biSpectralRange))
+    return false;
 
   if (jGetString(header, "MCS", str))
     m_Header.mcs = (icMultiplexColorSignature)icGetSigVal(str.c_str());
@@ -485,6 +500,10 @@ bool CIccProfileJson::ParseTag(const std::string &key, const IccJson &tagValue,
       parseStr += "Unable to attach sameAs tag '" + key + "'\n";
       return false;
     }
+    //A shared tag takes the spaces of the signature it was last attached under,
+    //which is how the XML reader resolves a tag node carrying several
+    //TagSignature children.
+    SetTagColorSpaces(sig, pRefTag);
     keyToSig[key] = sig;
     return true;
   }
@@ -551,8 +570,85 @@ bool CIccProfileJson::ParseTag(const std::string &key, const IccJson &tagValue,
     return false;
   }
 
+  //A lut or named colour tag carries no colour spaces of its own: it takes them
+  //from the header of the profile it is attached to. The binary reader does this
+  //in LoadTag() and the XML reader at the end of ParseTag(); without it the tag
+  //keeps the constructor's zeroes, which Validate() then compares against the
+  //tag's real channel counts. Header is parsed before Tags, so m_Header is set.
+  SetTagColorSpaces(sig, pTag);
+
   keyToSig[key] = sig;
   return true;
+}
+
+/**
+******************************************************************************
+* Name: CIccProfileJson::SetTagColorSpaces
+*
+* Purpose: Give a freshly attached tag the header colour spaces its class needs,
+*  matching CIccProfileXml::ParseTag(). The XML set is used rather than the
+*  binary reader's because both are document readers: it carries AToB3/BToA3 and
+*  the HToS tags, which a v5 document can hold and the binary switch omits.
+*
+* Args:
+*  sig = the tag signature the tag was attached under
+*  pTag = the attached tag
+******************************************************************************/
+void CIccProfileJson::SetTagColorSpaces(icTagSignature sig, CIccTag *pTag)
+{
+  if (!pTag)
+    return;
+
+  switch (sig) {
+  case icSigAToB0Tag:
+  case icSigAToB1Tag:
+  case icSigAToB2Tag:
+  case icSigAToB3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.colorSpace, m_Header.pcs);
+    break;
+
+  case icSigBToA0Tag:
+  case icSigBToA1Tag:
+  case icSigBToA2Tag:
+  case icSigBToA3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
+    break;
+
+  case icSigHToS0Tag:
+  case icSigHToS1Tag:
+  case icSigHToS2Tag:
+  case icSigHToS3Tag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.pcs);
+    break;
+
+  case icSigGamutTag:
+    if (pTag->IsMBBType())
+      ((CIccMBB*)pTag)->SetColorSpaces(m_Header.pcs, icSigGamutData);
+    break;
+
+  case icSigNamedColorTag:
+  case icSigNamedColor2Tag:
+    if (pTag->GetType() == icSigNamedColor2Type) {
+      ((CIccTagNamedColor2*)pTag)->SetColorSpaces(m_Header.pcs, m_Header.colorSpace);
+    }
+    else if (pTag->GetTagArrayType() == icSigNamedColorArray) {
+      CIccArrayNamedColor *pAry = (CIccArrayNamedColor*)icGetTagArrayHandler(pTag);
+
+      if (pAry) {
+        pAry->SetColorSpaces(m_Header.pcs, m_Header.colorSpace,
+                             m_Header.spectralPCS,
+                             &m_Header.spectralRange,
+                             &m_Header.biSpectralRange);
+      }
+    }
+    break;
+
+  default:
+    break;
+  }
 }
 
 bool CIccProfileJson::ParseJson(const IccJson &root, std::string &parseStr)
@@ -588,9 +684,15 @@ bool CIccProfileJson::ParseJson(const IccJson &root, std::string &parseStr)
 
     KeyToSignatureMap keyToSig;
     for (const auto &entry : tags) {
+      // A failure, not a warning: this appended to parseStr and went on, and
+      // iccFromJson prints parseStr only when the load fails, so an entry
+      // with a second member was dropped, the requested tag never reached
+      // the profile, and the tool reported "parsed and saved correctly"
+      // (#2695).  The XML reader refuses a tag element with a second type
+      // child the same way.
       if (!entry.is_object() || entry.size() != 1) {
-        parseStr += "Warning: tag entry must be a single-member object, skipping\n";
-        continue;
+        parseStr += "Tags entry must be a single-member object\n";
+        return false;
       }
       auto it = entry.begin();
       const std::string &key   = it.key();

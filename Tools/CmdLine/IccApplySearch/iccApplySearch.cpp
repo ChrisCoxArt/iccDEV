@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2025 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
  ////////////////////////////////////////////////////////////////////// 
  // HISTORY:
  //
@@ -70,6 +46,7 @@
 
 
 #include "IccCmmSearch.h"
+#include "IccCmmThread.h"
 #include "IccUtil.h"
 #include "IccDefs.h"
 #include "IccMpeCalc.h"
@@ -78,6 +55,12 @@
 #include "IccSearch.h"
 #include "IccConnect.h"
 #include "IccCmdLineUtil.h"
+#ifdef ICCDEV_TELEMETRY
+#include "IccApplyTelemetry.h"
+#include "IccSameFile.h"
+#endif
+#include <cerrno>
+#include <cstring>  // strcmp, used by the -h/--help contract guard in main()
 #include <cstdlib>  // EXIT_FAILURE, used by the -cfg argument guard added in #2075
 #include <memory>
 #include <vector>
@@ -203,41 +186,49 @@ bool IsSpacePCS( const icColorSpaceSignature &x )
 }
 
 
-void Usage()
+void Usage(FILE* stream)
 {
-  printf("iccApplySearch built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
-  printf("Usage 1: iccApplySearch -cfg config_file_path\n");
-  printf("  Where config_file_path is a json formatted ICC profile application configuration file\n\n");
-  printf("Usage 2: iccApplySearch {-debugcalc} data_file_path encoding[:precision[:digits]] interpolation {-ENV:tag value} profile1_path intent1 {{-ENV:tag value} middle_profile_path mid_intent} {-ENV:tag value} profile2_path intent2 -INIT init_intent2 {pcc_path1 weight1 ...}\n");
+  fprintf(stream, "iccApplySearch built with IccProfLib version " ICCPROFLIBVER ", IccLibConnect Version " ICCLIBCONNECTVER "\n\n");
+  fprintf(stream, "Usage 1: iccApplySearch {--threads N} --cfg config_file_path\n");
+#ifdef ICCDEV_TELEMETRY
+  fprintf(stream, "  Global options, in any order: --telemetry=off|human|jsonl --telemetry-file FILE --evidence-file FILE\n");
+  fprintf(stream, "  --telemetry=jsonl requires --telemetry-file; human receipts use stderr.\n");
+#endif
+  fprintf(stream, "  Legacy single-dash forms remain accepted.\n");
+  fprintf(stream, "  Optional: --threads N (0=hardware concurrency, 1=single-threaded)\n");
+  fprintf(stream, "  Where config_file_path is a json formatted ICC profile application configuration file\n\n");
+  fprintf(stream, "Usage 2: iccApplySearch {-threads N} {-exportcfg|-exportcfganddata config_file_path} {-debugcalc} data_file_path encoding[:precision[:digits]] interpolation {-ENV:tag value} profile1_path intent1 {{-ENV:tag value} middle_profile_path mid_intent} {-ENV:tag value} profile2_path intent2 -INIT init_intent2 {pcc_path1 weight1 ...}\n");
+  fprintf(stream, "  -exportcfg writes the resolved configuration; -exportcfganddata also embeds input data for -cfg replay.\n");
+  fprintf(stream, "  Example: iccApplySearch -exportcfganddata search.json values.txt 0 1 src.icc 3 dst.icc 3 -INIT 3 pcc.icc 1\n");
   
-  printf("  For final_data_encoding:\n");
-  printf("    0 - icEncodeValue (converts to/from lab encoding when samples=3)\n");
-  printf("    1 - icEncodePercent\n");
-  printf("    2 - icEncodeUnitFloat (may clip to 0.0 to 1.0)\n");
-  printf("    3 - icEncodeFloat\n");
-  printf("    4 - icEncode8Bit\n");
-  printf("    5 - icEncode16Bit\n");
-  printf("    6 - icEncode16BitV2\n\n");
+  fprintf(stream, "  For final_data_encoding:\n");
+  fprintf(stream, "    0 - icEncodeValue (converts to/from lab encoding when samples=3)\n");
+  fprintf(stream, "    1 - icEncodePercent\n");
+  fprintf(stream, "    2 - icEncodeUnitFloat (may clip to 0.0 to 1.0)\n");
+  fprintf(stream, "    3 - icEncodeFloat\n");
+  fprintf(stream, "    4 - icEncode8Bit\n");
+  fprintf(stream, "    5 - icEncode16Bit\n");
+  fprintf(stream, "    6 - icEncode16BitV2\n\n");
 
-  printf("  FmtPrecision - formatting for # of digits after decimal (default=4)\n");
-  printf("  FmtDigits - formatting for total # of digits (default=5+FmtPrecision)\n\n");
+  fprintf(stream, "  FmtPrecision - formatting for # of digits after decimal (default=4)\n");
+  fprintf(stream, "  FmtDigits - formatting for total # of digits (default=5+FmtPrecision)\n\n");
 
-  printf("  For interpolation:\n");
-  printf("    0 - Linear\n");
-  printf("    1 - Tetrahedral\n\n");
+  fprintf(stream, "  For interpolation:\n");
+  fprintf(stream, "    0 - Linear\n");
+  fprintf(stream, "    1 - Tetrahedral\n\n");
 
-  printf("  For init_intent/intent1/intent2/mid_intent:\n");
-  printf("     0 - Perceptual\n");
-  printf("     1 - Relative\n");
-  printf("     2 - Saturation\n");
-  printf("     3 - Absolute\n");
-  printf("     10 + Intent - without D2Bx/B2Dx\n");
-  printf("     40 + Intent - with BPC\n");
-  printf("     90 + Intent - Colorimetric Only\n");
-  printf("    100 + Intent - Spectral Only\n");
-  printf(" +10000 - Use V5 sub-profile if present\n");
+  fprintf(stream, "  For init_intent/intent1/intent2/mid_intent:\n");
+  fprintf(stream, "     0 - Perceptual\n");
+  fprintf(stream, "     1 - Relative\n");
+  fprintf(stream, "     2 - Saturation\n");
+  fprintf(stream, "     3 - Absolute\n");
+  fprintf(stream, "     10 + Intent - without D2Bx/B2Dx\n");
+  fprintf(stream, "     40 + Intent - with BPC\n");
+  fprintf(stream, "     90 + Intent - Colorimetric Only\n");
+  fprintf(stream, "    100 + Intent - Spectral Only\n");
+  fprintf(stream, " +10000 - Use V5 sub-profile if present\n");
   
-  printf("\n");
+  fprintf(stream, "\n");
 }
 
 
@@ -246,17 +237,148 @@ void Usage()
 int main(int argc, const char* argv[])
 {
   int minargs = 3;  // name -cfg file.json
-  if (argc < minargs) {
-    Usage();
+#ifdef ICCDEV_TELEMETRY
+  icApplyTelemetryMode telemetryMode = icApplyTelemetryOff;
+  std::string telemetryFile;
+  std::string evidenceFile;
+#endif
+  int nThreads = 1;
+  bool bThreadOption = false;
+
+  // An explicit help request is the one invocation here that is not an error, so
+  // it prints on stdout and exits 0; every malformed form below prints on stderr
+  // and fails.  Once both paths print the same screen the stream is the only
+  // thing that separates them -- status alone cannot (#1514).
+  if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+    Usage(stdout);
     return 0;
+  }
+
+  std::vector<const char*> commandArgs;
+  commandArgs.push_back(argv[0]);
+  int arg = 1;
+  while (arg < argc) {
+    const char* value = argv[arg];
+    if (!stricmp(value, "--threads") || !stricmp(value, "-threads")) {
+      if (++arg >= argc) {
+        fprintf(stderr, "Missing thread count for --threads\n");
+        return EXIT_FAILURE;
+      }
+      char* end = nullptr;
+      errno = 0;
+      long parsed = strtol(argv[arg], &end, 10);
+      if (errno || !end || end == argv[arg] || *end || parsed < 0 ||
+          parsed > CIccThreadedCmm::GetMaxThreads()) {
+        fprintf(stderr, "Invalid thread count '%s': expected 0..%d\n",
+                icSanitizeConsoleText(argv[arg]).c_str(),
+                CIccThreadedCmm::GetMaxThreads());
+        return EXIT_FAILURE;
+      }
+      nThreads = (int)parsed;
+      bThreadOption = true;
+    }
+#ifdef ICCDEV_TELEMETRY
+    else if (!strnicmp(value, "--telemetry=", 12) ||
+             !strnicmp(value, "-telemetry=", 11)) {
+      const char* mode = strchr(value, '=') + 1;
+      if (!stricmp(mode, "off"))
+        telemetryMode = icApplyTelemetryOff;
+      else if (!stricmp(mode, "human"))
+        telemetryMode = icApplyTelemetryHuman;
+      else if (!stricmp(mode, "jsonl"))
+        telemetryMode = icApplyTelemetryJsonl;
+      else {
+        fprintf(stderr, "Invalid --telemetry value '%s': expected off, human, or jsonl\n",
+                icSanitizeConsoleText(mode).c_str());
+        return EXIT_FAILURE;
+      }
+    }
+    else if (!stricmp(value, "--telemetry") || !stricmp(value, "-telemetry")) {
+      if (++arg >= argc) {
+        fprintf(stderr, "Missing mode for --telemetry\n");
+        return EXIT_FAILURE;
+      }
+      if (!stricmp(argv[arg], "off"))
+        telemetryMode = icApplyTelemetryOff;
+      else if (!stricmp(argv[arg], "human"))
+        telemetryMode = icApplyTelemetryHuman;
+      else if (!stricmp(argv[arg], "jsonl"))
+        telemetryMode = icApplyTelemetryJsonl;
+      else {
+        fprintf(stderr, "Invalid --telemetry value '%s': expected off, human, or jsonl\n",
+                icSanitizeConsoleText(argv[arg]).c_str());
+        return EXIT_FAILURE;
+      }
+    }
+    else if (!stricmp(value, "--telemetry-file") || !stricmp(value, "-telemetry-file")) {
+      if (++arg >= argc) {
+        fprintf(stderr, "Missing path for --telemetry-file\n");
+        return EXIT_FAILURE;
+      }
+      telemetryFile = argv[arg];
+    }
+    else if (!stricmp(value, "--evidence-file") || !stricmp(value, "-evidence-file")) {
+      if (++arg >= argc) {
+        fprintf(stderr, "Missing path for --evidence-file\n");
+        return EXIT_FAILURE;
+      }
+      evidenceFile = argv[arg];
+    }
+#else
+    else if (!strnicmp(value, "--telemetry", 11) ||
+             !strnicmp(value, "-telemetry", 10) ||
+             !stricmp(value, "--evidence-file") ||
+             !stricmp(value, "-evidence-file")) {
+      fprintf(stderr, "Telemetry is not built; configure ICCDEV_ENABLE_TELEMETRY=ON\n");
+      return EXIT_FAILURE;
+    }
+#endif
+    else {
+      commandArgs.push_back(value);
+    }
+    ++arg;
+  }
+  argc = (int)commandArgs.size();
+  argv = commandArgs.data();
+
+#ifdef ICCDEV_TELEMETRY
+  if (telemetryMode == icApplyTelemetryJsonl && telemetryFile.empty()) {
+    fprintf(stderr, "--telemetry=jsonl requires --telemetry-file\n");
+    return EXIT_FAILURE;
+  }
+  if (telemetryMode != icApplyTelemetryJsonl && !telemetryFile.empty()) {
+    fprintf(stderr, "--telemetry-file requires --telemetry=jsonl\n");
+    return EXIT_FAILURE;
+  }
+  if (!telemetryFile.empty() && !evidenceFile.empty() &&
+      icOutputPathsAlias(telemetryFile.c_str(), evidenceFile.c_str())) {
+    fprintf(stderr, "Telemetry and evidence files must be different\n");
+    return EXIT_FAILURE;
+  }
+#endif
+
+  if (argc < minargs) {
+    // #2405: usage on stdout plus exit 0 reported success for an invocation that
+    // applied nothing.  Fail like the identical post-"-threads" guard below,
+    // which already returned EXIT_FAILURE -- the two disagreed only because the
+    // shifted copy was written later.
+    if (bThreadOption) {
+      fprintf(stderr, "Missing arguments after -threads: expected at least %d, received %d.\n",
+              minargs - 1, argc > 0 ? argc - 1 : 0);
+    }
+    else {
+      fprintf(stderr, "Missing arguments: expected at least %d, received %d.\n",
+              minargs - 1, argc > 0 ? argc - 1 : 0);
+    }
+    Usage(stderr);
+    return EXIT_FAILURE;
   }
 
   CIccCfgDataApply cfgApply;
   CIccCfgSearchApply cfgSearchApply;
   CIccCfgColorData cfgData;
-
-  if (!stricmp(argv[1], "-cfg")) {
-    // Usage 1 is exactly "-cfg <path>"; every setting comes from the JSON file, so
+  if (!stricmp(argv[1], "--cfg") || !stricmp(argv[1], "-cfg")) {
+    // Usage 1 is exactly "--cfg <path>"; every setting comes from the JSON file, so
     // there is nothing a further argument could mean. Anything beyond argv[2] was
     // silently discarded, and the run then reported success, so a caller could not
     // tell an honoured argument list from an ignored one. That is the same defect
@@ -265,37 +387,37 @@ int main(int argc, const char* argv[])
     // The minargs test above has already established argc >= 3, so argv[2] is
     // readable here and only a longer list can reach this branch.
     if (argc != 3) {
-      printf("Unexpected extra arguments for -cfg\n");
+      printf("Unexpected extra arguments for --cfg\n");
       return EXIT_FAILURE;
     }
 
     json cfg;
     if (!loadJsonFrom(cfg, argv[2]) || !cfg.is_object()) {
-      printf("Unable to read configuration from '%s'\n", argv[2]);
+      printf("Unable to read configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
     }
 
     if (cfg.find("dataFiles") == cfg.end() || !cfgApply.fromJson(cfg["dataFiles"])) {
-      printf("Unable to parse dataFile configuration from '%s'\n", argv[2]);
+      printf("Unable to parse dataFile configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
     }
 
     if (cfg.find("searchApply") == cfg.end() || !cfgSearchApply.fromJson(cfg["searchApply"])) {
-      printf("Unable to parse profileSequence configuration from '%s'\n", argv[2]);
+      printf("Unable to parse profileSequence configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
       return -1;
     }
 
     if (cfgApply.m_srcType == icCfgColorData) {
       if (cfgApply.m_srcFile.empty()) {
         if (!cfgData.fromJson(cfg["colorData"])) {
-          printf("Unable to parse colorData configuration from '%s'\n", argv[2]);
+          printf("Unable to parse colorData configuration from '%s'\n", icSanitizeConsoleText(argv[2]).c_str());
           return -1;
         }
       }
       else {
         json data;
         if (!loadJsonFrom(data, cfgApply.m_srcFile.c_str()) || !cfgData.fromJson(data)) {
-          printf("Unable to load color data from '%s'\n", cfgApply.m_srcFile.c_str());
+          printf("Unable to load color data from '%s'\n", icSanitizeConsoleText(cfgApply.m_srcFile.c_str()).c_str());
           return -1;
         }
       }
@@ -303,13 +425,13 @@ int main(int argc, const char* argv[])
     else if (cfgApply.m_srcType == icCfgIt8) {
       cfgData.m_srcSpace = cfgApply.m_srcSpace;
       if (cfgApply.m_srcFile.empty() || !cfgData.fromIt8(cfgApply.m_srcFile.c_str())) {
-        printf("Unable to parse IT8 data file '%s'\n", cfgApply.m_srcFile.c_str());
+        printf("Unable to parse IT8 data file '%s'\n", icSanitizeConsoleText(cfgApply.m_srcFile.c_str()).c_str());
         return -1;
       }
     }
     else if (cfgApply.m_srcType == icCfgLegacy) {
       if (!cfgData.fromLegacy(cfgApply.m_srcFile.c_str())) {
-        printf("Unable to parse legacy data file '%s'\n", cfgApply.m_srcFile.c_str());
+        printf("Unable to parse legacy data file '%s'\n", icSanitizeConsoleText(cfgApply.m_srcFile.c_str()).c_str());
         return -1;
       }
     }
@@ -340,7 +462,11 @@ int main(int argc, const char* argv[])
 
     int nArg = cfgApply.fromArgs(&argv[0], argc);
     if (!nArg) {
-      printf("Unable to parse configuration arguments\n");
+      // #2405: on stderr because this is a malformed-invocation diagnostic and the
+      // sibling tool prints it there.  The rest of this main()'s diagnostics stay
+      // on stdout: they are a pre-existing, and consistent, convention across all
+      // four tools, and moving them is a separate change.
+      fprintf(stderr, "Unable to parse configuration arguments\n");
       return EXIT_FAILURE;
     }
     argv += nArg;
@@ -348,12 +474,12 @@ int main(int argc, const char* argv[])
 
     nArg = cfgSearchApply.fromArgs(&argv[0], argc);
     if (!nArg) {
-      printf("Unable to parse profile sequence arguments\n");
+      fprintf(stderr, "Unable to parse profile sequence arguments\n");
       return -1;
     }
 
     if (cfgApply.m_srcType != icCfgLegacy || !cfgData.fromLegacy(cfgApply.m_srcFile.c_str())) {
-      printf("Unable to parse legacy data file '%s'\n", cfgApply.m_srcFile.c_str());
+      printf("Unable to parse legacy data file '%s'\n", icSanitizeConsoleText(cfgApply.m_srcFile.c_str()).c_str());
       return -1;
     }
 
@@ -383,17 +509,17 @@ int main(int argc, const char* argv[])
         std::string jsonText = cfgJson.dump(1);
         size_t n = fwrite(jsonText.c_str(), 1, jsonText.size(), f);
         if (n != jsonText.size()) {
-          printf("Error writing json config file '%s'\n", exportFile.c_str());
+          printf("Error writing json config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
           fclose(f);
           return -1;
         }
         if (!icFlushAndClose(f)) {
-          printf("Error closing json config file '%s'\n", exportFile.c_str());
+          printf("Error closing json config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
           return -1;
         }
       }
       else {
-        printf("Unable to export config file '%s'\n", exportFile.c_str());
+        printf("Unable to export config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());
         return -1;
       }
     }
@@ -403,6 +529,11 @@ int main(int argc, const char* argv[])
   if (cfgSearchApply.m_profiles.size() != 2 && cfgSearchApply.m_profiles.size() != 3) {
     printf("Only sequences of 2 or 3 profiles are supported\n");
     return -1;
+  }
+
+  if (cfgApply.m_debugCalc && nThreads != 1) {
+    printf("-debugcalc requires -threads 1\n");
+    return EXIT_FAILURE;
   }
 
   LogDebuggerPtr pDebugger;
@@ -421,19 +552,73 @@ int main(int argc, const char* argv[])
   //Setup source encoding
   srcEncoding = cfgData.m_encoding;
 
+#ifdef ICCDEV_TELEMETRY
+  const std::string inputName =
+    cfgApply.m_srcFile.empty() ? "embedded_color_data" : cfgApply.m_srcFile;
+  const std::string outputName =
+    cfgApply.m_dstFile.empty() ? "stdout" : cfgApply.m_dstFile;
+  if ((!telemetryFile.empty() &&
+       ((!cfgApply.m_srcFile.empty() &&
+         icOutputPathsAlias(telemetryFile.c_str(), cfgApply.m_srcFile.c_str())) ||
+        (!cfgApply.m_dstFile.empty() &&
+         icOutputPathsAlias(telemetryFile.c_str(), cfgApply.m_dstFile.c_str())))) ||
+      (!evidenceFile.empty() &&
+       ((!cfgApply.m_srcFile.empty() &&
+         icOutputPathsAlias(evidenceFile.c_str(), cfgApply.m_srcFile.c_str())) ||
+        (!cfgApply.m_dstFile.empty() &&
+         icOutputPathsAlias(evidenceFile.c_str(), cfgApply.m_dstFile.c_str()))))) {
+    fprintf(stderr, "Telemetry and evidence files must not alias transform input or output\n");
+    return EXIT_FAILURE;
+  }
+
+  CIccApplyToolTelemetry telemetry;
+  telemetry.m_mode = telemetryMode;
+  if (telemetryMode == icApplyTelemetryJsonl && !telemetry.Open(telemetryFile))
+    return EXIT_FAILURE;
+  if (telemetryMode == icApplyTelemetryJsonl && !cfgApply.m_dstFile.empty() &&
+      icOutputPathsAlias(telemetryFile.c_str(), cfgApply.m_dstFile.c_str())) {
+    fprintf(stderr, "Telemetry file aliases transform output\n");
+    return EXIT_FAILURE;
+  }
+#endif
+
   std::string sConnectError;
   std::unique_ptr<CIccConnectCmm> pConnect(
-    CIccConnectCmm::CreateSearch(cfgSearchApply, &sConnectError));
+    CIccConnectCmm::CreateSearch(cfgSearchApply, &sConnectError, nThreads));
 
   if (!pConnect) {
     if (!sConnectError.empty())
-      printf("Error - %s\n", sConnectError.c_str());
+      printf("Error - %s\n", icSanitizeConsoleText(sConnectError.c_str()).c_str());
     printf("Unable to begin profile application - Possibly invalid or incompatible profiles\n");
     return -1;
   }
 
   CIccCmmSearch* pCmm = pConnect->GetSearchCmm();
   CIccCmm *pMruCmm = NULL;
+#ifdef ICCDEV_TELEMETRY
+  const CIccThreadedCmm* pThreadedCmm =
+    dynamic_cast<const CIccThreadedCmm*>(pConnect->GetCmm());
+  const int effectiveThreads = pThreadedCmm ? pThreadedCmm->GetNumThreads() : 1;
+  const size_t recordCount = cfgData.m_data.size();
+
+  const std::string runStartedFields =
+    "\"tool\":\"iccApplySearch\",\"input\":" +
+    CIccApplyToolTelemetry::JsonString(inputName) +
+    ",\"output\":" + CIccApplyToolTelemetry::JsonString(outputName) +
+    ",\"requested_threads\":" + std::to_string(nThreads) +
+    ",\"effective_threads\":" + std::to_string(effectiveThreads) +
+    ",\"input_record_count\":" + std::to_string(recordCount);
+  if (!telemetry.Emit("run_started", runStartedFields))
+    return EXIT_FAILURE;
+  if (telemetryMode == icApplyTelemetryHuman) {
+    fprintf(stderr,
+            "[%s] iccApplySearch: started input=%s output=%s requested_threads=%d effective_threads=%d records=%zu\n",
+            CIccApplyToolTelemetry::TimestampUtc().c_str(),
+            icSanitizeConsoleText(inputName.c_str()).c_str(),
+            icSanitizeConsoleText(outputName.c_str()).c_str(), nThreads,
+            effectiveThreads, recordCount);
+  }
+#endif
 
   //Get and validate the source color space from the CMM.
   icColorSpaceSignature SrcspaceSig = pCmm->GetSourceSpace();
@@ -478,6 +663,72 @@ int main(int argc, const char* argv[])
 
   outData.m_srcEncoding = srcEncoding;
 
+#ifdef ICCDEV_TELEMETRY
+  const std::string transformReadyFields =
+    "\"source_samples\":" + std::to_string(nSrcSamples) +
+    ",\"destination_samples\":" + std::to_string(nDestSamples) +
+    ",\"input_record_count\":" + std::to_string(recordCount) +
+    ",\"requested_threads\":" + std::to_string(nThreads) +
+    ",\"effective_threads\":" + std::to_string(effectiveThreads);
+  if (!telemetry.Emit("transform_ready", transformReadyFields))
+    return EXIT_FAILURE;
+  if (telemetryMode == icApplyTelemetryHuman) {
+    fprintf(stderr,
+            "[%s] iccApplySearch: transform ready source_samples=%u destination_samples=%u requested_threads=%d effective_threads=%d\n",
+            CIccApplyToolTelemetry::TimestampUtc().c_str(),
+            nSrcSamples, nDestSamples, nThreads, effectiveThreads);
+  }
+#endif
+
+  if (nThreads != 1) {
+    std::vector<CIccCfgDataEntry*> entries;
+    for (const auto& data : cfgData.m_data) {
+      if (data)
+        entries.push_back(data.get());
+    }
+
+    std::vector<icFloatNumber> srcPixels(entries.size() * nSrcSamples);
+    std::vector<icFloatNumber> dstPixels(entries.size() * nDestSamples);
+    std::vector<CIccCfgDataEntryPtr> outputs;
+    outputs.reserve(entries.size());
+
+    for (size_t index = 0; index < entries.size(); ++index) {
+      CIccCfgDataEntry* pData = entries[index];
+      CIccCfgDataEntryPtr out(new CIccCfgDataEntry());
+      out->m_srcName = pData->m_name;
+      out->m_srcValues = pData->m_values;
+
+      for (size_t i = 0; i < nSrcSamples && i < pData->m_values.size(); ++i)
+        Pixel[i] = pData->m_values[i];
+
+      if (CIccCmm::ToInternalEncoding(SrcspaceSig, srcEncoding,
+                                      srcPixels.data() + index * nSrcSamples,
+                                      Pixel, bClip)) {
+        printf("Invalid source data encoding\n");
+        return -1;
+      }
+      outputs.push_back(out);
+    }
+
+    if (!entries.empty() &&
+        pConnect->GetCmm()->Apply(dstPixels.data(), srcPixels.data(),
+                                  (icUInt32Number)entries.size())) {
+      printf("Profile application failed.\n");
+      return -1;
+    }
+
+    for (size_t index = 0; index < outputs.size(); ++index) {
+      icFloatNumber* dst = dstPixels.data() + index * nDestSamples;
+      if (CIccCmm::FromInternalEncoding(DestspaceSig, destEncoding, dst, dst)) {
+        printf("Invalid final data encoding\n");
+        return -1;
+      }
+      for (size_t i = 0; i < nDestSamples; ++i)
+        outputs[index]->m_values.push_back(dst[i]);
+      outData.m_data.push_back(outputs[index]);
+    }
+  }
+  else {
   //Apply profiles to each input color
   for (auto dataIter = cfgData.m_data.begin(); dataIter != cfgData.m_data.end(); dataIter++) {
     CIccCfgDataEntry* pData = dataIter->get();
@@ -531,6 +782,7 @@ int main(int argc, const char* argv[])
 
     outData.m_data.push_back(out);
   }
+  }
 
   //Now output the data
 //   cfgApply.m_dstType = icCfgIt8;
@@ -538,8 +790,11 @@ int main(int argc, const char* argv[])
 //   cfgApply.m_dstPrecision = 2;
 //   cfgApply.m_debugCalc = false;
 
+  bool outputWritten = false;
   if (cfgApply.m_dstType == icCfgLegacy) {
-    outData.toLegacy(cfgApply.m_dstFile.c_str(), cfgSearchApply.m_profiles, cfgApply.m_dstDigits, cfgApply.m_dstPrecision, cfgApply.m_debugCalc);
+    outputWritten = outData.toLegacy(cfgApply.m_dstFile.c_str(), cfgSearchApply.m_profiles,
+                                     cfgApply.m_dstDigits, cfgApply.m_dstPrecision,
+                                     cfgApply.m_debugCalc);
   }
   else if (cfgApply.m_dstType == icCfgColorData) {
     json out;
@@ -554,10 +809,11 @@ int main(int argc, const char* argv[])
       out["colorData"] = data;
 
     if (out.is_object())
-      saveJsonAs(out, cfgApply.m_dstFile.c_str());
+      outputWritten = saveJsonAs(out, cfgApply.m_dstFile.c_str());
   }
   else if (cfgApply.m_dstType==icCfgIt8) {
-    outData.toIt8(cfgApply.m_dstFile.c_str(), cfgApply.m_dstDigits, cfgApply.m_dstPrecision);
+    outputWritten = outData.toIt8(cfgApply.m_dstFile.c_str(), cfgApply.m_dstDigits,
+                                  cfgApply.m_dstPrecision);
   }
   else {
     printf("Unsupported output format\n");
@@ -567,6 +823,44 @@ int main(int argc, const char* argv[])
   }
 
   delete pMruCmm;
+  if (!outputWritten) {
+    fprintf(stderr, "Unable to write transform output '%s'\n",
+            icSanitizeConsoleText(cfgApply.m_dstFile.empty() ? "stdout" :
+                                  cfgApply.m_dstFile.c_str()).c_str());
+#ifdef ICCDEV_TELEMETRY
+    telemetry.Emit("run_failed",
+                   "\"status\":\"tool_failure\",\"reason\":\"output_write_failed\"");
+#endif
+    return EXIT_FAILURE;
+  }
+
+#ifdef ICCDEV_TELEMETRY
+  const long long elapsedMs = telemetry.ElapsedMs();
+  const size_t outputRecordCount = outData.m_data.size();
+  const double throughputRecordsPerSecond =
+    elapsedMs > 0 ? (double)outputRecordCount * 1000.0 / (double)elapsedMs : 0.0;
+  const std::string completedFields =
+    "\"status\":\"success\",\"input_record_count\":" + std::to_string(recordCount) +
+    ",\"output_record_count\":" + std::to_string(outputRecordCount) +
+    ",\"requested_threads\":" + std::to_string(nThreads) +
+    ",\"effective_threads\":" + std::to_string(effectiveThreads) +
+    ",\"elapsed_ms\":" + std::to_string(elapsedMs) +
+    ",\"throughput_records_per_second\":" + std::to_string(throughputRecordsPerSecond);
+  if (!evidenceFile.empty() && !telemetry.WriteEvidence(evidenceFile, completedFields)) {
+    telemetry.Emit("run_failed",
+                   "\"status\":\"tool_failure\",\"reason\":\"evidence_write_failed\"");
+    return EXIT_FAILURE;
+  }
+  if (!telemetry.Emit("run_completed", completedFields))
+    return EXIT_FAILURE;
+  if (telemetryMode == icApplyTelemetryHuman) {
+    fprintf(stderr,
+            "[%s] iccApplySearch: completed records=%zu elapsed_ms=%lld throughput_records_per_second=%.3f requested_threads=%d effective_threads=%d\n",
+            CIccApplyToolTelemetry::TimestampUtc().c_str(),
+            outputRecordCount, elapsedMs, throughputRecordsPerSecond,
+            nThreads, effectiveThreads);
+  }
+#endif
 
   return 0;
 }

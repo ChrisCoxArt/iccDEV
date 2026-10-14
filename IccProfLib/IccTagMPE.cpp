@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -469,7 +445,30 @@ icValidateStatus CIccMultiProcessElement::Validate(std::string sigPath, std::str
 
   CIccInfo Info;
   std::string sSigPathName = Info.GetSigPathName(sigPath+icGetSigPath(GetType()));
-  if (m_nReserved!=0) {
+
+  // In the four CLUT elements, byte 7 of the reserved field is an
+  // interpolationHintType (ICC.2:2023 clause 4.2.5 Table 1; Tables 113, 114,
+  // 117 and 122), and only bytes 4-6 are reserved.
+  icUInt32Number nReserved = m_nReserved;
+  switch (GetType()) {
+  case icSigCLutElemType:
+  case icSigExtCLutElemType:
+  case icSigEmissionCLUTElemType:
+  case icSigReflectanceCLUTElemType:
+    if ((nReserved & 0xFF) > 2) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Invalid interpolation hint.\n";
+      rv = icValidateNonCompliant;
+    }
+    nReserved &= 0xFFFFFF00;
+    break;
+
+  default:
+    break;
+  }
+
+  if (nReserved!=0) {
     sReport += icMsgValidateNonCompliant;
     sReport += sSigPathName;
     sReport += " - Reserved Value must be zero.\n";
@@ -752,6 +751,14 @@ CIccTagMultiProcessElement::CIccTagMultiProcessElement(const CIccTagMultiProcess
   m_nInputChannels = lut.m_nInputChannels;
   m_nOutputChannels = lut.m_nOutputChannels;
 
+  // #2699/#2703: m_nBufChannels was the one member this constructor left
+  // uninitialised. Begin() sets it from the element list, but returns early for
+  // an empty list, so a copied tag with no elements reached GetNewApply() and
+  // sized its CIccDblPixelBuffer from garbage (MemorySanitizer, via
+  // CIccProfile's copy constructor -> NewCopy()). Copied like the other cached
+  // Begin() state below; for a tag never begun it is the constructor's 0.
+  m_nBufChannels = lut.m_nBufChannels;
+
   if (lut.m_nProcElements && lut.m_position) {
     m_position = (icPositionNumber*)malloc(lut.m_nProcElements*sizeof(icPositionNumber));
     if (m_position) {
@@ -778,6 +785,11 @@ CIccTagMultiProcessElement::CIccTagMultiProcessElement(const CIccTagMultiProcess
  ******************************************************************************/
 CIccTagMultiProcessElement &CIccTagMultiProcessElement::operator=(const CIccTagMultiProcessElement &lut)
 {
+  // Clean() below frees the element list and positions before they are copied
+  // from lut, so assigning a tag to itself used to empty it.
+  if (&lut == this)
+    return *this;
+
   Clean();
 
   m_nReserved = lut.m_nReserved;
@@ -796,6 +808,10 @@ CIccTagMultiProcessElement &CIccTagMultiProcessElement::operator=(const CIccTagM
   }
   m_nInputChannels = lut.m_nInputChannels;
   m_nOutputChannels = lut.m_nOutputChannels;
+
+  // Same as the copy constructor (#2699). Clean() does not reset it, so without
+  // this an assigned tag kept the buffer width of whatever it held before.
+  m_nBufChannels = lut.m_nBufChannels;
 
   if (lut.m_nProcElements && lut.m_position) {
     m_position = (icPositionNumber*)malloc(lut.m_nProcElements*sizeof(icPositionNumber));
@@ -1358,6 +1374,11 @@ bool CIccTagMultiProcessElement::Begin(icElemInterp nInterp /*=icElemInterpLinea
                                        IIccCmmEnvVarLookup *pCmmEnvVarLookup /*= NULL*/)
 {
   if (!m_list || !m_list->size()) {
+    // #2699: an empty list needs no apply buffer. The width is reset here too,
+    // not only computed below: a tag that was begun with elements and has since
+    // been emptied or re-read would otherwise keep the old width.
+    m_nBufChannels = 0;
+
     if (m_nInputChannels != m_nOutputChannels)
       return false;
     else
@@ -1655,7 +1676,9 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
     case icSigAToB2Tag:
     case icSigAToB3Tag:
       {
-        nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+        // icGetDataSpaceSamples(): a v5 abstract profile with a zero data colour
+        // space takes its A side from the spectral PCS (7.2.8, #2725).
+        nInput = icGetDataSpaceSamples(&pProfile->m_Header);
         if (m_nInputChannels != nInput) {
           sReport += icMsgValidateCriticalError;
           sReport += sSigPathName;
@@ -1701,7 +1724,9 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
     case icSigDToB2Tag:
     case icSigDToB3Tag:
       {
-        nInput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+        // icGetDataSpaceSamples(): a v5 abstract profile with a zero data colour
+        // space takes its A side from the spectral PCS (7.2.8, #2725).
+        nInput = icGetDataSpaceSamples(&pProfile->m_Header);
         if (m_nInputChannels != nInput) {
           sReport += icMsgValidateCriticalError;
           sReport += sSigPathName;
@@ -1847,7 +1872,17 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
           rv = icMaxStatus(rv, icValidateCriticalError);
         }
 
-        nOutput = icGetSpaceSamples(pProfile->m_Header.colorSpace);
+        // The A-side of an MToA0 transform is the profile's device space.  For a
+        // MultiplexLink that space is named by the PCS field, because ICC.2 7.2.8
+        // requires the data colour space field to be zero and 7.2.9 puts the
+        // output space in the PCS (#2563).  Reading the data colour space here
+        // gave a conforming MLNK profile an expected output count of zero, so
+        // every such profile was reported as having the wrong channel count.
+        // Every other class that can carry an MToA0 names its device space in the
+        // data colour space field, so that stays the source for them.
+        nOutput = (pProfile->m_Header.deviceClass==icSigMultiplexLinkClass)
+                    ? icGetSpaceSamples(pProfile->m_Header.pcs)
+                    : icGetSpaceSamples(pProfile->m_Header.colorSpace);
         if (m_nOutputChannels != nOutput) {
           sReport += icMsgValidateCriticalError;
           sReport += sSigPathName;
@@ -1967,8 +2002,19 @@ icValidateStatus CIccTagMultiProcessElement::Validate(std::string sigPath, std::
     }
     last = i->ptr;
 
-    if (last)
-        rv = icMaxStatus(rv, last->Validate(sigPath+icGetSigPath(GetType()), sReport, this));
+    if (last) {
+        rv = icMaxStatus(rv, last->Validate(sigPath+icGetSigPath(GetType()), sReport, this, pProfile));
+
+        // The interpolation hint in byte 7 of a CLUT element is ICC.2's; ICC.1
+        // Table 63 reserves all of bytes 4-7.
+        if (pProfile && pProfile->m_Header.version < icVersionNumberV5 &&
+            last->GetType() == icSigCLutElemType && (last->m_nReserved & 0xFF)) {
+          sReport += icMsgValidateNonCompliant;
+          sReport += Info.GetSigPathName(sigPath+icGetSigPath(GetType())+icGetSigPath(last->GetType()));
+          sReport += " - Reserved Value must be zero; the interpolation hint is defined by ICC.2 only.\n";
+          rv = icMaxStatus(rv, icValidateNonCompliant);
+        }
+    }
   }
 
   if (bMatchChannels && last && last->NumOutputChannels() != m_nOutputChannels) {

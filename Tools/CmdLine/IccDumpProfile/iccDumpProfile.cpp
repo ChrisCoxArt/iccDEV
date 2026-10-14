@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 //////////////////////////////////////////////////////////////////////
 // HISTORY:
 //
@@ -85,6 +61,7 @@
 #include "IccUtil.h"
 #include "IccProfLibVer.h"
 #include "IccCmdLineUtil.h"
+#include "IccFileUtil.h"
 
 // #define MEMORY_LEAK_CHECK to enable C RTL memory leak checking (slow!)
 #define MEMORY_LEAK_CHECK
@@ -700,9 +677,15 @@ int main(int argc, char* argv[])
   icHeader* pHdr = NULL;
 
   // Precondition: nArg is argument of ICC profile filename
+  // #2414: the operand is echoed on both the failure and the success path, so a
+  // path carrying terminal control sequences reached the console verbatim (#2406).
+  // The --evidence-json writer above escapes it with icJsonEscape(); this is the
+  // text form's counterpart.
+  std::string srcName = icSanitizeConsoleText(argv[nArg]);
+
   printf("Built with IccProfLib version " ICCPROFLIBVER "\n\n");
   if (!pIcc) {
-    printf("Unable to parse '%s' as ICC profile!\n", argv[nArg]);
+    printf("Unable to parse '%s' as ICC profile!\n", srcName.c_str());
     nStatus = icValidateCriticalError;
   }
   else {
@@ -710,7 +693,7 @@ int main(int argc, char* argv[])
     const size_t bufSize = 64;
     char buf[bufSize];
 
-    printf("Profile:            '%s'\n", argv[nArg]);
+    printf("Profile:            '%s'\n", srcName.c_str());
     if(Fmt.IsProfileIDCalculated(&pHdr->profileID))
       printf("Profile ID:         %s\n", Fmt.GetProfileID(&pHdr->profileID));
     else
@@ -1044,6 +1027,39 @@ int main(int argc, char* argv[])
       nValid = -2;
       break;
     }
+  }
+  else if (!pIcc) {
+    // #2453: the switch above is the ONLY place nValid is ever assigned, and it
+    // sits inside the bDumpValidation gate that only -v opens.  Without -v the
+    // tool therefore returned its initialiser for every outcome: a missing file,
+    // a directory and 200 random bytes all exited 0, indistinguishable from a
+    // successful dump, even though the "Unable to parse" branch above had already
+    // recorded icValidateCriticalError.  Report that failure.
+    //
+    // 1, NOT -1.  A -1 return becomes shell status 255, and three in-repo
+    // harnesses read >= 128 as "died on a signal": iccdev-fuzz-triage.sh's
+    // classify_log(), icc-tool-qa-scan-common.sh's classify_exit(), and the
+    // sweep in _build-test-unix.yml.  The fuzz triage replays AFL findings as
+    // `<tool> <input> ALL` on this exact path, and those inputs are unparseable
+    // by construction, so -1 would reclassify every one of them from "clean" to
+    // a fabricated "signal" and redden the lane -- a crash report for a tool
+    // that exited cleanly.  1 lands in the graceful-fail / FAIL bucket, which
+    // neither harness counts as a failure, and it matches what this tool's own
+    // --evidence-json writer already returns for the identical !pIcc condition.
+    //
+    // Deliberately keyed off the parse failure rather than off nStatus, because
+    // nStatus is not left at icValidateOK on this path: the duplicate-tag-
+    // signature check at :863 runs without -v and can raise it to
+    // icValidateWarning.  (The six other icMaxStatus sites, :896 through :981,
+    // sit inside the bDumpValidation block opened at :883 and run only with -v.)
+    // The switch maps Warning and NonCompliant alike to 0, so keying off !pIcc
+    // changes exactly the invocations that printed "Unable to parse".
+    //
+    // What this deliberately does NOT do is make the plain path agree with -v: a
+    // profile that parses but is critically invalid still exits 0 here, because
+    // without -v no validation pass ever runs.  Validating unconditionally is the
+    // larger option in #2453 and needs a ruling.
+    nValid = 1;
   }
   printf("\n\n");
 

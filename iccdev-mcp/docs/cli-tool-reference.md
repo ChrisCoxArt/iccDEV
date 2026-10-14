@@ -4,7 +4,7 @@ MCP tool to iccDEV CLI binary mapping. Each MCP tool wraps a CLI binary
 via `subprocess.run()` with path validation, timeout enforcement, and
 structured output.
 
-This reference covers only the 17 CLI-backed MCP tools. The built
+This reference covers only the CLI-backed MCP tools. The built
 `iccBenchApply`, `iccProfilePlot`, `iccProfileVisualize`, and
 `iccProfileVisualizePlot` executables have no MCP wrappers, so do not add them
 to an MCP server `tools` allowlist. See the repository
@@ -210,6 +210,27 @@ iccJpegDump input.jpg --write-icc sRGB.icc --output output.jpg
 Extracts ICC profiles from PNG iCCP chunks (zlib-compressed). Also
 supports ICC injection via `--write-icc` and `--output` flags.
 
+#### heif_dump
+
+| Property | Value |
+|----------|-------|
+| **MCP Tool** | `heif_dump` |
+| **CLI Binary** | `iccHeifDump` |
+| **Syntax** | `iccHeifDump input.heic [existing-output-directory]` |
+| **MCP Args** | `path` (required) |
+| **Exit Codes** | `0` success, non-zero on HEIF or metadata error |
+
+Reports HEIF, HEIC, or AVIF metadata and each embedded ICC property. The MCP
+response preserves the native tool's parse status and raw-blob byte count.
+
+```bash
+# CLI
+iccHeifDump image.heic /tmp/icc-profiles
+
+# MCP equivalent
+heif_dump(path="image.heic")
+```
+
 ---
 
 ### Color Transforms
@@ -377,12 +398,14 @@ PCS, rendering intent, platform, and Profile ID.
 
 Applies multi-profile color transforms via the iccDEV CMM. Accepts pixel
 data as a list of float values, converts through a profile chain with
-specified rendering intent and interpolation method.
+specified rendering intent and interpolation method. Requires the compiled
+`iccdev` Python bindings installed alongside `iccdev-mcp`.
 
 ### roundtrip_delta
 
-Measures round-trip color fidelity by transforming sample data through
-AToB then BToA paths and computing delta-E between input and output.
+Measures round-trip device-channel fidelity by transforming sample data through
+AToB then BToA paths and computing Euclidean channel distance between input
+and output. This is not CIE Delta E. Requires the compiled `iccdev` bindings.
 
 ### icc_sig_to_str
 
@@ -419,7 +442,7 @@ Three tools support `-cfg config.json` for complex multi-profile operations:
 
 - `iccApplyNamedCmm -cfg config.json`
 - `iccApplyProfiles -cfg config.json`
-- `iccApplySearch -cfg config.json`
+- `iccApplySearch --cfg config.json`
 
 JSON config objects include `profileSequence`, `dataFiles`/`imageFiles`,
 `colorData`, and optional `pccWeights`/`searchApply` sections. See the

@@ -33,6 +33,12 @@ function summary = test_iccdev()
     'issue #1475 colorimetry math', nPass, nFail);
   [nPass, nFail] = run_test(@test_build_mex_dependency_paths, ...
     'build dependency path selection', nPass, nFail);
+  [nPass, nFail] = run_test(@test_usage_guidance, ...
+    'usage guidance', nPass, nFail);
+  [nPass, nFail] = run_test(@test_heif_dump_input_validation, ...
+    'HEIF input validation', nPass, nFail);
+  [nPass, nFail] = run_test(@test_delta_e_2000, ...
+    'CIEDE2000 examples', nPass, nFail);
 
   % --- Profile tests (need test profiles) ---
   profilePath = find_test_profile();
@@ -42,8 +48,11 @@ function summary = test_iccdev()
     [nPass, nFail] = run_test(@() test_profile_read_vs_open(profilePath), 'Read vs Open', nPass, nFail);
     [nPass, nFail] = run_test(@() test_profile_header_fields(profilePath), 'Header fields', nPass, nFail);
     [nPass, nFail] = run_test(@() test_profile_double_close(profilePath), 'Double close safety', nPass, nFail);
+    [nPass, nFail] = run_test(@test_lut_type_range, ...
+      'iccMAX LUT type range', nPass, nFail);
+    [nPass, nFail] = run_test(@test_json_bindings, 'IccJSON conversion', nPass, nFail);
   else
-    [nSkip, skipped] = note_skip('Profile open/header/read/fields/double-close', ...
+    [nSkip, skipped] = note_skip('Profile open/header/read/fields/double-close/IccJSON', ...
       'no test profile found', nSkip, skipped);
   end
 
@@ -361,7 +370,7 @@ function test_docker_input_validation(profilePath)
     identifier = '';
     try
       iccdev.docker_validate(string(profilePath), 'Image', ... %#ok<STRQUOT>
-        string([iccdev.default_docker_image() ';invalid'])); %#ok<STRQUOT>
+        string([iccdev.default_docker_image() ';invalid']));
     catch e
       identifier = e.identifier;
     end
@@ -371,7 +380,7 @@ function test_docker_input_validation(profilePath)
     identifier = '';
     try
       iccdev.docker_available( ...
-        string([iccdev.default_docker_image() ';invalid'])); %#ok<STRQUOT>
+        string([iccdev.default_docker_image() ';invalid']));
     catch e
       identifier = e.identifier;
     end
@@ -385,6 +394,12 @@ function test_docker_interop()
   assert(result.dumpStatus == 0);
   assert(result.roundTripStatus == 0);
   assert(exist(result.profile, 'file') == 2);
+  assert(strcmp(result.image, iccdev.default_docker_image()));
+  assert(~isempty(regexp(result.resolvedImage, ...
+    '@sha256:[A-Fa-f0-9]{64}$', 'once')), ...
+    'Docker QA must execute an immutable repository digest');
+  assert(~isempty(result.sourceRevision), ...
+    'Docker QA must record the source revision');
 end
 
 function delete_if_exists(path)

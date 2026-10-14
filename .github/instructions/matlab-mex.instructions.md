@@ -10,6 +10,9 @@ MATLAB/Octave interface to IccProfLib via a single MEX gateway binary.
 An OOP wrapper layer in the `+iccdev` package namespace provides
 MATLAB-idiomatic classes on top of the MEX function calls.
 
+For Copilot review criteria, use the concise companion file
+`matlab-code-review.instructions.md`; keep implementation conventions here.
+
 ## File Structure
 
 ```
@@ -37,6 +40,7 @@ matlab/
   examples/
     read_profile.m        # Profile reading example
     color_transform.m     # Color transform example
+    ciede2000.m            # Single- and multiple-pair CIEDE2000 example
     luminance_normalization.m # Explain issue #1811 fixture scaling
     colorimetry_issue_1475.m  # Explain issue #1475 D50 reduction differences
     gamma_curve.m         # curveType u8Fixed8 gamma calculation example
@@ -48,6 +52,9 @@ matlab/
     test_luminance_normalization.m # Dependency-free issue #1811 check
     test_colorimetry_issue_1475.m  # Dependency-free issue #1475 check
     test_pawg_q1.m             # MATLAB/native PAWG Q1 agreement
+    test_delta_e_2000.m        # CIEDE2000 single/batch reference examples
+    test_usage_guidance.m      # Actionable missing-argument usage examples
+    fixtures/default_usage_examples.txt # Expected identifiers and commands
   README.md               # Usage documentation
 ```
 
@@ -152,9 +159,19 @@ For the extended local smoke and stress checks:
 addpath('matlab');
 run_local_qa();
 run_gamma_qa();
+test_usage_guidance();
+test_delta_e_2000();
 test_add_docker_path();
 test_plot();
+run('matlab/examples/ciede2000.m');
 ```
+
+Public constructors and functions that require arguments must reject a bare
+invocation with a stable `iccdev:*Required` identifier and a working example.
+Keep `test_usage_guidance.m` and its fixture synchronized when adding or
+renaming a public entry point. Shape-validation errors must state how rows map
+to results and provide copy/paste-ready single-item and batch examples. Show
+interactive UI defaults before automation-only hidden or headless variants.
 
 For MATLAB-only workflow or documentation iteration, use
 `.github/scripts/preflight-safety-checks.sh --fast-lane=matlab` and the focused
@@ -253,10 +270,18 @@ MATLAB use `setenv('ICCDEV_BUILD_DIR', build_dir)`; in Windows PowerShell use
   MATLAB must calculate PCS decoding, CIEDE2000, aggregation, and verdicts
   independently rather than using native metrics as its result. Both paths use
   IccProfLib CMM transforms and must reject grids above the shared sample budget.
-- Windows release artifacts must retain `iccPawgReport.exe`,
+- `iccdev.to_json` and `iccdev.from_json` require a Java-enabled runtime plus
+  the `iccToJson` and `iccFromJson` executables. Build and stage both tools
+  before running `test_json_bindings`; do not add the package `private/`
+  directory to MATLAB's global path to reach the process bridge.
+- Windows release artifacts must retain `iccToJson.exe`, `iccFromJson.exe`,
+  `iccPawgReport.exe`, `matlab/tests/test_json_bindings.m`,
+  `matlab/tests/test_lut_type_range.m`,
   `matlab/+iccdev/+qa/audit_pawg_q1.m`, its three calculation helpers,
   `matlab/tests/test_pawg_q1.m`, and
-  `Testing/sRGB_v4_ICC_preference.icc`. Staged QA must put the bundle root on
+  `Testing/sRGB_v4_ICC_preference.icc` plus
+  `Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc`. Staged QA must put
+  the bundle root on
   MATLAB's `PATH` before `run_local_qa()` so the flat packaged tool is found.
 - MATLAB Desktop can start in the repository root or `matlab/`. Derive the root
   by checking for `Build/Cmake`; do not blindly append another `matlab` segment

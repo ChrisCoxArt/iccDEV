@@ -35,10 +35,21 @@ permissions:
 
 "on":
   workflow_dispatch:
+    inputs:
+      pypi_packages:
+        description: Validated Python distributions to publish to PyPI
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - iccdev
+          - iccdev-mcp
+          - both
 
 concurrency:
   group: "latest-release-${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   cache-policy:
@@ -96,7 +107,7 @@ jobs:
             -o Dpkg::Use-Pty=0 \
             install -y --no-install-recommends \
             build-essential cmake gcc g++ clang clang-tools \
-            libpng-dev libxml2 libxml2-dev libtiff-dev \
+            libheif-dev libpng-dev libxml2 libxml2-dev libtiff-dev \
             nlohmann-json3-dev libwxgtk3.2-dev wx-common \
             python3 python3-pip curl git llvm
       - name: Set Compiler
@@ -229,9 +240,13 @@ jobs:
             "echo \"Tools directory: \$SCRIPT_DIR\"" \
             > "$stage/path.sh"
           chmod +x "$stage/path.sh"
+          # -h, not a bare invocation: since #2405 an incomplete operand list is a
+          # failure (usage on stderr, non-zero), and this step runs under
+          # "set -euo pipefail", so a bare call would abort the job on the first
+          # tool.  -h is the supported route to the banner and exits 0.
           for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
             LD_LIBRARY_PATH="$stage${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+              "$stage/$tool" -h 2>&1 | grep -q "IccLibConnect Version"
           done
           # Summary of staged bundle contents
           total=$(find "$stage" -type f | wc -l)
@@ -300,7 +315,7 @@ jobs:
           unset GITHUB_TOKEN || true
           git config --add safe.directory "$PWD"
           echo "Installing Homebrew dependencies..."
-          packages=(libpng nlohmann-json libxml2 wxwidgets libtiff jpeg-turbo)
+          packages=(libheif libpng nlohmann-json libxml2 wxwidgets libtiff jpeg-turbo)
           missing=()
           for package in "${packages[@]}"; do
             if brew list --versions "$package" >/dev/null 2>&1; then
@@ -442,9 +457,10 @@ jobs:
             done
             install_name_tool -add_rpath "@loader_path" "$target" || true
           done
+          # -h for the same reason as the Linux staging step above (#2405).
           for tool in iccApplyProfiles iccApplyNamedCmm iccApplySearch; do
             DYLD_LIBRARY_PATH="$stage${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
-              "$stage/$tool" 2>&1 | grep -q "IccLibConnect Version"
+              "$stage/$tool" -h 2>&1 | grep -q "IccLibConnect Version"
           done
           # Summary of staged bundle contents
           total=$(find "$stage" -type f | wc -l)
@@ -597,7 +613,7 @@ jobs:
 
       - name: Set up MATLAB
         # matlab-actions/setup-matlab v3
-        uses: matlab-actions/setup-matlab@2323adb8243827ea460b0def4c413545aaec46a9
+        uses: matlab-actions/setup-matlab@f9e43010f1ae678f7cfa0542fe2a4f60f7d1ad8d
         with:
           release: R2026a
 
@@ -631,7 +647,11 @@ jobs:
           git branch
           git status
           Write-Host "========= Fetching Deps... ================`n"
-          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/v2.3.1/vcpkg-exported-deps.zip" -Destination "deps.zip"
+          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip" -Destination "deps.zip"
+          $actualDigest = (Get-FileHash -LiteralPath 'deps.zip' -Algorithm SHA256).Hash
+          if ($actualDigest -ne '89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e') {
+            throw "vcpkg export digest mismatch: $actualDigest"
+          }
           Write-Host "========= Extracting Deps... ================`n"
           tar -xf deps.zip
           cd Build/Cmake
@@ -651,7 +671,7 @@ jobs:
 
       - name: Build MATLAB MEX gateway
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             addpath('matlab');
@@ -684,6 +704,8 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName -Destination $stage -Force }
           foreach ($required in @(
             'iccDumpProfile.exe',
+            'iccToJson.exe',
+            'iccFromJson.exe',
             'iccPawgReport.exe',
             'IccProfLib2.dll'
           )) {
@@ -700,12 +722,15 @@ jobs:
           Copy-Item -Path "matlab" -Destination "$stage/matlab" -Recurse -Force
           New-Item -ItemType Directory -Force `
             -Path "$stage/Testing/Display", "$stage/Testing/HDR", `
+              "$stage/Testing/ApplyDataFiles/test-profiles", `
               "$stage/IccProfLib", "$stage/.github/ci/regression" |
             Out-Null
           Copy-Item -Path "Testing/sRGB_v4_ICC_preference.icc" `
             -Destination "$stage/Testing/sRGB_v4_ICC_preference.icc" -Force
           Copy-Item -Path "Testing/sRGB_v4_ICC_preference.icc" `
             -Destination "$stage/Testing/Display/sRGB_v4_ICC_preference.icc" -Force
+          Copy-Item -Path "Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc" `
+            -Destination "$stage/Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc" -Force
           Copy-Item -Path "Testing/Display/sRGB_D65_MAT.xml" `
             -Destination "$stage/Testing/Display/sRGB_D65_MAT.xml" -Force
           Copy-Item -Path "Testing/Display/sRGB_D65_MAT-300cdm2.xml" `
@@ -720,7 +745,14 @@ jobs:
             -Destination "$stage/IccProfLib/IccColorimetry.cpp" -Force
           Copy-Item -Path ".github/ci/regression/gamma-2.20703125.icc" `
             -Destination "$stage/.github/ci/regression/gamma-2.20703125.icc" -Force
+          $heifFixtureDir = "$stage/.github/ci/tooling/heif/img"
+          New-Item -ItemType Directory -Force -Path $heifFixtureDir | Out-Null
+          foreach ($fixture in @('valid-prof.heic', 'nclx-only.heif', 'invalid-ipma-index.heic')) {
+            Copy-Item -LiteralPath ".github/ci/tooling/heif/img/$fixture" `
+              -Destination $heifFixtureDir -Force
+          }
           $matlabRequired = @(
+            'iccHeifDump.exe',
             'matlab\+iccdev\private\icc_mex.mexw64',
             'matlab\run_local_qa.m',
             'matlab\run_gamma_qa.m',
@@ -730,21 +762,32 @@ jobs:
             'matlab\+iccdev\+qa\delta_e_2000.m',
             'matlab\+iccdev\+qa\pcs_to_lab.m',
             'matlab\tests\test_pawg_q1.m',
+            'matlab\tests\test_json_bindings.m',
+            'matlab\tests\test_lut_type_range.m',
+            'matlab\tests\test_heif_dump_native.m',
+            'matlab\tests\test_usage_guidance.m',
+            'matlab\tests\test_delta_e_2000.m',
+            'matlab\tests\fixtures\default_usage_examples.txt',
             'matlab\tests\test_luminance_normalization.m',
             'matlab\tests\test_colorimetry_issue_1475.m',
             'matlab\examples\gamma_curve.m',
+            'matlab\examples\ciede2000.m',
             'matlab\examples\luminance_normalization.m',
             'matlab\examples\colorimetry_issue_1475.m',
             'matlab\examples\docker_interop.m',
             'Testing\sRGB_v4_ICC_preference.icc',
             'Testing\Display\sRGB_v4_ICC_preference.icc',
+            'Testing\ApplyDataFiles\test-profiles\sRGB_D65_MAT.icc',
             'Testing\Display\sRGB_D65_MAT.xml',
             'Testing\Display\sRGB_D65_MAT-300cdm2.xml',
             'Testing\Display\sRGB_D65_MAT-500cdm2.xml',
             'Testing\HDR\BT2100PQFullDisplay.xml',
             'IccProfLib\IccTagBasic.cpp',
             'IccProfLib\IccColorimetry.cpp',
-            '.github\ci\regression\gamma-2.20703125.icc'
+            '.github\ci\regression\gamma-2.20703125.icc',
+            '.github\ci\tooling\heif\img\valid-prof.heic',
+            '.github\ci\tooling\heif\img\nclx-only.heif',
+            '.github\ci\tooling\heif\img\invalid-ipma-index.heic'
           )
           foreach ($required in $matlabRequired) {
             if (-not (Test-Path (Join-Path $stage $required))) {
@@ -873,7 +916,7 @@ jobs:
 
       - name: Run staged MATLAB release QA
         # matlab-actions/run-command v3
-        uses: matlab-actions/run-command@75644028e1e2aa374bbfdc968a65718a178cc264
+        uses: matlab-actions/run-command@bfa857648f4895aa98a446fe41c85e0788421ed5
         with:
           command: >-
             stage = fullfile(pwd, 'staging', 'iccDEV-Testing');
@@ -881,6 +924,11 @@ jobs:
             addpath(matlab_dir);
             addpath(fullfile(matlab_dir, 'tests'));
             setenv('PATH', [stage pathsep getenv('PATH')]);
+            test_usage_guidance();
+            test_delta_e_2000();
+            test_json_bindings();
+            test_lut_type_range();
+            test_heif_dump_native(stage);
             test_luminance_normalization();
             test_colorimetry_issue_1475();
             qa_output = evalc('run_local_qa()');
@@ -895,6 +943,7 @@ jobs:
             run(fullfile(matlab_dir, 'examples', 'read_profile.m'));
             run(fullfile(matlab_dir, 'examples', 'color_transform.m'));
             run(fullfile(matlab_dir, 'examples', 'gamma_curve.m'));
+            run(fullfile(matlab_dir, 'examples', 'ciede2000.m'));
             run(fullfile(matlab_dir, 'examples', 'luminance_normalization.m'));
             run(fullfile(matlab_dir, 'examples', 'colorimetry_issue_1475.m'))
           generate-summary: false
@@ -944,12 +993,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      EMSDK_VERSION: 4.0.20
-      EMSDK_REF: e4fe26ef59168ff44f4c23c466e497bf60b3411e
-      ZLIB_REF: f9dd6009be3ed32415edf1e89d1bc38380ecb95d
-      LIBTIFF_REF: 97ae1f6f0bba8999326f084f04950ecfd6166580
-      LIBXML2_REF: 39b66eb2089f491eacf8e22a7965a235f7f5735e
-      NLOHMANN_JSON_REF: f0bf4c731a53aab29ebde0234385b9e63bf70dcd
+      EMSDK_VERSION: 4.0.21
+      EMSDK_REF: b2436aafa7351ee1b581f15841f1b45ed716a279
+      ZLIB_REF: da607da739fa6047df13e66a2af6b8bec7c2a498
+      LIBTIFF_REF: 5fe20d0e9aba49a6a350ed533459d1505203838f
+      LIBXML2_REF: b7fa62cbe8ef0df5869e000d5b690bdedd07f33e
+      NLOHMANN_JSON_REF: 55f93686c01528224f448c19128836e7df245f72
       WASM_DEPS_CACHE_VERSION: v2
     defaults:
       run:
@@ -1021,8 +1070,12 @@ jobs:
             emmake make install
             cd "$THIRD_PARTY"
 
-            # libpng (checksum verified)
-            curl -sLO https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
+            # libpng (bounded download retries and checksum verification)
+            curl --fail --location --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+              --connect-timeout 30 --max-time 60 \
+              --output libpng-1.6.57.tar.gz \
+              https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
             echo "01fdab044cdc575c74a9ef62a4042fbe24fea8bedfe8aa5c89f4467b781bbb60  libpng-1.6.57.tar.gz" | sha256sum -c -
             tar -xzf libpng-1.6.57.tar.gz && mv libpng-1.6.57 libpng && cd libpng
             CPPFLAGS="-I$THIRD_PARTY/zlib" LDFLAGS="-L$THIRD_PARTY/zlib/out/lib" \
@@ -1031,8 +1084,12 @@ jobs:
             emmake make install
             cd "$THIRD_PARTY"
 
-            # libjpeg (checksum verified)
-            curl -sLO https://ijg.org/files/jpegsrc.v9e.tar.gz
+            # libjpeg (bounded download retries and checksum verification)
+            curl --fail --location --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+              --connect-timeout 30 --max-time 60 \
+              --output jpegsrc.v9e.tar.gz \
+              https://ijg.org/files/jpegsrc.v9e.tar.gz
             echo "4077d6a6a75aeb01884f708919d25934c93305e49f7e3f36db9129320e6f4f3d  jpegsrc.v9e.tar.gz" | sha256sum -c -
             tar -xzf jpegsrc.v9e.tar.gz && mv jpeg-9e libjpeg && cd libjpeg
             emconfigure ./configure --prefix="$THIRD_PARTY/libjpeg/out" --disable-shared --enable-static
@@ -1492,6 +1549,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            libheif-dev \
             libjpeg-dev \
             libpng-dev \
             libtiff-dev \
@@ -1508,12 +1566,16 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
 
+          # Keep $ORIGIN literal for the installed ELF loader, not the shell.
+          # shellcheck disable=SC2016
           cmake -S Build/Cmake -B build-cpack -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TOOLS=ON \
             -DENABLE_TESTS=OFF \
             -DENABLE_SHARED_LIBS=ON \
             -DENABLE_STATIC_LIBS=OFF \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            '-DCMAKE_INSTALL_RPATH=$ORIGIN/../lib;$ORIGIN' \
             -DENABLE_WXWIDGETS=OFF \
             -DENABLE_ICCJSON=ON
 
@@ -1531,7 +1593,7 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
 
-          cmake --build build-cpack --target package-sha256
+          cmake --build build-cpack --target package-sha256 --parallel "$(nproc)"
 
       - name: Validate runtime package outputs
         run: |
@@ -1550,10 +1612,24 @@ jobs:
           unzip -Z1 "${zip_file}" > build-cpack/ZIP-CONTENTS.txt
           grep -q '/VERSION$' build-cpack/ZIP-CONTENTS.txt
           grep -q '/TOOL-CATALOG.md$' build-cpack/ZIP-CONTENTS.txt
+          grep -q '/bin/iccHeifDump$' build-cpack/ZIP-CONTENTS.txt
+          unzip -p "${zip_file}" '*/TOOL-CATALOG.md' |
+            grep -Fx -- "- \`iccHeifDump\`"
           if grep -q '/Testing/' build-cpack/ZIP-CONTENTS.txt; then
             echo "Runtime package unexpectedly contains Testing tree" >&2
             exit 1
           fi
+          runtime_smoke="$(mktemp -d)"
+          unzip -q "${zip_file}" -d "${runtime_smoke}"
+          package_root="${runtime_smoke}/$(basename "${zip_file}" .zip)"
+          # Exercise installed paths, with no build-tree library overrides.
+          env -u LD_LIBRARY_PATH -u LD_PRELOAD "${package_root}/bin/iccDumpProfile" \
+            Testing/sRGB_v4_ICC_preference.icc > "${runtime_smoke}/profile-dump.txt"
+          env -u LD_LIBRARY_PATH -u LD_PRELOAD "${package_root}/bin/iccToXml" \
+            Testing/sRGB_v4_ICC_preference.icc "${runtime_smoke}/profile.xml"
+          env -u LD_LIBRARY_PATH -u LD_PRELOAD "${package_root}/bin/iccFromXml" \
+            "${runtime_smoke}/profile.xml" "${runtime_smoke}/profile.icc"
+          test -s "${runtime_smoke}/profile.icc"
           cmake -E sha256sum \
             build-cpack/reficcmax-*.zip \
             build-cpack/reficcmax-*.deb \
@@ -1649,8 +1725,16 @@ jobs:
           test -f docs/generated/html/dot_namedcmm-lane.svg
           test -f docs/generated/html/dot_search-lane.svg
           test -f docs/generated/html/dot_tolink-lane.svg
-          test -f docs/generated/html/icc__apply__qa__suite_8sh_source.html
-          grep -q 'iccApply visual lanes' docs/generated/html/index.html
+          test ! -f docs/generated/html/icc__apply__qa__suite_8sh_source.html
+          grep -q 'iccDEV Documentation' docs/generated/html/index.html
+          test -f docs/generated/html/curateddocumentation.html
+          test -f docs/generated/html/curatedlibraries.html
+          test -f docs/generated/html/curatedtools.html
+          test -f docs/generated/html/curatedmaintainerqa.html
+          if grep -q 'superpowers' docs/generated/html/navtreedata.js; then
+            echo "::error::Doxygen navigation contains excluded internal documentation"
+            exit 1
+          fi
           if compgen -G 'docs/generated/html/namespaceanonymous*' >/dev/null ||
              compgen -G 'docs/generated/html/structanonymous*' >/dev/null ||
              compgen -G 'docs/generated/html/classanonymous*' >/dev/null; then
@@ -1707,7 +1791,7 @@ jobs:
             echo "class hierarchy browser, call/caller graphs,"
             echo "collaboration diagrams, UML class diagrams,"
             echo "include dependency graphs, directory graphs,"
-            echo "treeview navigation, client-side search,"
+            echo "curated treeview navigation, client-side search,"
             echo "and cross-referenced inline source browser."
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
@@ -1719,12 +1803,89 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  python-wheels:
+    needs: cache-policy
+    uses: ./.github/workflows/_build-python-wheels.yml
+    with:
+      upload-wheels: true
+
+  mcp-package:
+    name: "MCP package (${{ matrix.os }})"
+    needs: cache-policy
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    env:
+      BASH_ENV: /dev/null
+    steps:
+      - name: Checkout MCP source
+        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        with:
+          persist-credentials: false
+
+      - name: Set up MCP package driver
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      # preflight: allow-package-install reason=mcp-release-package-validation
+      - name: Build and test MCP distributions
+        env:
+          ICCDEV_TESTING_DIR: ${{ github.workspace }}/Testing
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
+          python -m pip install "build>=1.2,<1.7" "twine>=5,<8" "PyYAML>=6,<7"
+          python -m pip install -e "./iccdev-mcp[dev,rest]"
+          python -m pytest --rootdir . --import-mode=importlib \
+            .github/tests/test_mcp_release_package.py \
+            .github/tests/test_wasm_workflow.py -q
+          python -m pytest --rootdir . --import-mode=importlib iccdev-mcp/tests/test_server.py iccdev-mcp/tests/test_rest_api.py -q
+          python .github/scripts/iccdev-mcp-package-smoke.py --source-tree
+          python -m build iccdev-mcp --outdir mcp-dist
+          python .github/scripts/validate-mcp-release-package.py mcp-dist
+          python -m twine check mcp-dist/*
+          for package in mcp-dist/*.whl mcp-dist/*.tar.gz; do
+            environment="$(mktemp -d)/venv"
+            python -m venv "$environment"
+            if [ -f "$environment/Scripts/python.exe" ]; then
+              interpreter="$environment/Scripts/python.exe"
+            else
+              interpreter="$environment/bin/python"
+            fi
+            "$interpreter" -m pip install "${package}[rest]" "httpx2>=2,<3"
+            "$interpreter" -m pip check
+            "$interpreter" .github/scripts/iccdev-mcp-package-smoke.py
+          done
+
+      - name: Upload tested MCP distributions
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: iccdev-mcp-python
+          path: mcp-dist/
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: "Publish Latest Release"
-    needs: [linux, macos, windows, wasm, cpack-linux, doxygen]
-    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' }}
+    needs: [linux, macos, windows, wasm, cpack-linux, doxygen, python-wheels, mcp-package]
+    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' || github.ref == 'refs/heads/ci-publish-colourbill-ctrl' }}
     runs-on: ubuntu-latest
-    environment: release
+    environment:
+      name: >-
+        ${{ github.ref == 'refs/heads/ci-publish-colourbill-ctrl' &&
+            'ci-publishing-colourbill-ctrl' || 'release' }}
     timeout-minutes: 15
     permissions:
       contents: write  # Required to publish the latest release.
@@ -1778,6 +1939,54 @@ jobs:
           name: reficcmax-runtime-packages-linux
           path: artifacts/reficcmax-runtime-packages-linux
 
+      - name: Download Linux x86_64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-linux-x86_64
+          path: artifacts/iccdev-python-linux-x86_64
+
+      - name: Download Linux aarch64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-linux-aarch64
+          path: artifacts/iccdev-python-linux-aarch64
+
+      - name: Download macOS x86_64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-x86_64
+          path: artifacts/iccdev-python-macos-x86_64
+
+      - name: Download macOS arm64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-arm64
+          path: artifacts/iccdev-python-macos-arm64
+
+      - name: Download macOS universal2 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-macos-universal2
+          path: artifacts/iccdev-python-macos-universal2
+
+      - name: Download Windows AMD64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-windows-amd64
+          path: artifacts/iccdev-python-windows-amd64
+
+      - name: Download Windows ARM64 Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-python-windows-arm64
+          path: artifacts/iccdev-python-windows-arm64
+
+      - name: Download tested MCP distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: iccdev-mcp-python
+          path: artifacts/iccdev-mcp-python
+
       - name: Restore release artifact metadata
         shell: bash --noprofile --norc {0}
         env:
@@ -1801,6 +2010,14 @@ jobs:
             iccdev-wasm-release
             iccdev-doxygen-html
             reficcmax-runtime-packages-linux
+            iccdev-python-linux-x86_64
+            iccdev-python-linux-aarch64
+            iccdev-python-macos-x86_64
+            iccdev-python-macos-arm64
+            iccdev-python-macos-universal2
+            iccdev-python-windows-amd64
+            iccdev-python-windows-arm64
+            iccdev-mcp-python
           )
           for artifact in "${expected[@]}"; do
             if [ ! -d "artifacts/$artifact" ]; then
@@ -1811,6 +2028,9 @@ jobs:
 
           windows_bundle_root="artifacts/iccdev-windows-msvc/iccDEV-Testing"
           matlab_required=(
+            "iccHeifDump.exe"
+            "iccToJson.exe"
+            "iccFromJson.exe"
             "iccPawgReport.exe"
             "matlab/+iccdev/private/icc_mex.mexw64"
             "matlab/run_local_qa.m"
@@ -1821,14 +2041,22 @@ jobs:
             "matlab/+iccdev/+qa/delta_e_2000.m"
             "matlab/+iccdev/+qa/pcs_to_lab.m"
             "matlab/tests/test_pawg_q1.m"
+            "matlab/tests/test_json_bindings.m"
+            "matlab/tests/test_lut_type_range.m"
+            "matlab/tests/test_heif_dump_native.m"
+            "matlab/tests/test_usage_guidance.m"
+            "matlab/tests/test_delta_e_2000.m"
+            "matlab/tests/fixtures/default_usage_examples.txt"
             "matlab/tests/test_luminance_normalization.m"
             "matlab/tests/test_colorimetry_issue_1475.m"
             "matlab/examples/gamma_curve.m"
+            "matlab/examples/ciede2000.m"
             "matlab/examples/luminance_normalization.m"
             "matlab/examples/colorimetry_issue_1475.m"
             "matlab/examples/docker_interop.m"
             "Testing/sRGB_v4_ICC_preference.icc"
             "Testing/Display/sRGB_v4_ICC_preference.icc"
+            "Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc"
             "Testing/Display/sRGB_D65_MAT.xml"
             "Testing/Display/sRGB_D65_MAT-300cdm2.xml"
             "Testing/Display/sRGB_D65_MAT-500cdm2.xml"
@@ -1836,6 +2064,9 @@ jobs:
             "IccProfLib/IccTagBasic.cpp"
             "IccProfLib/IccColorimetry.cpp"
             ".github/ci/regression/gamma-2.20703125.icc"
+            ".github/ci/tooling/heif/img/valid-prof.heic"
+            ".github/ci/tooling/heif/img/nclx-only.heif"
+            ".github/ci/tooling/heif/img/invalid-ipma-index.heic"
           )
           for required in "${matlab_required[@]}"; do
             if [ ! -s "${windows_bundle_root}/${required}" ]; then
@@ -1864,9 +2095,19 @@ jobs:
 
           mkdir -p release-assets
 
+          for id in linux-x86_64 linux-aarch64 macos-x86_64 macos-arm64 macos-universal2 windows-amd64 windows-arm64; do
+            wheel_dir="artifacts/iccdev-python-$id"
+            python3 .github/scripts/validate-python-release-wheels.py "$wheel_dir" --identifiers "$wheel_dir/build-identifiers.txt" --lane "$id"
+            cp "$wheel_dir"/*.whl release-assets/
+          done
+          python3 .github/scripts/validate-python-release-wheels.py release-assets --release
+          python3 .github/scripts/validate-mcp-release-package.py artifacts/iccdev-mcp-python
+          cp artifacts/iccdev-mcp-python/*.whl artifacts/iccdev-mcp-python/*.tar.gz release-assets/
+
           for dir in artifacts/iccdev-*; do
             [ -d "$dir" ] || continue
             name="$(basename "$dir")"
+            [[ "$name" == iccdev-python-* || "$name" == iccdev-mcp-python ]] && continue
             echo "--- Packaging $name ---"
             (cd "$dir" && zip -r "../../release-assets/${name}.zip" . \
               -x './binary-hardening.md' \
@@ -1927,12 +2168,12 @@ jobs:
           (
             cd release-assets
             find . -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.whl' -o -name '*.tar.gz' \) \
               -printf '%P\0' \
               | sort -z \
               | xargs -0 sha256sum > SHA256SUMS
             find . -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.whl' -o -name '*.tar.gz' \) \
               -printf '%P\0' \
               | sort -z \
               | xargs -0 sha512sum > SHA512SUMS
@@ -1941,7 +2182,7 @@ jobs:
           {
             echo "### Release Checksums"
             echo ""
-            echo "Generated \`SHA256SUMS\` and \`SHA512SUMS\` for release zip assets."
+            echo "Generated \`SHA256SUMS\` and \`SHA512SUMS\` for release packages and Python wheels."
             echo ""
             echo '```'
             sed -n '1,20p' release-assets/SHA256SUMS | while IFS= read -r line; do
@@ -1952,12 +2193,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
       - name: Attest release archive provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v3.2.0
         with:
           subject-checksums: release-assets/SHA256SUMS
 
       # preflight: allow-token-exposure reason=github-release-publish
       - name: Create latest release
+        id: publish
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -1996,6 +2239,8 @@ jobs:
             echo "| WASM (Emscripten) | \`iccdev-wasm-release.zip\` |"
             echo "| Doxygen HTML Docs | \`iccdev-doxygen-html.zip\` |"
             echo "| Linux CPack Runtime | \`reficcmax-*.zip\`, \`reficcmax-*.deb\`, \`reficcmax-*.rpm\` |"
+            echo "| Python (CPython 3.9-3.13) | \`iccdev-*.whl\` for Linux, macOS, and Windows |"
+            echo "| MCP server (Python 3.10+) | \`iccdev_mcp-*-py3-none-any.whl\` and \`iccdev_mcp-*.tar.gz\` |"
             echo "| Checksums | \`SHA256SUMS\`, \`SHA512SUMS\` |"
             echo ""
             echo "### Provenance"
@@ -2011,6 +2256,18 @@ jobs:
             echo "| **NPM** | \`npm install iccdev\` |"
             echo "| **Docker Pull** | \`docker pull ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
             echo "| **Docker Run** | \`docker run -it ghcr.io/internationalcolorconsortium/iccdev:latest\` |"
+            echo "| **Python (PyPI)** | \`python -m pip install iccdev\` |"
+            echo "| **MCP (PyPI)** | \`python -m pip install \"iccdev-mcp[rest]\"\` |"
+            echo ""
+            echo "### Install Python without a compiler"
+            echo ""
+            echo "Install \`iccdev\` from PyPI on CPython 3.9-3.13, or choose an exact-tag wheel asset matching your Python version, OS, and architecture."
+            echo "PyPI currently provides wheels only; install from the repository when no compatible wheel is available."
+            echo "Linux wheels cover manylinux and musllinux x86_64/aarch64; macOS covers x86_64/arm64/universal2; Windows covers AMD64/ARM64."
+            echo "Core profile/CMM APIs are self-contained. CLI-backed helpers need the matching native tool bundle."
+            echo "MCP: install \`iccdev-mcp[rest]\` from PyPI, or use the universal exact-tag GitHub release wheel URL."
+            echo "The MCP wheel includes no CLI binaries or compiled transform bindings; install those separately when needed."
+            echo "For REST extras from a GitHub release asset use \`python -m pip install \"iccdev-mcp[rest] @ <copied-MCP-wheel-asset-URL>\"\`."
             echo ""
             echo "---"
             echo "*Auto-published by ci-latest-release.*"
@@ -2020,6 +2277,8 @@ jobs:
             release-assets/*.zip \
             release-assets/*.deb \
             release-assets/*.rpm \
+            release-assets/*.whl \
+            release-assets/*.tar.gz \
             release-assets/SHA256SUMS \
             release-assets/SHA512SUMS \
             --repo "$GH_REPOSITORY" \
@@ -2028,8 +2287,56 @@ jobs:
             --notes-file "$body_file" \
             --latest
 
-      - name: Summary Report
-        if: always()
+      - name: Stage validated PyPI distributions
+        if: ${{ inputs.pypi_packages != 'none' && github.ref == 'refs/heads/master' }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          PYPI_PACKAGES: ${{ inputs.pypi_packages }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+
+          if [[ "$PYPI_PACKAGES" == "iccdev" || "$PYPI_PACKAGES" == "both" ]]; then
+            python3 .github/scripts/validate-python-release-wheels.py release-assets --release
+            mkdir -p pypi-iccdev
+            cp release-assets/iccdev-*.whl pypi-iccdev/
+            distribution_count="$(find pypi-iccdev -maxdepth 1 -type f | wc -l)"
+            if [[ "$distribution_count" -ne 45 ]]; then
+              echo "::error::Expected 45 iccdev wheels, found $(sanitize_line "$distribution_count")"
+              exit 1
+            fi
+          fi
+          if [[ "$PYPI_PACKAGES" == "iccdev-mcp" || "$PYPI_PACKAGES" == "both" ]]; then
+            python3 .github/scripts/validate-mcp-release-package.py release-assets
+            mkdir -p pypi-iccdev-mcp
+            cp release-assets/iccdev_mcp-*.whl release-assets/iccdev_mcp-*.tar.gz \
+              pypi-iccdev-mcp/
+            distribution_count="$(find pypi-iccdev-mcp -maxdepth 1 -type f | wc -l)"
+            if [[ "$distribution_count" -ne 2 ]]; then
+              echo "::error::Expected 2 iccdev-mcp distributions, found $(sanitize_line "$distribution_count")"
+              exit 1
+            fi
+          fi
+
+      - name: Publish iccdev to PyPI
+        id: pypi_iccdev
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: pypi-iccdev/
+          attestations: true
+          verbose: true
+
+      # preflight: allow-package-install reason=post-publication-pypi-smoke
+      - name: Verify public iccdev installation
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2037,20 +2344,123 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
+
+          iccdev_version="$(python3 -c 'import re,pathlib; print(re.search(r"(?m)^version = \"([^\"]+)\"", pathlib.Path("python/pyproject.toml").read_text()).group(1))')"
+          install_with_retry() {
+            local interpreter="$1"
+            shift
+            for attempt in {1..12}; do
+              if "$interpreter" -m pip install --no-cache-dir \
+                   --index-url https://pypi.org/simple "$@"; then
+                return 0
+              fi
+              if [[ "$attempt" -eq 12 ]]; then
+                return 1
+              fi
+              sleep 15
+            done
+          }
+
+          iccdev_environment="$(mktemp -d)/iccdev"
+          python3 -m venv "$iccdev_environment"
+          install_with_retry "$iccdev_environment/bin/python" --only-binary=:all: \
+            "iccdev==$iccdev_version" "pytest>=9.0.3,<10" "numpy>=1.23,<3"
+          ICCDEV_REQUIRE_INSTALLED_PACKAGE=1 "$iccdev_environment/bin/python" \
+            -m pytest --rootdir . --import-mode=importlib python/tests -q -m "not parity"
+
+      - name: Publish iccdev-mcp to PyPI
+        id: pypi_mcp
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: pypi-iccdev-mcp/
+          attestations: true
+          verbose: true
+
+      # preflight: allow-package-install reason=post-publication-pypi-smoke
+      - name: Verify public iccdev-mcp installation
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
+
+          mcp_version="$(python3 -c 'import re,pathlib; print(re.search(r"(?m)^__version__ = \"([^\"]+)\"", pathlib.Path("iccdev-mcp/iccdev_mcp/__init__.py").read_text()).group(1))')"
+          install_with_retry() {
+            local interpreter="$1"
+            shift
+            for attempt in {1..12}; do
+              if "$interpreter" -m pip install --no-cache-dir \
+                   --index-url https://pypi.org/simple "$@"; then
+                return 0
+              fi
+              if [[ "$attempt" -eq 12 ]]; then
+                return 1
+              fi
+              sleep 15
+            done
+          }
+
+          mcp_environment="$(mktemp -d)/iccdev-mcp"
+          python3 -m venv "$mcp_environment"
+          install_with_retry "$mcp_environment/bin/python" \
+            "iccdev-mcp[rest]==$mcp_version" "httpx2>=2,<3"
+          "$mcp_environment/bin/python" .github/scripts/iccdev-mcp-package-smoke.py
+
+      - name: Summary Report
+        if: always()
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          RELEASE_OUTCOME: ${{ steps.publish.outcome }}
+          ATTESTATION_OUTCOME: ${{ steps.attest.outcome }}
+          PYPI_ICCDEV_OUTCOME: ${{ steps.pypi_iccdev.outcome }}
+          PYPI_MCP_OUTCOME: ${{ steps.pypi_mcp.outcome }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
           git config --global --add safe.directory "$PWD"
+          if [[ -f .github/scripts/sanitize-sed.sh ]]; then
+            source .github/scripts/sanitize-sed.sh
+          else
+            # always() also runs after a failed checkout. Keep that summary safe.
+            sanitize_line() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._:/#=-'; }
+            sanitize_filename() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9._-'; }
+          fi
           release_tag="ci-latest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+          asset_count=0
+          for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl release-assets/*.tar.gz; do
+            [ -f "$f" ] || continue
+            asset_count=$((asset_count + 1))
+          done
           {
             echo "### Release Summary"
             echo ""
             echo "- Tag: \`${release_tag}\`"
             echo "- Commit: \`${GITHUB_SHA:0:7}\`"
-            asset_count=$(find release-assets -maxdepth 1 -type f \
-              \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) | wc -l)
-            echo "- Assets uploaded: ${asset_count} package files"
-            echo "- Provenance: GitHub Artifact Attestations generated from \`SHA256SUMS\`"
+            echo "- Release publication: ${RELEASE_OUTCOME:-skipped}"
+            echo "- Artifact attestation: ${ATTESTATION_OUTCOME:-skipped}"
+            echo "- PyPI iccdev publication: ${PYPI_ICCDEV_OUTCOME:-skipped}"
+            echo "- PyPI iccdev-mcp publication: ${PYPI_MCP_OUTCOME:-skipped}"
+            echo "- Assets staged: ${asset_count} package files"
             echo ""
-            for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm; do
+            for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl release-assets/*.tar.gz; do
               [ -f "$f" ] || continue
-              echo "  - \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
+              printf '  - %s\n' "$(sanitize_filename "$(basename "$f")")"
             done
-          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          } | while IFS= read -r line; do
+            sanitize_line "$line"
+            printf '\n'
+          done >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

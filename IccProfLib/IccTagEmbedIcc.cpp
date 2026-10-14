@@ -9,58 +9,34 @@ Copyright:  ? see ICC Software License
 */
 
 /*
-* The ICC Software License, Version 0.2
-*
-*
-* Copyright (c) 2003-2018 The International Color Consortium. All rights
-* reserved.
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, are permitted provided that the following conditions
-* are met:
-*
-* 1. Redistributions of source code must retain the above copyright
-*    notice, this list of conditions and the following disclaimer.
-*
-* 2. Redistributions in binary form must reproduce the above copyright
-*    notice, this list of conditions and the following disclaimer in
-*    the documentation and/or other materials provided with the
-*    distribution.
-*
-* 3. In the absence of prior written permission, the names "ICC" and "The
-*    International Color Consortium" must not be used to imply that the
-*    ICC organization endorses or promotes products derived from this
-*    software.
-*
-*
-* THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
-* WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-* OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-* DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
-* ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-* SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-* LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-* USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-* OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-* SUCH DAMAGE.
-* ====================================================================
-*
-* This software consists of voluntary contributions made by many
-* individuals on behalf of the The International Color Consortium.
-*
-*
-* Membership in the ICC is encouraged when this software is used for
-* commercial purposes.
-*
-*
-* For more information on The International Color Consortium, please
-* see <http://www.color.org/>.
-*
-*
-*/
-
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -254,6 +230,10 @@ bool CIccTagEmbeddedProfile::Read(icUInt32Number size, CIccIO *pIO, CIccProfile 
 
   m_pProfile = pProfile ? pProfile->NewProfile() : new CIccProfile();
 
+  // ICC.2:2023 7.2.4 requires the profile-size field to equal the exact
+  // profile extent. The ICC5 tag's payload boundary is the embedded profile's
+  // file boundary, so accepting a different declared size hides trailing or
+  // missing bytes from nested-profile validation.
   if (pProfile && pProfile->HasIO()) {
     if (!m_pProfile->Attach(pEmbedIO)) {
       delete pEmbedIO;
@@ -262,9 +242,33 @@ bool CIccTagEmbeddedProfile::Read(icUInt32Number size, CIccIO *pIO, CIccProfile 
 
       return false;
     }
+    if (m_pProfile->m_Header.size != size) {
+      delete m_pProfile;
+      m_pProfile = NULL;
+
+      return false;
+    }
+    std::string layoutReport;
+    icValidateStatus layoutStatus = m_pProfile->CheckTagLayout(pEmbedIO, layoutReport);
+    if (layoutStatus == icValidateNonCompliant ||
+        layoutStatus == icValidateCriticalError) {
+      delete m_pProfile;
+      m_pProfile = NULL;
+
+      return false;
+    }
   }
   else {
     bool stat = m_pProfile->Read(pEmbedIO);
+    if (stat && m_pProfile->m_Header.size != size)
+      stat = false;
+    if (stat) {
+      std::string layoutReport;
+      icValidateStatus layoutStatus = m_pProfile->CheckTagLayout(pEmbedIO, layoutReport);
+      if (layoutStatus == icValidateNonCompliant ||
+          layoutStatus == icValidateCriticalError)
+        stat = false;
+    }
     delete pEmbedIO;
 
     if (!stat) {
@@ -592,7 +596,46 @@ icValidateStatus CIccTagEmbeddedProfile::Validate(std::string sigPath, std::stri
 
   rv = icMaxStatus(rv, m_pProfile->Validate(sReport, sigPath, m_pProfile));
 
+  // ICC Technical Note 04-2018, "ICC.2 Profile header requirements": bit 0
+  // of the embedded profile's flags "should be set to 1 to indicate that
+  // the profile is embedded in another file", and "only ICC.2 profiles
+  // containing 0 in bit position 1 should be embedded in other profiles".
+  // Both are "should", so each draws a warning (#2693).
+  if (!(m_pProfile->m_Header.flags & icEmbeddedProfileTrue)) {
+    sReport += icMsgValidateWarning;
+    sReport += Info.GetSigPathName(sigPath);
+    sReport += " - Embedded profile header flags do not mark it as embedded in another file.\n";
+
+    rv = icMaxStatus(rv, icValidateWarning);
+  }
+  if (m_pProfile->m_Header.flags & icUseWithEmbeddedDataOnly) {
+    sReport += icMsgValidateWarning;
+    sReport += Info.GetSigPathName(sigPath);
+    sReport += " - Embedded profile header flags say it cannot be used independently of embedded colour data.\n";
+
+    rv = icMaxStatus(rv, icValidateWarning);
+  }
+
   if (pProfile) {
+    // Technical Note 04-2018: the embedded profile "shall be considered a
+    // logical replacement for the profile that it is embedded into.
+    // Therefore it shall be of the same profile class, and have the same
+    // device space."  This used to accept any device space with at least
+    // the host's channel count, which let an nc0005 or 8CLR child stand in
+    // for a CMYK or RGB host; the device space is now compared as the note
+    // says (#2693).  The channel comparison below is kept for the message
+    // it gives when the count is what differs.
+    if (m_pProfile->m_Header.colorSpace != pProfile->m_Header.colorSpace) {
+      sReport += icMsgValidateCriticalError;
+      sReport += Info.GetSigPathName(sigPath);
+      sReport += " - Embedded profile device space ";
+      sReport += Info.GetColorSpaceSigName(m_pProfile->m_Header.colorSpace);
+      sReport += " does not match the parent profile's ";
+      sReport += Info.GetColorSpaceSigName(pProfile->m_Header.colorSpace);
+      sReport += ".\n";
+
+      rv = icMaxStatus(rv, icValidateCriticalError);
+    }
     if (icGetSpaceSamples(m_pProfile->m_Header.colorSpace) < icGetSpaceSamples(pProfile->m_Header.colorSpace)) {
       sReport += icMsgValidateCriticalError;
       sReport += Info.GetSigPathName(sigPath);

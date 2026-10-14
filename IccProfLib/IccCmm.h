@@ -10,53 +10,33 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -113,6 +93,20 @@ typedef enum {
   // iccRoundTrip report a perfectly valid profile as "Invalid profile" (#1843).
   // Appended at the end of the enum so no existing value is renumbered.
   icCmmStatUnsupportedProfileClass = 19,
+  // Reported when an IIccAdjustPCSXform hint cannot produce the PCS scale and
+  // offset factors CIccXform::Begin() asked it for.  CalcFactors() returns bool,
+  // so Begin() cannot tell which of its 26 failure paths ran -- it used to
+  // report all of them as icCmmStatIncorrectApply, which is false on every one:
+  // the caller's apply object is well formed in each case, and the failure is
+  // the adjustment, not the apply.  The 33 other icCmmStatIncorrectApply returns
+  // in IccCmm.cpp all concern a missing apply object or an unusable apply
+  // interface, so this site was the lone outlier and a caller had no way to tell
+  // the two apart.  Named for the interface rather than for black point
+  // compensation: CIccApplyBPC is the only in-tree implementer, but
+  // IIccAdjustPCSXform is exported and reached through a hint, so an
+  // out-of-tree implementer need not be doing black point compensation at all
+  // (#2176).  Appended at the end of the enum so no existing value is renumbered.
+  icCmmStatCantAdjustPcs           = 20,
 } icStatusCMM;
 
 /// CMM Interpolation types
@@ -435,12 +429,22 @@ public:
 
   //ShareProfile should only be called when the profile is shared between transforms 
   void ShareProfile() { m_bOwnsProfile = false; } 
-  void SetPcsAdjustXform() { m_bPcsAdjustXform = true; }
+  /// Sets the flag, then refreshes the port-spectral-ness cache (see
+  /// refreshPcsPortCache() below): this flag is one of the inputs
+  /// GetSrcSpace() branches on, so the cache has to be recomputed after it
+  /// changes.
+  void SetPcsAdjustXform() { m_bPcsAdjustXform = true; refreshPcsPortCache(); }
   /// Marks this xform as the gamut check for its profile.  The gamt tag is
   /// B-to-A shaped, so Create() traverses it with bInput false; without this
   /// flag the !m_bInput branches of GetDstSpace()/GetNumDstSamples() would
   /// report the profile's device space instead of the single gamut channel.
-  void SetGamutXform() { m_bGamutXform = true; }
+  /// Refreshes the port cache afterward for the same reason SetPcsAdjustXform()
+  /// does: this flag is one of GetDstSpace()'s inputs.
+  void SetGamutXform() { m_bGamutXform = true; refreshPcsPortCache(); }
+  /// Records which tag family Create() resolved this xform through: true for
+  /// the DToBx/BToDx MPE tags, false for the AToBx/BToAx colorimetric ones.
+  /// Only Create() should call this.
+  void SetUseD2BTags(bool bUseD2BTags) { m_bUseD2BTags = bUseD2BTags; }
 
   virtual icStatusCMM Begin();
 
@@ -467,6 +471,13 @@ public:
   
   ///Checks if the profile is to be used as input profile
   bool IsInput() const { return m_bInput; }
+
+  /// True when this xform was resolved through the DToBx/BToDx MPE tags rather
+  /// than the AToBx/BToAx colorimetric ones.  CIccApplyBPC needs it so its
+  /// black-point transforms select the same tag family the xform itself uses;
+  /// a caller that opts out of the MPE tags for the xform but computes black
+  /// through them gets a black point from a pipeline it never applies.
+  bool UseD2BTags() const { return m_bUseD2BTags; }
 
   virtual bool IsLateBinding() const { return false; }
   virtual IIccProfileConnectionConditions *GetProfileCC() const { return m_pProfile; }
@@ -499,11 +510,42 @@ public:
 	icRenderingIntent GetIntent() const { return m_nIntent; }
   icXformInterp GetInterp() const { return m_nInterp; }
 
-  void SetSrcPCSConversion(bool bPcsConvert) { m_bSrcPcsConversion = bPcsConvert; }
-  void SetDstPCSConversion(bool bPcsConvert) { m_bDstPcsConversion = bPcsConvert; }
+  /// True when this xform carries a PCS adjustment at all. CIccPcsXform is
+  /// what performs it; CheckPCSConnections() reads this to decide whether a
+  /// chain edge needs a CIccPcsXform even when the spaces already match.
   bool NeedAdjustPCS() { return m_bAdjustPCS; }
-  bool NeedAdjustSrcPCS() { return m_bAdjustPCS && !m_bSrcPcsConversion; }
-  bool NeedAdjustDstPCS() { return m_bAdjustPCS && !m_bDstPcsConversion; }
+
+  /// True when this xform's PCS adjustment applies to values entering it.
+  /// Only an output (PCS->device) xform adjusts on the way in. Virtual so
+  /// subclasses whose Apply() carried extra conditions can answer at Begin()
+  /// time, which is when CIccPcsXform::Connect() has to decide whether to
+  /// push the steps.
+  ///
+  /// Answers false at a spectral PCS port. The adjustment these gate is the
+  /// XYZ media-white one, which treats the first three samples of the pixel
+  /// as X, Y and Z -- which the first three samples of a spectral vector are
+  /// not. A spectral port takes CIccPcsXform's spectral white point
+  /// conversion instead; see
+  /// docs/superpowers/plans/2026-08-26-spectral-pcs-white-point-conversion.md.
+  ///
+  /// Reads m_bSrcSpectralPCS rather than calling the virtual GetSrcSpace()
+  /// itself: GetSrcSpace() walks into the profile header, and this predicate
+  /// is asked once per port per Begin(), so Begin() fills the cache once,
+  /// from the same GetSrcSpace() this predicate used to call directly.
+  ///
+  /// Defined out of line in IccCmm.cpp for the same reason the
+  /// CIccXformNamedColor overrides below are: the IsSpaceSpectralPCS() needed
+  /// here is the file-local one there, and IccSignatureUtils.h declares a
+  /// different function of the same name that would silently win if it were
+  /// included in this header.
+  virtual bool NeedsSrcPcsAdjust() const;
+
+  /// True when this xform's PCS adjustment applies to values leaving it.
+  /// Only an input (device->PCS) xform adjusts on the way out. Excludes a
+  /// spectral PCS port and reads the m_bDstSpectralPCS cache for the
+  /// reasons given on NeedsSrcPcsAdjust() above.
+  virtual bool NeedsDstPcsAdjust() const;
+
   bool LuminanceMatching() { return m_bLuminanceMatching; }
 
   virtual IIccProfileConnectionConditions *GetConnectionConditions() const { return m_pConnectionConditions; }
@@ -517,12 +559,33 @@ public:
 protected:
   //Called by derived classes to initialize Base
 
-  const icFloatNumber *CheckSrcAbs(CIccApplyXform *pApply, const icFloatNumber *Pixel) const;
-  void CheckDstAbs(icFloatNumber *Pixel) const;
-	void AdjustPCS(icFloatNumber *DstPixel, const icFloatNumber *SrcPixel) const;
-
   bool CheckForInvalidPCSScale() const;
-  
+
+  /// Recomputes m_bSrcSpectralPCS/m_bDstSpectralPCS from
+  /// IsSpaceSpectralPCS(GetSrcSpace())/IsSpaceSpectralPCS(GetDstSpace()).
+  /// Call this from every place that can move one of this xform's ports
+  /// after construction -- Begin(), SetParams(), SetGamutXform(),
+  /// SetPcsAdjustXform(), and CIccXformNamedColor::SetSrcSpace()/
+  /// SetDestSpace() all do. One computation, audited call sites, instead of
+  /// each caller re-deriving the same two lines (which is how the
+  /// CIccXformNamedColor setters looked before this helper existed, and
+  /// which is exactly the shape that let SetParams() go unrefreshed and
+  /// stay unrefreshed across two review rounds).
+  ///
+  /// Dispatches virtually through GetSrcSpace()/GetDstSpace(), so it must
+  /// never run before the most-derived constructor has finished -- a virtual
+  /// call during construction resolves to the class under construction, not
+  /// any further-derived override, and CIccXform::GetSrcSpace()'s base
+  /// implementation dereferences m_pProfile, which is still NULL at that
+  /// point. Every call site above runs on an already-constructed object:
+  /// SetParams() is called from CIccXform::Create() only after `new` has
+  /// returned (IccCmm.cpp, the three Create() overloads), never from a
+  /// constructor; SetGamutXform()/SetPcsAdjustXform() are likewise called
+  /// from Create()/CheckPCSRangeConversions() on an already-returned xform;
+  /// and CIccXformNamedColor's constructor sets m_nSrcSpace/m_nDestSpace
+  /// directly rather than through SetSrcSpace()/SetDestSpace().
+  void refreshPcsPortCache();
+
   virtual bool HasPerceptualHandling() { return true; }
 
   CIccProfile *m_pProfile;
@@ -542,15 +605,27 @@ protected:
   icMCSConnectionType m_nMCS;
   bool m_bLuminanceMatching;
   
-  //Temporary field
-  bool m_bSrcPcsConversion;
-  bool m_bDstPcsConversion;
-
 	// track PCS adjustments
 	IIccAdjustPCSXform* m_pAdjustPCS;
 	bool m_bAdjustPCS;
 	icFloatNumber m_PCSScale[3]; // scale and offset for PCS adjustment in XYZ
 	icFloatNumber m_PCSOffset[3];
+
+  // NeedsSrcPcsAdjust()/NeedsDstPcsAdjust() read these instead of
+  // re-deriving the answer from a virtual GetSrcSpace()/GetDstSpace() call
+  // (which, on the base implementation, walks the profile header) every time
+  // they are asked. Before the CheckSrcAbs()/CheckDstAbs() retirement that
+  // was once per pixel; today it is once per port per Begin(), from
+  // CIccPcsXform::Connect()/ConnectFirst()/ConnectLast(). Kept correct by
+  // refreshPcsPortCache() above,
+  // called from every site that can move a port after construction --
+  // rather than by each such site recomputing IsSpaceSpectralPCS() itself,
+  // which is how a first fix here (Begin() only) and a second fix (Begin()
+  // plus the two CIccXformNamedColor setters) both still left SetParams()
+  // stale before this helper existed. See refreshPcsPortCache()'s comment
+  // for the full call-site list and why virtual dispatch is safe there.
+  bool m_bSrcSpectralPCS;
+  bool m_bDstSpectralPCS;
 
   IIccProfileConnectionConditions *m_pConnectionConditions;
 
@@ -602,8 +677,6 @@ public:
   const CIccXform *GetXform() { return m_pXform; }
 
 protected:
-  icFloatNumber m_AbsLab[3];
-
   CIccApplyXform(CIccXform *pXform);
 
   const CIccXform *m_pXform;
@@ -1181,6 +1254,8 @@ protected:
   icStatusCMM pushSpecToRange(const icSpectralRange &srcRange, const icSpectralRange &dstRange);
   icStatusCMM pushApplyIllum(CIccProfile *pProfile, IIccProfileConnectionConditions *pPcc);
   icStatusCMM pushRad2Xyz(CIccProfile *pProfile, IIccProfileConnectionConditions *pPcc, bool bAbsoluteCIEColorimetry=false);
+  icStatusCMM pushSpectralWhitePointConvert(const CIccXform *pXform, bool bDstPort,
+                                            icUInt16Number nPortSamples);
   icStatusCMM pushBiRef2Xyz(CIccProfile *pProfile, IIccProfileConnectionConditions *pPcc);
   icStatusCMM pushBiRef2Ref(CIccProfile *pProfile, IIccProfileConnectionConditions *pPcc);
   icStatusCMM pushBiRef2Rad(CIccProfile *pProfile, IIccProfileConnectionConditions *pPcc);
@@ -1356,6 +1431,11 @@ public:
   virtual LPIccCurve* ExtractInputCurves();
   virtual LPIccCurve* ExtractOutputCurves();
 protected:
+  /// Whether Apply() must zero its scratch pixel above channel 3. Set by Begin().
+  /// When a CLUT is present, Interp3d/Interp3dTetra write all m_nOutput channels
+  /// on every path, so the fill is dead; Apply() ran it unconditionally.
+  bool m_bNeedScratchInit;
+
 
   const CIccMBB *m_pTag;
 
@@ -1514,6 +1594,18 @@ public:
   ///Checks if the destination space of the transform is PCS
   bool IsDestPCS() const;
 
+  /// Named-colour lookups take a PCS adjustment only when the side in question
+  /// really is a colorimetric PCS. A spectral PCS is matched against spectral
+  /// data and takes no XYZ media-white adjustment.
+  ///
+  /// Defined out of line in IccCmm.cpp deliberately: the IsSpaceSpectralPCS()
+  /// these need is the file-local one there, which tests the five spectral PCS
+  /// signatures after icGetColorSpaceType(). IccSignatureUtils.h declares a
+  /// different function of the same name testing a single 'spc ' signature, and
+  /// because its parameter type is an exact match for icColorSpaceSignature,
+  /// including that header here would silently select the wrong predicate.
+  virtual bool NeedsSrcPcsAdjust() const;
+  virtual bool NeedsDstPcsAdjust() const;
 
   virtual LPIccCurve* ExtractInputCurves() {return NULL;}
   virtual LPIccCurve* ExtractOutputCurves() {return NULL;}
@@ -1571,6 +1663,20 @@ public:
   virtual LPIccCurve* ExtractOutputCurves() {return NULL;}
 
   virtual bool NoClipPCS() const { return true; }
+
+  /// B2D3/D2B3 tags are already absolute, so they take no PCS adjustment.
+  /// This condition used to live inside Apply(); CIccPcsXform::Connect() needs
+  /// the answer at Begin() time instead.
+  virtual bool NeedsSrcPcsAdjust() const
+  {
+    return CIccXform::NeedsSrcPcsAdjust() &&
+           (m_nIntent != icAbsoluteColorimetric || m_nIntent != m_nTagIntent);
+  }
+  virtual bool NeedsDstPcsAdjust() const
+  {
+    return CIccXform::NeedsDstPcsAdjust() &&
+           (m_nIntent != icAbsoluteColorimetric || m_nIntent != m_nTagIntent);
+  }
 
   virtual bool IsLateBinding() const;
   virtual bool IsLateBindingReflectance() const;
@@ -1809,6 +1915,9 @@ public:
   virtual icStatusCMM AddXform(CIccXform* pXform); //note pXform will be owned by the CMM
 
   //The Begin function should be called before Apply or GetNewApplyCmm()
+  /// bUsePcsConversion is ignored. It used to select an in-xform adjustment
+  /// path that no longer exists; CIccPcsXform performs every PCS adjustment.
+  /// The parameter is retained for source compatibility.
   virtual icStatusCMM Begin(bool bAllocNewApply=true, bool bUsePcsConversion=false);
 
   //Get an additional Apply cmm object to apply pixels with.  The Apply object should be deleted by the caller.
@@ -1892,6 +2001,9 @@ protected:
   void SetLateBindingCC();
 
   icStatusCMM CheckPCSRangeConversions();
+  /// bUsePCSConversions is ignored. It used to select an in-xform adjustment
+  /// path that no longer exists; CIccPcsXform performs every PCS adjustment.
+  /// The parameter is retained for source compatibility.
   icStatusCMM CheckPCSConnections(bool bUsePCSConversions=false);
 
   CIccApplyCmm *m_pApply;
@@ -1978,6 +2090,9 @@ public:
 
   ///Must be called before calling Apply() or GetNewApply()
   //The Begin function should be called before Apply or GetNewApplyCmm()
+  /// bUsePcsConversion is ignored. It used to select an in-xform adjustment
+  /// path that no longer exists; CIccPcsXform performs every PCS adjustment.
+  /// The parameter is retained for source compatibility.
   virtual icStatusCMM Begin(bool bAllocNewApply=true, bool bUsePcsConversion=false);
 
   virtual CIccApplyCmm *GetNewApplyCmm(icStatusCMM &status); 
@@ -2092,6 +2207,15 @@ protected:
   bool Init(CIccCmm *pCachedCmm, icUInt16Number nCacheSize);
 
   CIccCmm *m_pCachedCmm;
+
+  //Private apply object for the cached CMM, allocated in Init() and owned here.
+  //A cache miss must not drive m_pCachedCmm->Apply(): that dispatches through
+  //the cached CMM's single m_pApply, so every CIccApplyMruCmm sharing that CMM
+  //-- one per CIccThreadedCmm worker -- would race on the same scratch state
+  //while each held a private cache.  Mirrors the per-sub-chain apply objects
+  //CIccApplyCmmSearch owns for the same reason.
+  CIccApplyCmm *m_pCachedApply;
+
   CIccMruCacheFloat *m_pCache;
 };
 

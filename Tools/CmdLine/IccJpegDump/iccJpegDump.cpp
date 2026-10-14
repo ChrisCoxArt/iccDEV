@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2010 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -84,7 +60,11 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <limits>
+#include "IccProfile.h"
+#include "IccUtil.h"
 #include "IccCmdLineUtil.h"
+#include "IccSameFile.h"
 #if defined(_WIN32)
   #include <winsock2.h>
 #else
@@ -139,8 +119,10 @@
 // ============================================================================
 void Usage() {
     printf("Usage:\n");
-    printf("  iccJpegDump <input.jpg> [output.icc]\n");
-    printf("    - Extract ICC profile from JPEG (APP2 or EXIF-based) if present.\n");
+    printf("  iccJpegDump <input.jpg>\n");
+    printf("    - Inspect JPEG size and embedded ICC_PROFILE APP2 information without writing files.\n");
+    printf("  iccJpegDump <input.jpg> <output.icc>\n");
+    printf("    - Extract the raw ICC_PROFILE APP2 payload without requiring a parseable profile.\n");
     printf("  iccJpegDump <input.jpg> --write-icc <profile.icc> --output <output.jpg>\n");
     printf("    - Inject ICC profile into JPEG image.\n");
 }
@@ -176,16 +158,14 @@ static bool ReadBinaryStream(std::istream& input, std::vector<unsigned char>& da
 //   Attempts to extract an embedded ICC profile from a JPEG file.
 //
 // Search Order:
-//   1. APP2 marker with "ICC_PROFILE\0" signature (preferred spec)
-//   2. APP0-APPF markers with embedded "acsp" magic (EXIF/ad hoc embed)
-//   3. Full binary scan fallback for "acsp" if header parsing fails
+//   APP2 markers with "ICC_PROFILE\0" signatures, reassembled in sequence order.
 //
 // Parameters:
 //   - jpegPath:     Input JPEG file path
-//   - iccOutPath:   Output ICC binary file to write
+//   - iccOutPath:   Output ICC binary file to write, or null for inspection
 //
 // Returns:
-//   true if a valid ICC profile was found and written to disk, false otherwise.
+//   true on successful inspection or raw extraction, false on invalid input.
 // ============================================================================
 bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
     std::ifstream file(jpegPath, std::ios::binary);
@@ -198,6 +178,9 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
     if (n < 2 || data[0] != 0xFF || data[1] != 0xD8) {
         LOG_ERROR("Not a valid JPEG file (missing SOI).");
         return false;
+    }
+    if (!iccOutPath) {
+        printf("JPEG file size: %zu bytes\n", n);
     }
 
     // ICC profiles are carried in one or more APP2 segments, each beginning with
@@ -213,6 +196,7 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
     std::vector<bool> seen;
     unsigned int totalChunks = 0;
     size_t pos = 2;  // past SOI
+    bool reachedImage = false;
 
     while (pos < n) {
         if (data[pos] != 0xFF) { pos++; continue; }        // resync to next marker
@@ -220,13 +204,24 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
         if (pos >= n) break;
         unsigned char m = data[pos++];
 
-        if (m == 0xD9 || m == 0xDA) break;                  // EOI, or SOS (entropy data follows)
+        if (m == 0xD9 || m == 0xDA) {
+            reachedImage = true;
+            break;                                        // EOI, or SOS (entropy data follows)
+        }
         if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue; // standalone markers (no length)
 
-        if (pos + 2 > n) break;
+        if (pos + 2 > n) {
+            if (iccOutPath) break;
+            LOG_ERROR("Truncated JPEG marker length.");
+            return false;
+        }
         unsigned int segLen = (unsigned int)((data[pos] << 8) | data[pos + 1]);
         pos += 2;
-        if (segLen < 2 || pos + (segLen - 2) > n) break;
+        if (segLen < 2 || pos + (segLen - 2) > n) {
+            if (iccOutPath) break;
+            LOG_ERROR("Invalid or truncated JPEG marker payload.");
+            return false;
+        }
         size_t payloadLen = segLen - 2;
         // A segment may declare the minimum length of 2, i.e. an empty payload, and
         // it may be the last thing in the file -- then pos == n here and the bounds
@@ -265,7 +260,16 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
         pos += payloadLen;
     }
 
+    if (!iccOutPath && !reachedImage) {
+        LOG_ERROR("Incomplete JPEG marker stream (missing SOS or EOI).");
+        return false;
+    }
+
     if (totalChunks == 0) {
+        if (!iccOutPath) {
+            printf("[INFO] No ICC_PROFILE APP2 marker found.\n");
+            return true;
+        }
         LOG_ERROR("No ICC_PROFILE APP2 marker found.");
         return false;
     }
@@ -277,6 +281,29 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
             return false;
         }
         iccData.insert(iccData.end(), chunks[i].begin(), chunks[i].end());
+    }
+
+    if (!iccOutPath) {
+        printf("ICC profile size: %zu bytes (%u chunk(s))\n", iccData.size(), totalChunks);
+        if (iccData.empty() || iccData.size() > std::numeric_limits<icUInt32Number>::max()) {
+            LOG_ERROR("Embedded ICC profile is empty or too large to parse.");
+            return false;
+        }
+        CIccProfile* profile = OpenIccProfile(iccData.data(), static_cast<icUInt32Number>(iccData.size()));
+        if (!profile) {
+            LOG_ERROR("Failed to parse embedded ICC profile.");
+            return false;
+        }
+        const icHeader& header = profile->m_Header;
+        CIccInfo info;
+        printf("Color Space: %s\n", info.GetColorSpaceSigName(header.colorSpace));
+        printf("Colorimetric PCS: %s\n", info.GetColorSpaceSigName(header.pcs));
+        printf("Profile Version: %u.%u.%u\n",
+               static_cast<unsigned int>((header.version >> 24) & 0xff),
+               static_cast<unsigned int>((header.version >> 20) & 0x0f),
+               static_cast<unsigned int>((header.version >> 16) & 0x0f));
+        delete profile;
+        return true;
     }
 
     FILE* out = icOpenWriteBinaryFile(iccOutPath);
@@ -297,7 +324,7 @@ bool ExtractIccFromJpeg(const char* jpegPath, const char* iccOutPath) {
 //   Embeds an ICC profile into a JPEG image by inserting an APP2 segment
 //   with the `ICC_PROFILE` signature immediately after the SOI marker.
 //
-//   This method does NOT strip or validate existing ICC markers—it simply
+//   This method does NOT strip or validate existing ICC markers - it simply
 //   prepends a new APP2 segment and appends the remainder of the original image.
 //
 // Parameters:
@@ -461,6 +488,11 @@ int main(int argc, char* argv[]) {
     // ICC Injection Mode: Embed ICC profile into a JPEG
     // ------------------------------------------------------------------------
     if (injectIccFile && outputJpegFile) {
+        // #2692: --write-icc names an INPUT here, the profile to embed, so the
+        // output is refused if it is either input.
+        if (icOutputIsInput(outputJpegFile, inputFile) ||
+            icOutputIsInput(outputJpegFile, injectIccFile))
+            return EXIT_FAILURE;
         if (!InjectIccIntoJpeg(inputFile, injectIccFile, outputJpegFile)) {
             safe_exit("Failed to inject ICC profile.");
         }
@@ -470,8 +502,15 @@ int main(int argc, char* argv[]) {
     // ICC Extraction Mode: Extract ICC profile from a JPEG
     // ------------------------------------------------------------------------
     } else if (extractIccOut) {
+        // #2692: extracting over the image replaced it with its own profile.
+        if (icOutputIsInput(extractIccOut, inputFile))
+            return EXIT_FAILURE;
         if (!ExtractIccFromJpeg(inputFile, extractIccOut)) {
             safe_exit("Failed to extract ICC profile.");
+        }
+    } else if (argc == 2) {
+        if (!ExtractIccFromJpeg(inputFile, nullptr)) {
+            safe_exit("Failed to inspect JPEG ICC information.");
         }
 
     // ------------------------------------------------------------------------

@@ -70,19 +70,27 @@ native MSVC remains on SSE2 because its AVX2 implementation regressed.
 Require `output_vector_match=True` for every result row.
 
 On Linux, make a separate Release monitoring build with
-`-DICCDEV_ENABLE_PERF_MONITORING=ON`. Then collect a pinned timing distribution,
+`-DICCDEV_ENABLE_TELEMETRY=ON`. Then collect a pinned timing distribution,
 hardware counters, syscall summary, and optional FlameGraph inputs:
 
 ```bash
 ICCDEV_CLUT_PROFILE_AFFINITY=0 \
 ICCDEV_CLUT_PROFILE_RUNS=21 \
 ICCDEV_CLUT_PROFILE_FLAMEGRAPH=1 \
-FLAMEGRAPH_DIR=/path/to/FlameGraph \
+ICCDEV_FLAMEGRAPH_DIR=/path/to/FlameGraph \
 ./.github/scripts/iccdev-clut-profile.sh out/clut-avx2 out/clut-profile
 ```
 
+Inside the unified container, use its preconfigured pinned
+`ICCDEV_FLAMEGRAPH_DIR` without overriding it.
+
 The script preserves a telemetry file per measured CTest run. Do not enable
 `ICC_AVX2_CLUT_DEBUG`, coverage, or strace while comparing cycle counts.
+Record `clut_timing_stride` with each counter report. The default of 1 times
+every CLUT call; use a power-of-two `ICC_PERF_CLUT_TIMING_STRIDE` up to 1024
+when lower overhead matters, and treat elapsed fields as estimates then.
+Call counters remain exact. Keep instrumented timings separate from the
+ordinary throughput baseline.
 
 ## Handoff
 

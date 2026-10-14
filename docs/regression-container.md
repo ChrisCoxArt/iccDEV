@@ -8,29 +8,85 @@ reference profiles, the MCP runtime, and the maintainer compiler and QA tools.
 Clang 22 is the default compiler; the packaged AFL++ LLVM plugin uses the
 included Clang 21 pair for compatible instrumentation.
 
+## Dependency refresh
+
+The Dockerfile pins the Ubuntu base digest and package versions. Ubuntu's live
+APT repositories can replace security-update versions even when the base digest
+is unchanged. An unavailable exact version is a dependency-refresh failure;
+retries cannot restore a superseded package. Keep exact pins rather than
+silently falling back to an unreviewed version.
+
+Review every APT pin against fresh indexes from the Dockerfile's pinned base.
+Update related packages together, including `libssl-dev`, `libssl3t64`,
+`openssl`, and `openssl-provider-legacy`. Also check the Docker-only Python
+requirements under `.github/ci/requirements/` and the checksummed QA tool
+releases before rebuilding. Keep the instrumented LLVM and libxml2 source
+revisions aligned with their documented runtime contracts.
+
+Validate a refresh with a local image build using `--no-cache --pull`, then run
+the unified-image, MCP/REST, and MemorySanitizer checks from `ci-docker` before
+pushing. For a local unpublished change, omit `GIT_COMMIT` so the image tests
+the copied checkout rather than fetching an older remote revision. Record the
+reviewed versions, image identity, and local results with the handoff.
+
+The image build runs one focused CTest by default. For a local build where
+CTest must be skipped, pass `--build-arg ICCDEV_RUN_CTEST=OFF`. The CI build
+keeps the default `ON` behavior.
+
 ## Tags
 
 | Tag | Purpose |
 |-----|---------|
 | `latest` | Current image from `master`; convenient but mutable. |
+| `ci-qa-pr-docker-testing` | Mutable integration image published only by the protected Docker validation branch. |
+| `ci-publish-colourbill-ctrl` | Mutable integration image published by the reviewer-gated maintainer publishing branch. |
 | `sha-<40-character-commit>` | Immutable CI and investigation reference. |
 | `v<release>` | Immutable released image. |
 | Existing legacy tags | Retained temporarily for continuity; unsupported for new use. |
 
-Use `latest` only to start interactive work. Record the resolved digest and
-source revision in a report; use the SHA tag whenever another person or CI job
-must reproduce the result.
+Resolve every selected tag to a digest and record that digest plus the source
+revision before automated or shared validation. Execute the resolved digest,
+not the tag, so a mutable tag cannot change during the run. Do not hardcode one
+full-SHA tag as a long-lived workflow default; it becomes stale as the
+maintainer image advances. Replay prior evidence with its recorded digest.
 
 Existing short-SHA, branch, and image-variant tags remain available only to
-avoid breaking current users during the consolidation transition. Do not create,
+avoid breaking current users during the consolidation transition, except for
+the supported `ci-qa-pr-docker-testing` and `ci-publish-colourbill-ctrl`
+integration tags. Do not create,
 recommend, or depend on new legacy tags. Re-evaluate their retention and
 removal through a separately announced tag-management change.
 
+## Platforms
+
+Published tags are OCI manifest lists containing native `linux/amd64` and
+`linux/arm64` images. Docker selects the matching image automatically; Docker
+Desktop on Apple Silicon therefore uses `linux/arm64` without x86 emulation.
+The build workflow builds, smoke-tests, generates an SBOM for, and attests each
+architecture before publishing the manifest tags.
+
+Confirm the published contract before shared use:
+
 ```bash
-IMAGE=ghcr.io/internationalcolorconsortium/iccdev:latest
-docker pull "$IMAGE"
-docker image inspect "$IMAGE" \
-  --format '{{index .RepoDigests 0}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
+IMAGE_TAG=ghcr.io/internationalcolorconsortium/iccdev:latest
+docker buildx imagetools inspect "$IMAGE_TAG"
+docker buildx imagetools inspect --raw "$IMAGE_TAG" \
+  | jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort == ["amd64", "arm64"]'
+```
+
+For a local Apple Silicon Dockerfile proof, use the native platform explicitly:
+
+```bash
+docker buildx build --platform linux/arm64 --load -t iccdev:local-arm64 .
+docker run --rm iccdev:local-arm64 bash -lc 'codeql version && hadolint --version && ctest --test-dir /workspace/build -N --no-tests=error'
+```
+
+```bash
+IMAGE_TAG=ghcr.io/internationalcolorconsortium/iccdev:latest
+docker pull "$IMAGE_TAG"
+IMAGE="$(docker image inspect "$IMAGE_TAG" --format '{{index .RepoDigests 0}}')"
+IMAGE_REVISION="$(docker image inspect "$IMAGE_TAG" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+printf 'digest=%s revision=%s\n' "$IMAGE" "$IMAGE_REVISION"
 docker run --rm -it "$IMAGE"
 ```
 
@@ -45,6 +101,31 @@ iccdev-fuzz-env
 ctest --test-dir /workspace/build -N --no-tests=error
 ```
 
+## CodeQL, coverage, and profiling tools
+
+The image includes the pinned CodeQL CLI bundle, `lcov`, `genhtml`, `gcovr`, `llvm-cov`, `llvm-profdata`,
+`gprof`, `perf`, `strace`, and a pinned FlameGraph checkout at
+`$ICCDEV_FLAMEGRAPH_DIR` (`/opt/FlameGraph`). Its exact revision is exposed as
+`ICCDEV_FLAMEGRAPH_REVISION`. Build coverage, profiling, and sanitizer modes in
+separate directories so their instrumentation does not contaminate results.
+LCOV uses the accelerated `JSON::XS` backend and treats unexecuted blocks on
+non-branch lines as zero-count blocks, avoiding inconsistent GCC standard
+library coverage records. `LCOV_HOME=/` makes LCOV load the checked system
+configuration from `/etc/lcovrc` for both interactive and scripted runs.
+
+`codeql` is available on `PATH`; `.github/scripts/run-codeql-local.sh` uses it
+directly and falls back to `gh codeql` only when no native CLI is present.
+For a caller checkout, resolve an image tag to a digest, mount the checkout
+read-only, and analyze a container-local copy; use the recipe in
+[CodeQL security analysis](codeql.md).
+
+An `ENABLE_PROFILING=ON` Linux build with tests enabled registers
+`iccdev.profiling-smoke`. It proves that `iccDumpProfile` writes a nonempty
+`gmon.out` and that `gprof` can read it. FlameGraph helpers use
+`ICCDEV_FLAMEGRAPH_DIR` automatically. Hardware `perf` events still depend on
+the host kernel and container permissions; unavailable counters are an
+environment limitation, not a correctness failure.
+
 ## MCP
 
 Start MCP stdio or the REST API explicitly; a single image deliberately has one
@@ -55,6 +136,42 @@ docker run --rm -i "$IMAGE" iccdev-mcp-entrypoint mcp
 docker run --rm -p 127.0.0.1:8080:8080 "$IMAGE" iccdev-mcp-entrypoint rest
 curl -fsS http://127.0.0.1:8080/api/health
 ```
+
+The CLI tools remain sanitizer-instrumented. Python native validation uses an
+isolated non-sanitized shared IccProfLib at
+`/opt/iccdev-validation/lib/libIccProfLib2.so`; no ASAN runtime is preloaded into
+Python. `ICCDEV_VALIDATION_LIBRARY` selects this library and takes precedence
+over `ICCDEV_BUILD_DIR`. Override it to select another shared library, or unset
+it to use build-directory discovery. An explicitly empty or invalid library
+fails closed; optional pip-only installations can still report validation as
+unavailable. The image build calls the ABI on the checked-in sRGB profile.
+`BUILD_JOBS` defaults to 32 and controls both CLI and isolated ABI compilation.
+
+Run the release runtime smoke from a checkout with Python 3 and Docker:
+
+```bash
+python3 .github/scripts/iccdev-container-smoke.py "$IMAGE" --report-dir out/container-smoke
+```
+
+This initializes MCP, sends the initialized notification, discovers tools, and
+calls health, header inspection, and native validation before closing stdin.
+It also starts REST on an ephemeral localhost-only port, checks health and
+inventory shapes, and exercises header inspection, PAWG, and native validation.
+Deadlines bound responses and startup; cleanup removes both named containers on
+success or failure. Failure logs stay in the CI job log and the optional report
+directory; CI uploads those diagnostics on failure. Inventories and image
+identity are printed rather than asserting a fixed tool count. `ci-docker`
+uses the same helper, requiring native validation. It is manual-dispatch only;
+when dispatched from `master`, `ci-qa-pr-docker-testing`,
+`ci-publish-colourbill-ctrl`, or a release tag, it publishes the corresponding
+approved image tags. Other feature branches remain non-publishing.
+The read-only `ci-docker-pr` caller uses it when building the changed Dockerfile;
+its trusted-base-image-only path does not claim to test a new runtime. No PR
+runtime artifacts are uploaded. The MCP package workflow includes the shared
+scanner and smoke helper paths in its test triggers.
+
+The sole supported Dockerfile is the unified sanitizer image. Do not reintroduce
+retired per-variant Dockerfiles to test optional native-library behavior.
 
 ## Local Review
 
@@ -84,12 +201,222 @@ evidence outside the disposable container. Exit `1` through `127` is a graceful
 failure; exit `128` or higher is signal termination. Attribute sanitizer
 findings by stack-frame source path, not input filename.
 
-## Building and Publishing
+## Valgrind and Helgrind
 
-Build the one Dockerfile locally before publishing:
+The unified image includes Valgrind. Build a separate non-sanitized Debug tree
+before using Memcheck or Helgrind; do not place either tool around the image's
+ASAN/UBSAN build. Issue #2380 provides a bounded manual workflow at
+`.github/workflows/ci-issue-2380-valgrind-repro.yml`. Its default
+scenario demonstrates the PR #2378 `GetNewApplyCmm()` race before and after the
+fix. It is a proof-of-concept workflow, not a hosted fuzzing service.
+
+Issue #2673 is guarded by
+`.github/workflows/ci-issue-2673-fromxml-valgrind-smoke.yml`. A push to
+`ci-qa-pr-docker-testing` runs it automatically; manual dispatch accepts a
+supported unified-image tag and resolves it to an immutable digest. The job
+builds a non-sanitized Debug `iccFromXml`, converts
+`Testing/Named/NamedColorV4.xml`, and passes only when Memcheck exits cleanly
+with zero error contexts while still producing a nonempty profile. The complete
+Memcheck report remains visible in the job log.
+
+For the maintained 14-target Memcheck, Helgrind, DRD, Massif, and Callgrind
+registry, use [Valgrind-Family Analysis](valgrind-analysis.md). The image
+installs that component as `iccdev-valgrind-build`, `iccdev-valgrind-run`,
+`iccdev-valgrind-status`, and `iccdev-valgrind-validate`.
+
+## MemorySanitizer
+
+The image also includes LLVM 22.1.2 libc++, libc++abi, and libxml2 built with
+MemorySanitizer origins under `/opt/iccdev-msan-libcxx`. This avoids false
+reports at uninstrumented C++ and XML runtime boundaries. The system unwinder
+remains uninstrumented so MSan can report findings without recursively
+instrumenting its own stack unwinding. The QA link uses `-nostdlib++` and fails if `ldd`
+still resolves libstdc++ for the JSON, XML, or threaded test binaries, or if
+`iccFromXml` resolves the distribution libxml2. Build and run the focused JSON,
+XML, and threaded controls with:
 
 ```bash
-docker build --no-cache -t iccdev:local .
+.github/scripts/iccdev-msan-taint-qa.sh --source-dir "$PWD" --build-dir /tmp/iccdev-msan --runtime-dir "${ICCDEV_MSAN_LIBCXX_DIR:-/opt/iccdev-msan-libcxx}" --out-dir /tmp/iccdev-msan-evidence
+```
+
+This is a Debug-only diagnostic lane. Release, RelWithDebInfo, and MinSizeRel
+always compile taint tracing out, including when
+`ICCDEV_ENABLE_TAINT_TRACE=ON` is requested. A later Debug reconfigure retains
+the requested option and enables tracing again. The malformed parametric-curve
+and nonnumeric colorant PCS fixtures are fail-closed controls; valid fixtures
+exercise the same paths and must remain MemorySanitizer-clean. Because none of
+those fixtures leaves poisoned bytes, both QA scripts first run
+`iccTaintTraceMemoryStateProbe`, which poisons a buffer itself and must be
+traced as `state=poisoned first_bad=5`. The Memcheck script expects that target
+built in the same Debug tree as `iccFromJson`.
+
+Docker's default seccomp profile can block the personality call MSan uses to
+set up its shadow mapping. For this disposable diagnostic lane only, disable
+networking and relax seccomp for the one container; ordinary image use keeps
+the default sandbox:
+
+```bash
+docker run --rm --network none --security-opt seccomp=unconfined "$IMAGE" bash -lc '.github/scripts/iccdev-msan-taint-qa.sh --source-dir "$PWD" --build-dir /tmp/iccdev-msan --runtime-dir "$ICCDEV_MSAN_LIBCXX_DIR" --out-dir /tmp/iccdev-msan-evidence'
+```
+
+For a local host without the runtime, create it first from the pinned LLVM and
+libxml2 commits and then use the same QA command. The helper retains its
+historical name but installs all three runtime libraries:
+
+```bash
+.github/scripts/iccdev-build-msan-libcxx.sh --prefix "$PWD/out/msan-libcxx"
+.github/scripts/iccdev-msan-taint-qa.sh --source-dir "$PWD" --build-dir "$PWD/out/linux-clang-msan-taint" --runtime-dir "$PWD/out/msan-libcxx" --out-dir "$PWD/out/msan-taint-evidence"
+```
+
+Do not substitute distribution libc++ or libxml2 packages for this runtime.
+Their headers are useful for compilation, but their shared libraries are not
+built with MemorySanitizer and therefore preserve the same false-report
+boundary. A report whose first frames are in distribution libxml2, with a
+poisoned span equal to the XML filename length plus its terminator, is this
+boundary artifact rather than evidence of an iccDEV uninitialized read.
+
+The matching CMake configure/build preset is `linux-clang-msan`; set
+`ICCDEV_MSAN_LIBCXX_DIR` to this runtime before configuring. Ordinary CTest
+does not bootstrap third-party runtimes, so the focused MSan QA script owns
+the linkage assertions and XML regression control. Use
+`linux-clang-valgrind` for a separate non-sanitized Debug tree and
+`linux-clang-tsan` for a separate race-detector tree.
+
+For a local PR #2378 comparison, check out the default branch as `TOOLING` and
+the PR head as `TARGET`. These setup commands are each independently
+copyable one-liners; replace the three `/path/to` locations first:
+
+```bash
+git clone https://github.com/InternationalColorConsortium/iccDEV.git /path/to/iccDEV-tooling
+git clone https://github.com/InternationalColorConsortium/iccDEV.git /path/to/iccDEV-pr-2378
+git -C /path/to/iccDEV-pr-2378 fetch origin pull/2378/head
+git -C /path/to/iccDEV-pr-2378 switch --detach FETCH_HEAD
+mkdir /path/to/new/iccdev-valgrind-evidence
+docker pull ghcr.io/internationalcolorconsortium/iccdev:latest
+```
+
+Then run the single Docker invocation below. It prints the complete first
+Helgrind or Memcheck record for each before/after state and also preserves every
+run under `EVIDENCE`:
+
+```bash
+IMAGE_TAG=ghcr.io/internationalcolorconsortium/iccdev:latest
+TOOLING=/path/to/iccDEV-tooling
+TARGET=/path/to/iccDEV-pr-2378
+EVIDENCE=/path/to/new/iccdev-valgrind-evidence
+mkdir -p "$EVIDENCE"
+docker pull "$IMAGE_TAG"
+IMAGE="$(docker image inspect "$IMAGE_TAG" --format '{{index .RepoDigests 0}}')"
+IMAGE_REVISION="$(docker image inspect "$IMAGE_TAG" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+printf 'digest=%s revision=%s\n' "$IMAGE" "$IMAGE_REVISION"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$TOOLING:/tooling:ro" \
+  -v "$TARGET:/target:ro" \
+  -v "$EVIDENCE:/evidence" \
+  "$IMAGE" bash -lc '
+    set -euo pipefail
+    work="$(mktemp -d)"
+    cp -a --no-preserve=ownership /target/. "$work/after"
+    if [ -f "$work/after/.git" ]; then unlink "$work/after/.git"; fi
+    cp -a "$work/after" "$work/before"
+    patch -d "$work/before" -p1 < \
+      /tooling/.github/ci/regression/pr-2378-helgrind-before.patch
+    qa=/tooling/.github/scripts/iccdev-valgrind-qa.sh
+    "$qa" --source-dir "$work/before" --build-dir "$work/build-before" \
+      --tool helgrind --expect finding --runs 3 \
+      --label before \
+      --out-dir /evidence/before-helgrind
+    "$qa" --source-dir "$work/after" --build-dir "$work/build-after" \
+      --tool helgrind --expect clean --runs 3 \
+      --label after \
+      --out-dir /evidence/after-helgrind
+    "$qa" --source-dir "$work/before" --build-dir "$work/build-before" \
+      --tool memcheck --expect clean --runs 1 \
+      --label before \
+      --out-dir /evidence/before-memcheck
+    "$qa" --source-dir "$work/after" --build-dir "$work/build-after" \
+      --tool memcheck --expect clean --runs 1 \
+      --label after \
+      --out-dir /evidence/after-memcheck
+  '
+```
+
+The focused one-line form for any already prepared non-sanitized source tree is:
+
+```bash
+.github/scripts/iccdev-valgrind-qa.sh --source-dir "$PWD" --build-dir /tmp/iccdev-valgrind --tool helgrind --expect clean --runs 3 --label selected
+```
+
+For actual local mutation fuzzing, build an uninstrumented tool and a
+libFuzzer-only CLI harness, then place Memcheck around each tool child. Do not
+use `.github/ci/cfl/build.sh` for this combination because that normal CFL path
+adds ASAN/UBSAN. The run count is intentionally operator-controlled; the hosted
+issue workflow does not run this campaign. The following container command
+fuzzes `iccDumpProfile` for 300 iterations and leaves the evolving corpus,
+Valgrind log, and findings in the mounted evidence directory:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$TARGET:/target:ro" \
+  -v "$EVIDENCE:/evidence" \
+  "$IMAGE" bash -lc '
+    set -euo pipefail
+    work="$(mktemp -d)"
+    cp -a --no-preserve=ownership /target/. "$work/iccDEV"
+    if [ -f "$work/iccDEV/.git" ]; then unlink "$work/iccDEV/.git"; fi
+    cmake -S "$work/iccDEV/Build/Cmake" -B "$work/build" \
+      -DCMAKE_BUILD_TYPE=Debug -DENABLE_TOOLS=ON -DENABLE_TESTS=OFF \
+      -DENABLE_SANITIZERS=OFF -DENABLE_ASAN=OFF -DENABLE_UBSAN=OFF \
+      -DENABLE_TSAN=OFF -DENABLE_LTO=OFF -DENABLE_WXWIDGETS=OFF
+    cmake --build "$work/build" --target iccDumpProfile --parallel "$(nproc)"
+    clang++ -std=c++17 -g -O1 -fsanitize=fuzzer \
+      -DICCDEV_CFL_TARGET=\"dump\" \
+      "$work/iccDEV/.github/ci/cfl/icc_cli_fuzzer.cpp" \
+      -o "$work/icc_dump_valgrind_fuzzer"
+    mkdir -p "$work/wrappers/IccDumpProfile" \
+      /evidence/valgrind-corpus /evidence/valgrind-findings
+    cp "$work/iccDEV/Testing/sRGB_v4_ICC_preference.icc" \
+      /evidence/valgrind-corpus/seed.icc
+    printf "%s\n" \
+      "#!/bin/bash" \
+      "set +e" \
+      "valgrind --quiet --tool=memcheck --leak-check=full --track-origins=yes --error-exitcode=99 \"\$ICCDEV_VALGRIND_REAL_TOOL\" \"\$@\"" \
+      "status=\$?" \
+      "if [ \"\$status\" -eq 99 ]; then kill -ABRT \"\$\$\"; fi" \
+      "exit \"\$status\"" \
+      > "$work/wrappers/IccDumpProfile/iccDumpProfile"
+    chmod +x "$work/wrappers/IccDumpProfile/iccDumpProfile"
+    set +e
+    ICCDEV_CFL_TOOL_DIR="$work/wrappers" \
+    ICCDEV_VALGRIND_REAL_TOOL="$work/build/Tools/IccDumpProfile/iccDumpProfile" \
+      "$work/icc_dump_valgrind_fuzzer" \
+      /evidence/valgrind-corpus \
+      -runs=300 -max_len=262144 \
+      -artifact_prefix=/evidence/valgrind-findings/ \
+      > /evidence/libfuzzer-valgrind.log 2>&1
+    status=$?
+    set -e
+    tail -80 /evidence/libfuzzer-valgrind.log
+    exit "$status"
+  '
+```
+
+The wrapper converts Valgrind exit 99 into a child signal so the existing CFL
+harness saves the triggering input. Replay each saved input once outside the
+mutation loop. Use Helgrind instead of Memcheck only for a target that exercises
+concurrent callers; the threaded CMM regression above is the canonical example.
+Long campaigns, corpus minimization, and crash triage remain local maintainer
+operations.
+
+## Building and Publishing
+
+Use Docker's build cache for normal local development and repeated smoke-test
+iterations:
+
+```bash
+docker build -t iccdev:local .
 docker run --rm iccdev:local bash -lc '
   set -euo pipefail
   iccDumpProfile -v Testing/sRGB_v4_ICC_preference.icc >/dev/null
@@ -98,13 +425,118 @@ docker run --rm iccdev:local bash -lc '
 '
 ```
 
-`ci-docker` publishes only the canonical package: `master` adds `latest` and
-the immutable SHA tag; a `v*` ref adds its release tag and immutable SHA tag.
-Do not publish branch, run, image-variant, or legacy-package tags. Publishing
-runs create BuildKit SBOM and provenance attestations for the canonical digest.
-The separate GitHub SBOM attestation is emitted only when the SBOM is at most
-16 MiB; larger SBOMs remain available as artifacts and the workflow reports
-that GitHub attestation as skipped.
+## Maintainer preflight and security checks
+
+Run this complete local preflight from a clean checkout before pushing a
+Dockerfile, container workflow, published-image, or container-runtime change.
+Cached builds are permitted while developing and debugging the image. The final
+pre-push proof uses `--no-cache` to verify every pinned dependency and build
+step from the canonical base. The preflight also verifies the host development
+environment, workflow and Dockerfile policy, shipped analyzer inventory,
+runtime behavior, and image health check.
+
+```bash
+command -v docker gh actionlint zizmor hadolint trivy
+PREFLIGHT_BASE_REF=origin/master .github/scripts/preflight-safety-checks.sh --require-tools
+
+IMAGE=iccdev-container-check:local
+docker build --no-cache -t "$IMAGE" .
+docker run --rm "$IMAGE" bash -lc '
+  set -euo pipefail
+  command -v git gh clang clang++ gcc g++ cmake cppcheck clang-tidy scan-build
+  command -v hadolint zizmor shellcheck afl-fuzz valgrind llvm-symbolizer
+  command -v lcov genhtml gcovr llvm-cov llvm-profdata perf gprof strace
+  command -v iccDumpProfile iccdev-fuzz-env iccdev-mcp iccdev-mcp-rest
+  test -x "$ICCDEV_FLAMEGRAPH_DIR/stackcollapse-perf.pl"
+  test -x "$ICCDEV_FLAMEGRAPH_DIR/flamegraph.pl"
+  test "$(git -C "$ICCDEV_FLAMEGRAPH_DIR" rev-parse HEAD)" = "$ICCDEV_FLAMEGRAPH_REVISION"
+  iccDumpProfile -v Testing/sRGB_v4_ICC_preference.icc >/dev/null
+  ctest --test-dir /workspace/build -N --no-tests=error >/dev/null
+'
+python3 .github/scripts/iccdev-container-smoke.py "$IMAGE" \
+  --report-dir out/container-smoke
+
+container_id="$(docker run -d --entrypoint bash "$IMAGE" -lc 'sleep 45')"
+trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+sleep 35
+test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy
+```
+
+### SAST and image scanning
+
+`preflight-safety-checks.sh --require-tools` runs the workflow, shell,
+Dockerfile, and configuration SAST checks, including actionlint, yamllint,
+zizmor, ShellCheck, hadolint, and Trivy configuration scanning. For
+component-partitioned cppcheck and clang-tidy reports, use the exact
+[maintainer static-analysis reproduction](build.md#maintainer-static-analysis).
+Path-scoped Trivy exceptions belong in `.trivyignore.yaml` with a concrete
+statement. Keep build-only image exceptions separate from the unified runtime
+image, and treat changes to the exception file as maintainer-owned container
+policy.
+
+Scan the completed image for high and critical vulnerabilities and secrets:
+
+```bash
+trivy image --scanners vuln,secret --severity HIGH,CRITICAL "$IMAGE"
+```
+
+Treat the scan as a triage report, not an automatic package change. Record each
+affected package, installed version, advisory, and available fixed version.
+Update a pinned dependency or base image when a compatible fixed version is
+available. An unfixed distribution-package advisory must remain visible in the
+handoff with its fixed-version status; do not suppress it or claim the image is
+vulnerability-free.
+
+### Dynamic analysis: MCP/REST, AFL++, and Valgrind
+
+`iccdev-container-smoke.py` in the preflight performs the bounded MCP and REST
+DAST smoke. Run the maintained AFL++ driver for a short mutation smoke and the
+maintained Valgrind helper for a separate non-sanitized Memcheck build:
+
+```bash
+IMAGE=iccdev-container-check:local
+EVIDENCE="$PWD/out/container-dynamic-qa"
+mkdir -p "$EVIDENCE"
+
+docker run --rm "$IMAGE" bash -lc '
+  set -euo pipefail
+  cd /workspace/iccDEV
+  .github/scripts/iccdev-afl-smoke.sh \
+    --seconds 10 --targets dump --exec-timeout-ms 30000
+'
+container_id="$(docker create "$IMAGE" bash -lc '
+  set -euo pipefail
+  cd /workspace/iccDEV
+  .github/scripts/iccdev-valgrind-qa.sh \
+    --source-dir "$PWD" \
+    --build-dir /tmp/iccdev-valgrind \
+    --tool memcheck --expect clean --runs 1 \
+    --out-dir /tmp/iccdev-valgrind-logs --label container
+')"
+trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+docker start -a "$container_id"
+docker cp "$container_id:/tmp/iccdev-valgrind-logs" "$EVIDENCE/valgrind"
+docker rm "$container_id"
+```
+
+The shipped image binaries are sanitizer-instrumented; never run Valgrind
+around them. `iccdev-valgrind-qa.sh` configures its own non-sanitized Debug
+tree before running Memcheck. For concurrent code, replace the Memcheck
+arguments with `--tool helgrind --expect clean --runs 3`.
+
+`ci-docker` is manual-dispatch only and publishes the canonical package only
+when dispatched from approved refs: `master` adds `latest` and the immutable
+SHA tag, `ci-qa-pr-docker-testing` and `ci-publish-colourbill-ctrl` add their
+integration tags and immutable SHA tags, and a `v*` ref adds its release tag
+and immutable SHA tag. Do not publish other branch, run, image-variant, or
+legacy-package tags. Publishing runs generate a compact CycloneDX SBOM with
+Anchore and create provenance with GitHub's `actions/attest-build-provenance`
+action. The workflow validates that the SBOM is nonempty and at most 16 MiB,
+then requires `actions/attest` to publish the signed SBOM predicate to GitHub
+and the registry against an immutable SHA staging reference. Only after those
+attestations succeed does it promote the mutable integration, `latest`, or
+release tags. An invalid or oversized SBOM fails before staging. BuildKit
+attestations are disabled for the image build.
 
 For detailed regression gate policy, use
 `docs/regression-workflow-governance.md`. For MCP developer setup, use

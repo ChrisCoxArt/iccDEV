@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // Regression for the two IccCmdLineUtil.h helpers that every producer of the
 // iccdev-qa-evidence/v1 schema depends on: icSha256Bytes and icJsonEscape.
 //
@@ -52,7 +81,7 @@ void expectDigest(const char *what, const std::string &in, const char *want)
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
   // FIPS 180-4 / RFC 6234 published vectors.
   expectDigest("sha256 empty", std::string(),
@@ -80,17 +109,55 @@ int main()
   expectDigest("sha256 embedded NUL", std::string("a\0b", 3),
     "59b271ae1bbcb1d31d41929817f4b16fb439eb4f31520b5ad1d5ce98920a7138");
 
+  if (argc > 1) {
+    FILE *file = std::fopen(argv[1], "wb");
+    if (!file) {
+      std::fprintf(stderr, "[qa-evidence-helpers] cannot create file vector\n");
+      g_failures++;
+    }
+    else {
+      const std::string million(1000000, 'a');
+      const bool wrote =
+        std::fwrite(million.data(), 1, million.size(), file) == million.size();
+      const bool closed = std::fclose(file) == 0;
+      if (!wrote || !closed) {
+        std::fprintf(stderr, "[qa-evidence-helpers] cannot write file vector\n");
+        g_failures++;
+      }
+      else {
+        std::string digest;
+        if (!icSha256File(argv[1], digest)) {
+          std::fprintf(stderr, "[qa-evidence-helpers] cannot hash file vector\n");
+          g_failures++;
+        }
+        else {
+          expect("sha256 streamed 1e6 bytes", digest,
+            "sha256:cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+        }
+      }
+      std::remove(argv[1]);
+    }
+  }
+
   expect("json plain", icJsonEscape("plain"), "plain");
   expect("json quote and backslash", icJsonEscape("a\"b\\c"), "a\\\"b\\\\c");
   expect("json control set", icJsonEscape("\b\f\n\r\t"), "\\b\\f\\n\\r\\t");
   expect("json other control byte", icJsonEscape("\x01"), "\\u0001");
 
-  // Well-formed UTF-8 passes through byte for byte. Escaping these as \u00XX
-  // would emit the code points U+00C3 U+00A9 instead of U+00E9 -- the #1853
-  // mojibake -- so this case is that bug turned into an assertion.
-  expect("json utf-8 passthrough", icJsonEscape("caf\xc3\xa9"), "caf\xc3\xa9");
-  expect("json utf-8 3-byte", icJsonEscape("\xe2\x82\xac"), "\xe2\x82\xac");
-  expect("json utf-8 4-byte", icJsonEscape("\xf0\x9f\x8e\xa8"), "\xf0\x9f\x8e\xa8");
+  // Well-formed UTF-8 is escaped by CODE POINT (#2454).  These three cases still
+  // guard the #1853 mojibake they were written for, and that is why they assert
+  // the single-code-point spelling rather than being deleted: escaping each BYTE
+  // as \u00XX would emit U+00C3 U+00A9 for an e-acute, so "caf\u00c3\u00a9"
+  // here would be that bug.  One escape per code point, and it decodes back to
+  // the character that went in.
+  //
+  // These used to assert byte-for-byte passthrough.  That is what #2454 removed:
+  // it left --json emitting live U+202E and the C1 controls while the text sink
+  // escaped the same string.  Above the BMP the spelling is a UTF-16 surrogate
+  // pair, because JSON has no \U escape (RFC 8259 section 7).
+  expect("json utf-8 by code point", icJsonEscape("caf\xc3\xa9"), "caf\\u00e9");
+  expect("json utf-8 3-byte", icJsonEscape("\xe2\x82\xac"), "\\u20ac");
+  expect("json utf-8 4-byte", icJsonEscape("\xf0\x9f\x8e\xa8"), "\\ud83c\\udfa8");
 
   // A JSON text must be valid UTF-8 (RFC 8259 8.1), and these strings carry
   // paths straight from argv, which on POSIX need not be UTF-8 at all. Passing

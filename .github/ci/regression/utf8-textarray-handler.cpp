@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // Regression for #1726: multiplexTypeArrayTag ('mcta') is a tagArrayType whose
 // array signature is icSigUtf8TextTypeArray ('utf8'); it carries the per-channel
 // UTF-8 names of a Multiplex Color Space (MCS) profile.
@@ -30,6 +59,7 @@
 #include "IccDefs.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #ifdef USEICCDEVNAMESPACE
@@ -72,10 +102,45 @@ CIccTagArray *buildMcta(icUInt32Number nText, int badIdx = -1)
   return arr;
 }
 
+int reproduceAttachOnePast()
+{
+  CIccTagArray *arr = buildMcta(2);
+  CIccTagUtf8Text *extra = new CIccTagUtf8Text();
+  extra->SetText("one-past-end");
+
+  const bool accepted = arr->AttachTag(2, extra);
+  delete extra;
+  delete arr;
+
+  return accepted ? 1 : 0;
+}
+
+int reproduceDetachOnePast()
+{
+  CIccTagArray *arr = buildMcta(2);
+  CIccTag *detached = arr->DetachTag(2);
+  const bool accepted = detached != NULL;
+  delete detached;
+  delete arr;
+
+  return accepted ? 1 : 0;
+}
+
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+  if (argc == 2 && !std::strcmp(argv[1], "--repro-attach-one-past"))
+    return reproduceAttachOnePast();
+  if (argc == 2 && !std::strcmp(argv[1], "--repro-detach-one-past"))
+    return reproduceDetachOnePast();
+  if (argc != 1) {
+    std::fprintf(stderr,
+                 "usage: %s [--repro-attach-one-past|--repro-detach-one-past]\n",
+                 argv[0]);
+    return 2;
+  }
+
   // 'mc' namespace with 5 channels; icGetMultiplexColorSpaceSamples maps this to 5.
   // Assert the encoding up front so the test fails loudly if that mapping changes.
   const icMultiplexColorSignature mcs5 = (icMultiplexColorSignature)0x6d630005;
@@ -133,6 +198,31 @@ int main()
           "a non-utf8Type element inside a utf8 text array is flagged (#1726)");
 
     delete arr;
+  }
+
+  // Case 4: indices equal to the element count are one past the allocation.
+  // AttachTag() and DetachTag() used `>` instead of `>=`, so this boundary
+  // reached m_TagVals[m_nSize].  Also cover an empty array, whose storage is
+  // NULL, so the public accessors fail closed without dereferencing it.
+  {
+    CIccTagArray *arr = buildMcta(2);
+    CIccTagUtf8Text *extra = new CIccTagUtf8Text();
+    extra->SetText("one-past-end");
+    check(!arr->AttachTag(2, extra),
+          "AttachTag refuses an index equal to the array size");
+    delete extra;
+    check(arr->DetachTag(2) == NULL,
+          "DetachTag refuses an index equal to the array size");
+    delete arr;
+
+    CIccTagArray empty(icSigUtf8TextTypeArray);
+    CIccTagUtf8Text *emptyExtra = new CIccTagUtf8Text();
+    emptyExtra->SetText("empty");
+    check(!empty.AttachTag(0, emptyExtra),
+          "AttachTag refuses index zero on an empty array");
+    delete emptyExtra;
+    check(empty.DetachTag(0) == NULL,
+          "DetachTag refuses index zero on an empty array");
   }
 
   if (g_fail) {

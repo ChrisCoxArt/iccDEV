@@ -1,4 +1,33 @@
 /*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+/*
     File:       iccconnect-config-parser.cpp
 
     Contains:   CTest helper for IccConnect CLI/JSON configuration parsing.
@@ -278,6 +307,63 @@ int main()
       "\"pccWeights\":[{\"pccFile\":\"pcc.icc\"}]}";
     failures += check(!search.fromJson(configJson, true),
                       "search JSON rejects incomplete PCC weight");
+  }
+
+  // #2140: an entry was appended for every pass of the profile loop, including
+  // the pass whose -ENV: pairs consumed the rest of the arguments and left no
+  // profile, so a trailing -ENV: produced an entry with no file and no rendering
+  // intent.  Both parsers carry the same loop and the same defect.
+  {
+    CIccCfgProfileSequence profiles;
+    const char* args[] = { "1", "src.icc", "1", "-ENV:abcd", "1.0" };
+    failures += check(profiles.fromArgs(args, 5, true) == 0,
+                      "profile sequence rejects a trailing -ENV: with no profile");
+  }
+
+  // The control that the fix did not just break -ENV: -- pairs before a profile
+  // still attach to it.
+  {
+    CIccCfgProfileSequence profiles;
+    const char* args[] = { "1", "-ENV:abcd", "1.0", "src.icc", "1" };
+    bool ok = profiles.fromArgs(args, 5, true) == 5 && profiles.m_profiles.size() == 1;
+    if (ok) {
+      CIccCfgProfilePtr p = profiles.m_profiles.front();
+      ok = p->m_iccFile == "src.icc" && p->m_iccEnvVars.size() == 1;
+    }
+    failures += check(ok, "profile sequence still attaches a leading -ENV: to its profile");
+  }
+
+  // The control for the test the fix does not use: -embedded leaves the file name
+  // empty on purpose, so a guard keyed on an empty name would refuse it.
+  {
+    CIccCfgProfileSequence profiles;
+    const char* args[] = { "1", "-embedded", "1" };
+    bool ok = profiles.fromArgs(args, 3, true) == 3 && profiles.m_profiles.size() == 1;
+    if (ok)
+      ok = profiles.m_profiles.front()->m_iccFile.empty();
+    failures += check(ok, "profile sequence still accepts -embedded");
+  }
+
+  {
+    CIccCfgSearchApply search;
+    const char* args[] = {
+      "1", "target.icc", "1", "src.icc", "101", "-ENV:abcd", "1.0"
+    };
+    failures += check(search.fromArgs(args, 7, true) == 0,
+                      "search apply rejects a trailing -ENV: with no profile");
+  }
+
+  // Found fixing #2140: search apply only recognises -INIT at the top of its
+  // profile loop, so -ENV: pairs immediately before it let the profile block read
+  // "-INIT" as a file name.  The call was accepted with a profile named "-INIT",
+  // and the initializer was never applied.
+  {
+    CIccCfgSearchApply search;
+    const char* args[] = {
+      "1", "target.icc", "1", "src.icc", "101", "-ENV:abcd", "1.0", "-INIT", "1"
+    };
+    failures += check(search.fromArgs(args, 9, true) == 0,
+                      "search apply rejects -ENV: pairs immediately before -INIT");
   }
 
   return failures ? 1 : 0;

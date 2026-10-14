@@ -203,8 +203,8 @@ pinning, dangerous triggers, credential hygiene, shell hardening, matrix
 expression injection, output sanitization, permissions, Dockerfile security, and
 supply-chain risk.
 It is the required PR security canary for workflow and container risk, and runs
-with read-only permissions against every pull request through the
-`ci-pr-action.yml` risk-gate job. It also supports manual `workflow_dispatch`
+with read-only permissions through the standalone
+`ci-risk-analysis-gate.yml` caller. It also supports manual `workflow_dispatch`
 runs and reusable `workflow_call` invocation from other CI workflows. Prefer
 calling it over copying scanner logic, and avoid adding a second direct PR
 trigger unless the caller gate is removed to prevent duplicate checks.
@@ -269,6 +269,14 @@ Use YAML parsing, `actionlint`, shellcheck, `yamllint`, `zizmor`, and the
 workflow permission audit for workflow files. Use `hadolint`, Trivy config, or
 equivalent Dockerfile checks when container files are in scope. Run CodeQL for
 related C/C++ or CMake changes, not as the workflow YAML checker.
+
+The repository-level `.github/zizmor.yml` temporarily disables zizmor 1.30's
+`self-repository` audit. Keep same-repository `uses:` references in the `./`
+form until released actionlint supports GitHub's `$/` form
+([actionlint #711](https://github.com/rhysd/actionlint/issues/711)) and the
+repository no longer needs GitHub Enterprise Server compatibility.
+Remove the exception and migrate all local references together; do not suppress
+actionlint's syntax validation per workflow.
 
 The pre-flight gate must include Dockerfile paths when container files change.
 Dockerfile checks are blocking for changed container files: avoid advisory-only

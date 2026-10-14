@@ -10,22 +10,65 @@ unless an iccDEV maintainer explicitly requests that work. Contributors should
 describe needed coverage in the issue or pull request so maintainers can decide
 where it belongs.
 
+Before the first review of a cross-cutting change, attach a `base...HEAD`
+contract matrix identifying each changed surface's producer, consumer,
+build/runtime behavior, platform or toolchain boundary, CI trigger, dependency
+owner, and local evidence. Re-review the complete matrix after a repair; any
+new blocker returns the branch to branch-only grooming before another review.
+
 ## Canonical Locations
 
 | Item | Location | Purpose |
 |------|----------|---------|
 | Focused reusable regression scripts | `.github/scripts/` | Scripted checks shared by one or more workflows. |
 | Regression PoC inventory | `.github/ci/regression/README.md` | Maps regression inputs and scripts to issues. |
-| Tool test gate | `.github/workflows/ci-iccdev-tool-tests.yml` | ASAN/UBSAN tool coverage, JSON gates, regression scripts, and broad generated-profile CLI coverage. |
+| Tool test gate | `.github/workflows/ci-iccdev-tool-tests.yml` | Reusable/manual core or ASAN/UBSAN regression coverage. |
+| Sanitizer PR gate | `.github/workflows/ci-sanitizer-regression.yml` | Standalone path-scoped ASAN/UBSAN caller for native source, build, and test changes. |
+| Risk-analysis gate | `.github/workflows/ci-risk-analysis-gate.yml` | Standalone PR caller for the required reusable Linux and Windows workflow-security audits. |
 | MATLAB Windows gate | `.github/workflows/ci-matlab.yml` | PowerShell-native MSVC build, MATLAB MEX QA, native focused regressions, and Docker interoperability. |
+| Apple platform gates | `.github/workflows/ci-apple-platform-smoke.yml`, `.github/workflows/ci-apple-mobile-core.yml` | iOS/watchOS simulator hosts and Xcode Release/Debug CTest runtime layouts; [local commands](build.md). |
 | CTest registration | `Build/Cmake/Testing/CMakeLists.txt` | CTest names, labels, fixtures, timeouts, and check target. |
 | CTest process guide | `docs/ctest.md` | Local commands, registered suites, and add-test workflow. |
 | Maintainer CI skill | `.github/skills/maintainer-ci-ctest/SKILL.md` | Repeatable maintainer workflow for CI, CTest, CPack, sanitizer, and release gates. |
 | Maintainer CI prompt | `.github/prompts/maintainer-ci-ctest.prompt.md` | Structured planning prompt for maintainer-owned infrastructure changes. |
+| External compatibility examples | `.github/workflows/ci-nokia-heif-icc-smoke.yml`, `.github/workflows/ci-libpng-iccp-smoke.yml` | Manual, pinned-dependency lanes with isolated wrapper CTests and immutable runtime resolution. |
 | Workflow rules | `.github/instructions/workflow-governance.instructions.md` | Shell hardening, output sanitization, and injection prevention. |
 | Workflow trust boundaries | `docs/workflow-security-trust-boundaries.md` | Trusted-base helper model, PR workflow canaries, and visual review aids. |
 | Testing rules | `.github/instructions/testing.instructions.md` | Test directories, script expectations, and regression flow. |
 | Unified Dockerfile | `Dockerfile` | Published runtime, MCP, and pinned CI dependency image. |
+
+## PR Path Classification
+
+`ci-pr-action.yml` reports factual path classes separately from the
+`run_native_matrix` execution decision. Native source ownership is limited to
+`IccProfLib/`, `IccXML/`, `IccJSON/`, `IccConnect/`, `Tools/`, and registered
+C/C++ sources under `.github/ci/regression/`. Generated header templates and
+native tool resources under the owned source directories are included. Native
+regression fixtures under `.github/ci/regression/` select the testing surface.
+Native build configuration is
+limited to `Build/Cmake/`, `Build/AppleMobile/`, `Build/XCode/BuildAll.sh`, and
+the root `vcpkg.json`. `Testing/` changes also select the native matrix.
+
+Examples, ports, bindings, documentation, and unrelated CMake wrappers do not
+select the native matrix merely because of a file extension or basename.
+OpenImageIO, HEIF, and libpng paths under `.github/ci/tooling/` are reported as
+external research tooling and retain their separate manual workflows; the PR
+orchestrator does not call those research projects. Mixed external/native diffs
+still run the native matrix. Keep this contract table-driven in
+`.github/tests/test-ci-pr-path-classifier.sh` and source the classifier from the
+trusted base checkout for pull requests. Path discovery disables Git rename
+detection so a move is classified against both its removed source path and its
+added destination path.
+
+`ci-pr-action` owns deterministic core builds and tests only. Its reusable tool
+suite passes `instrumentation=core` and excludes `ci-infrastructure` CTests.
+The standalone sanitizer caller runs the reusable tool workflow independently
+for native source, build, testing, or regression-fixture changes; the reusable
+workflow also remains manually dispatchable.
+Pre-flight and risk analysis are standalone PR workflows so scanner or
+infrastructure failures cannot be mistaken for core build failures. External
+compatibility, dynamic-analysis tooling, and ClusterFuzzLite remain manual or
+scheduled lanes.
 
 ## When to Add a Script
 
@@ -52,6 +95,22 @@ Every new regression gate should state:
 Prefer deterministic invariants over broad diffs. For generated ICC profiles,
 normalize only documented volatile fields when comparing whole files; otherwise
 assert specific tag sizes, offsets, record lengths, or validation messages.
+
+The Apple gates extend #2445's static-core SDK builds with native runtime
+coverage. The core workflow builds both dependency-free `apple-*-core` presets
+and extended `apple-*-extended-core` presets where each SDK is installed. Both
+workflows use `iccdev-apple-simulator-smoke.sh` and
+`iccdev-xcode-ctest-smoke.sh`: simulator success requires a fresh report and
+console sentinel, a missing-fixture control must fail, the report must include
+the built extended-library checks, the public invalid-profile substitution
+control, and non-failing mobile gap notes; Xcode CTest must produce fresh CLI
+output in both configurations. The manual platform workflow accepts a focused
+`core`, `examples`, or `all` scope; the examples scope runs the three manual
+iOS apps with sanitizers on one disposable simulator. A manual core workflow
+dispatch additionally uploads the built static archives, generated version
+headers, and build manifest; reusable calls keep those products in the job
+workspace. Neither Apple workflow runs automatically on a push. A nonzero
+helper exit fails either gate.
 
 ## Workflow Governance Requirements
 
@@ -95,25 +154,32 @@ readiness gate in `docs/governance/UPSTREAM_PR_READINESS.md`. Review the
 complete pull request and cumulative diff, not incremental slices. A requested
 change returns the branch to branch-only grooming: repair the findings, renew
 the readiness evidence, then request one complete re-review when a maintainer
-needs it. If that re-review identifies a missed issue in unchanged code, stop
-serial automated review and require maintainer direction before continuing.
+needs it. If that re-review identifies any new blocker, including one in the
+repair, stop serial automated review and require maintainer direction before
+continuing.
 
 Recent maintainer PRs show the same avoidable review findings recurring. Before
 requesting review, check the PR against this list:
 
 - Keep the PR scope narrow. Split unrelated registry QA, Docker, CodeQL, and
   C/C++ hardening work unless one failing gate requires the combination.
-- For every new executable script, include the ICC copyright and BSD 3-Clause
-  notice expected by `CONTRIBUTING.md`, run ShellCheck, and verify ASCII.
+- For every new executable script, include the ICC copyright, an
+  SPDX BSD-3-Clause identifier, and a reference to `LICENSE.md` as required by
+  `CONTRIBUTING.md`; run ShellCheck and verify ASCII.
 - Keep push, pull-request, reusable, and manual-dispatch validation paths
   equivalent for the changed surface. If a workflow tests a helper on push,
   the PR fast lane should test the same helper or document why it cannot.
-- Keep branch triggers and publish conditions aligned. `ci-docker` publishes
-  the canonical image only from `master` and release tags; do not add
-  branch-specific or variant image tags.
+- Keep manual-dispatch refs and publish conditions aligned. `ci-docker` is
+  manual-only and publishes the canonical image only when dispatched from
+  `master`, `ci-qa-pr-docker-testing`, `ci-publish-colourbill-ctrl`, or a
+  release tag; do not add branch-specific or variant image tags.
 - Keep Docker and regression-container docs reproducible from a fresh checkout
   or clean container. Fetch branch refs explicitly and avoid relying on local
   remote-tracking state, generated files, or preexisting host permissions.
+- Let maintainers select a supported container tag at dispatch time, resolve
+  it to a digest before starting the container job, and record both that digest
+  and the image source revision. Do not hardcode one full-SHA tag as a durable
+  workflow default.
 - Validate trusted-base helper boundaries in PR workflows. PR-controlled
   checkouts must not provide sanitizer, summary, release, or package helpers
   unless the step is a reviewed test-only exception.
@@ -124,6 +190,9 @@ requesting review, check the PR against this list:
   numeric strings with leading zeroes.
 - Keep bounded jobs actually bounded. Runtime maxima must fit the job timeout
   after multiplying by target count and build/setup time.
+- Keep checksum-pinned WASM dependency downloads bounded and diagnosable:
+  follow redirects, show transfer errors, retry transient failures, and retain
+  connect and total timeouts before verifying the pinned SHA-256.
 - End PowerShell expected-failure probes with `exit 0` after all assertions
   pass. A handled native failure leaves `$LASTEXITCODE` nonzero and otherwise
   makes the workflow step fail after printing a success message.
@@ -134,27 +203,24 @@ requesting review, check the PR against this list:
   application, `iccdev-fuzz-env`, and container healthcheck semantics.
 
 For every `Dockerfile` change, validate the one canonical image locally and
-through `ci-docker` on `master`. Keep its `latest`, immutable full-SHA, and
-release-tag behavior consistent; do not restore variant Dockerfiles or
-branch-specific image publication.
+through a manual `ci-docker` dispatch on `master`. Keep its `latest`, immutable
+full-SHA, and release-tag behavior consistent; do not restore variant
+Dockerfiles or branch-specific image publication.
 
 Branch protection should require stable aggregate contexts, not conditional
-lane job names. `PR Summary` must aggregate orchestration prerequisites and all
-selected full, fast-lane, auto, governance, docs, and path-gated jobs. Do not
+lane job names. `PR Summary` must aggregate only the deterministic core
+orchestration prerequisites and selected full, fast-lane, auto, governance,
+docs, and path-gated core jobs. Do not
 require removed lane names or initialization jobs as branch contexts. Require
-WASM parity separately on `master`, where that workflow runs outside the
-orchestrator. See `docs/label-system.md` for the current context list.
+the standalone Pre-flight checks, risk-analysis contexts, and WASM parity
+separately on `master`. See `docs/label-system.md` for the current context list.
 
-When `container_changed` is true, `ci-pr-action` selects the read-only Docker
-PR verification lane and `PR Summary` requires its result. The lane is skipped
-for other changes to conserve runners. Do not treat a skipped lane as container
-verification; rerun it after any Dockerfile, container image, or container
-workflow update.
-
-The Docker PR lane builds the exact checked-out PR Dockerfile without a workflow
-cache. The resulting image is local to the job: it must bind the checked-out PR
-tree read-only, copy it to container-local scratch space, and build and run the
-fast CTest envelope there. Only `ci-docker` publishes images.
+When `image_definition_changed` is true, `ci-pr-action` selects
+workflow-security gates only. It does not run a Docker Clang verification job,
+a full PR matrix, or aggregate a `docker-ci` result. Dockerfile, Docker
+dependency, packaged MCP, and Docker-workflow changes require the local
+canonical-image build and smoke in `docs/regression-container.md`; only
+`ci-docker` publishes images.
 
 Local review should include YAML parsing, `actionlint`, `yamllint`, direct
 `${{ }}` interpolation scans for `run:` blocks, Dockerfile base/remote-exec
@@ -244,17 +310,19 @@ separate from general source changes when practical.
 
 | File | Owner intent | Required local checks |
 |------|--------------|-----------------------|
-| `Dockerfile` | Unified image for runtime tools, MCP, ASAN/UBSAN CTest, fuzzing, review, and hybrid timing gates. Clang 22 is the default toolchain; the packaged AFL++ LLVM plugin is paired with Clang 21. | Run a no-cache build and smoke `git`, `gh`, `curl`, `clang`, `clang++`, `gcc`, `g++`, `lldb`, `gdb`, `cmake`, `afl-fuzz`, `afl-showmap`, `iccdev-fuzz-env`, MCP initialization, libFuzzer compilation, and `/usr/bin/time`; AFL wrapper changes also need the container bootstrap probe in `docs/afl-fuzzing.md`. |
+| `Dockerfile` | Unified image for runtime tools, MCP, ASAN/UBSAN CTest, fuzzing, review, and hybrid timing gates. Clang 22 is the default toolchain; the packaged AFL++ LLVM plugin is paired with Clang 21. | Use cached builds during development, then run the [container maintainer preflight](regression-container.md#maintainer-preflight-and-security-checks), including a final no-cache build, policy/SAST checks, analyzer inventory, MCP/REST runtime smoke, health check, and image vulnerability/secret triage. AFL wrapper changes also need the container bootstrap probe in `docs/afl-fuzzing.md`. |
 
 For unified `Dockerfile` publishing:
 
-1. Build and smoke the target image locally with no cache.
+1. Build and smoke the target image locally; cached development builds are
+   permitted, but the final pre-push proof must use no cache.
 2. Publish through the maintainer-controlled container release path.
 3. Record the published immutable SHA tag, digest, and source revision from the
    release output.
-4. Publish `latest` only from `master` after all image smoke tests and
-   regression CTest checks succeed, then confirm it resolves to the immutable
-   digest.
+4. Publish `latest` only from `master`; publish an integration tag only from
+   `ci-qa-pr-docker-testing` or `ci-publish-colourbill-ctrl`, after all image
+   smoke tests and regression CTest checks succeed, then confirm it resolves
+   to the immutable digest.
 5. Pass the immutable SHA tag to `ci-iccdev-tool-tests.yml` and rerun the
    regression gate.
 6. Do not create branch-specific or run-specific image tags.

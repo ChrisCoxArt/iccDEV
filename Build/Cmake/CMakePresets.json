@@ -25,6 +25,16 @@
       }
     },
     {
+      "name": "telemetry-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "ENABLE_TESTS": "ON",
+        "ENABLE_TOOLS": "ON",
+        "ICCDEV_ENABLE_TELEMETRY": "ON"
+      }
+    },
+    {
       "name": "vs2022-x64",
       "inherits": "default-base",
       "displayName": "Windows MSVC (VS2022)",
@@ -43,6 +53,17 @@
       "displayName": "Windows ClangCL (VS2022)",
       "description": "Builds with the Visual Studio LLVM toolset and the same unified bin/<Config> runtime layout as vs2022-x64.",
       "toolset": "ClangCL"
+    },
+    {
+      "name": "vs2022-x64-telemetry",
+      "inherits": ["vs2022-x64", "telemetry-base"],
+      "displayName": "Windows MSVC telemetry",
+      "description": "Separate opt-in telemetry build; choose Release, MinSizeRel, or Debug at build time."
+    },
+    {
+      "name": "vs2022-clangcl-x64-telemetry",
+      "inherits": ["vs2022-clangcl-x64", "telemetry-base"],
+      "displayName": "Windows ClangCL telemetry"
     },
     {
       "name": "vs2022-x64-qa-flags",
@@ -131,6 +152,11 @@
       "displayName": "Windows MinGW UCRT64 QA flags"
     },
     {
+      "name": "mingw-x64-telemetry",
+      "inherits": ["mingw-x64", "telemetry-base"],
+      "displayName": "Windows MinGW UCRT64 telemetry"
+    },
+    {
       "name": "mingw-core-x64",
       "inherits": "mingw-ucrt64-base",
       "displayName": "Windows MinGW UCRT64 core static",
@@ -164,6 +190,39 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-gcc-telemetry",
+      "inherits": ["linux-gcc", "telemetry-base"],
+      "displayName": "Linux GCC telemetry",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-clang-telemetry",
+      "inherits": ["linux-clang", "telemetry-base"],
+      "displayName": "Linux Clang telemetry",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-clang-tiff-telemetry-qa",
+      "inherits": ["linux-clang-telemetry", "qa-flags-base"],
+      "displayName": "Linux Clang TIFF telemetry QA",
+      "cacheVariables": {
+        "ENABLE_WXWIDGETS": "OFF",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "vs2022-clangcl-x64-tiff-telemetry-qa",
+      "inherits": ["vs2022-clangcl-x64-telemetry", "qa-flags-base"],
+      "displayName": "Windows ClangCL TIFF telemetry QA",
+      "cacheVariables": {
+        "ENABLE_WXWIDGETS": "OFF"
       }
     },
     {
@@ -246,18 +305,68 @@
       "name": "linux-clang-tsan",
       "inherits": "linux-clang",
       "displayName": "Linux Clang with ThreadSanitizer",
+      "description": "Standalone ThreadSanitizer Debug build. Do not combine with ASan, MSan, LSan, or Valgrind.",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
       "cacheVariables": {
         "ENABLE_TSAN": "ON",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_TOOLS": "ON",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_LTO": "OFF",
         "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "linux-clang-msan",
       "inherits": "linux-clang",
-      "displayName": "Linux Clang with MemorySanitizer",
+      "displayName": "Linux Clang with instrumented MSan runtime",
+      "description": "Requires ICCDEV_MSAN_LIBCXX_DIR from iccdev-build-msan-libcxx.sh; uses instrumented libc++, libc++abi, and libxml2. Image tools stay off because their TIFF, PNG, and JPEG dependencies are not instrumented.",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "$env{ICCDEV_MSAN_LIBCXX_DIR}",
+        "rhs": ""
+      },
       "cacheVariables": {
         "ENABLE_MSAN": "ON",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_TOOLS": "ON",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_IMAGE_TOOLS": "OFF",
+        "ICC_USE_ZLIB": "OFF",
+        "ENABLE_LTO": "OFF",
+        "CMAKE_C_FLAGS": "-fsanitize=memory -fsanitize-memory-track-origins",
+        "CMAKE_CXX_FLAGS": "-fsanitize=memory -fsanitize-memory-track-origins -nostdinc++ -isystem $env{ICCDEV_MSAN_LIBCXX_DIR}/include/c++/v1",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=memory -fsanitize-memory-track-origins -nostdlib++ -L$env{ICCDEV_MSAN_LIBCXX_DIR}/lib -Wl,-rpath,$env{ICCDEV_MSAN_LIBCXX_DIR}/lib -lc++ -lc++abi",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=memory -fsanitize-memory-track-origins -nostdlib++ -L$env{ICCDEV_MSAN_LIBCXX_DIR}/lib -Wl,-rpath,$env{ICCDEV_MSAN_LIBCXX_DIR}/lib -lc++ -lc++abi",
+        "LIBXML2_INCLUDE_DIR": "$env{ICCDEV_MSAN_LIBCXX_DIR}/include/libxml2",
+        "LIBXML2_LIBRARY": "$env{ICCDEV_MSAN_LIBCXX_DIR}/lib/libxml2.so",
         "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-valgrind",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang Debug for Valgrind",
+      "description": "Non-sanitized Debug build for Memcheck, Helgrind, DRD, Massif, and Callgrind.",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_TOOLS": "ON",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_SANITIZERS": "OFF",
+        "ENABLE_ASAN": "OFF",
+        "ENABLE_UBSAN": "OFF",
+        "ENABLE_INTEGER_SANITIZER": "OFF",
+        "ENABLE_FLOAT_SANITIZER": "OFF",
+        "ENABLE_TSAN": "OFF",
+        "ENABLE_MSAN": "OFF",
+        "ENABLE_LSAN": "OFF",
+        "ENABLE_FUZZING": "OFF",
+        "ENABLE_COVERAGE": "OFF",
+        "ENABLE_PROFILING": "OFF",
+        "ENABLE_LTO": "OFF"
       }
     },
     {
@@ -337,14 +446,28 @@
       }
     },
     {
+      "name": "macos-clang-telemetry",
+      "inherits": ["default-base", "telemetry-base"],
+      "displayName": "macOS Clang telemetry",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
       "name": "macos-clang-sanitizers",
       "inherits": "macos-clang",
       "displayName": "macOS Clang with ASan, UBSan, IntSan, and float sanitizers",
-      "description": "Debug sanitizer build for crash and UB attribution. Keep this separate from GuardMalloc/libgmalloc runs.",
+      "description": "Debug sanitizer build with libc++ EXTENSIVE hardening for crash and UB attribution. Keep this separate from GuardMalloc/libgmalloc runs.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_TOOLS": "ON",
-        "ENABLE_SANITIZERS": "ON"
+        "ENABLE_SANITIZERS": "ON",
+        "ICCDEV_LIBCPP_HARDENING_MODE": "extensive"
       }
     },
     {
@@ -353,9 +476,268 @@
       "displayName": "macOS (Xcode)",
       "generator": "Xcode",
       "binaryDir": "${sourceDir}/../../out/${presetName}"
+    },
+    {
+      "name": "macos-xcode-telemetry",
+      "inherits": ["macos-xcode", "telemetry-base"],
+      "displayName": "macOS Xcode telemetry",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "apple-mobile-core-base",
+      "hidden": true,
+      "inherits": "default-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_SHARED_LIBS": "OFF",
+        "ENABLE_STATIC_LIBS": "ON",
+        "ENABLE_TOOLS": "OFF",
+        "ENABLE_TESTS": "OFF",
+        "ENABLE_ICCXML": "OFF",
+        "ENABLE_ICCJSON": "OFF",
+        "ICC_USE_ZLIB": "OFF",
+        "ENABLE_IMAGE_TOOLS": "OFF",
+        "ENABLE_WXWIDGETS": "OFF",
+        "ENABLE_CMM_TOOLS": "OFF",
+        "ENABLE_IIS_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "apple-mobile-extended-core-base",
+      "hidden": true,
+      "inherits": "apple-mobile-core-base",
+      "cacheVariables": {
+        "ENABLE_ICCXML": "ON",
+        "ENABLE_ICCJSON": "ON",
+        "ICC_USE_ZLIB": "ON"
+      }
+    },
+    {
+      "name": "apple-ios-device-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "iOS device core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-ios-device-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "iOS device extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-ios-simulator-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "iOS simulator core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-ios-simulator-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "iOS simulator extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-tvos-device-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "tvOS device core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "appletvos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-tvos-device-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "tvOS device extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "appletvos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-tvos-simulator-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "tvOS simulator core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "appletvsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-tvos-simulator-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "tvOS simulator extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "appletvsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-watchos-device-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "watchOS device core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "watchos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64_32"
+      }
+    },
+    {
+      "name": "apple-watchos-device-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "watchOS device extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "watchos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64_32"
+      }
+    },
+    {
+      "name": "apple-watchos-simulator-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "watchOS simulator core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "watchsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-watchos-simulator-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "watchOS simulator extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "watchsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-visionos-device-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "visionOS device core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "xros",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-visionos-device-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "visionOS device extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "xros",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-visionos-simulator-core",
+      "inherits": "apple-mobile-core-base",
+      "displayName": "visionOS simulator core library",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "xrsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "apple-visionos-simulator-extended-core",
+      "inherits": "apple-mobile-extended-core-base",
+      "displayName": "visionOS simulator extended core libraries",
+      "binaryDir": "${sourceDir}/../../out/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "xrsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
     }
   ],
   "buildPresets": [
+    {
+      "name": "linux-clang-tiff-telemetry-qa",
+      "configurePreset": "linux-clang-tiff-telemetry-qa",
+      "targets": ["iccSpecSepToTiff", "iccTiffDump", "iccFromXml", "iccApplyProfiles", "iccTiffTilesTest"]
+    },
+    {
+      "name": "vs2022-clangcl-x64-tiff-telemetry-qa",
+      "configurePreset": "vs2022-clangcl-x64-tiff-telemetry-qa",
+      "configuration": "Release",
+      "targets": ["iccSpecSepToTiff", "iccTiffDump", "iccFromXml", "iccApplyProfiles", "iccTiffTilesTest"]
+    },
+    {
+      "name": "vs2022-x64-telemetry",
+      "configurePreset": "vs2022-x64-telemetry",
+      "configuration": "Release"
+    },
+    {
+      "name": "vs2022-clangcl-x64-telemetry",
+      "configurePreset": "vs2022-clangcl-x64-telemetry",
+      "configuration": "Release"
+    },
+    {
+      "name": "mingw-x64-telemetry",
+      "configurePreset": "mingw-x64-telemetry"
+    },
+    {
+      "name": "linux-gcc-telemetry",
+      "configurePreset": "linux-gcc-telemetry"
+    },
+    {
+      "name": "linux-clang-telemetry",
+      "configurePreset": "linux-clang-telemetry"
+    },
+    {
+      "name": "macos-clang-telemetry",
+      "configurePreset": "macos-clang-telemetry",
+      "configuration": "Release"
+    },
+    {
+      "name": "macos-xcode-telemetry",
+      "configurePreset": "macos-xcode-telemetry",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-clang-tsan",
+      "configurePreset": "linux-clang-tsan"
+    },
+    {
+      "name": "linux-clang-msan",
+      "configurePreset": "linux-clang-msan"
+    },
+    {
+      "name": "linux-clang-valgrind",
+      "configurePreset": "linux-clang-valgrind"
+    },
     {
       "name": "macos-clang",
       "configurePreset": "macos-clang",
@@ -375,6 +757,95 @@
       "name": "macos-xcode",
       "configurePreset": "macos-xcode",
       "configuration": "Release"
+    },
+    {
+      "name": "apple-ios-device-core",
+      "configurePreset": "apple-ios-device-core"
+    },
+    {
+      "name": "apple-ios-device-extended-core",
+      "configurePreset": "apple-ios-device-extended-core"
+    },
+    {
+      "name": "apple-ios-simulator-core",
+      "configurePreset": "apple-ios-simulator-core"
+    },
+    {
+      "name": "apple-ios-simulator-extended-core",
+      "configurePreset": "apple-ios-simulator-extended-core"
+    },
+    {
+      "name": "apple-tvos-device-core",
+      "configurePreset": "apple-tvos-device-core"
+    },
+    {
+      "name": "apple-tvos-device-extended-core",
+      "configurePreset": "apple-tvos-device-extended-core"
+    },
+    {
+      "name": "apple-tvos-simulator-core",
+      "configurePreset": "apple-tvos-simulator-core"
+    },
+    {
+      "name": "apple-tvos-simulator-extended-core",
+      "configurePreset": "apple-tvos-simulator-extended-core"
+    },
+    {
+      "name": "apple-watchos-device-core",
+      "configurePreset": "apple-watchos-device-core"
+    },
+    {
+      "name": "apple-watchos-device-extended-core",
+      "configurePreset": "apple-watchos-device-extended-core"
+    },
+    {
+      "name": "apple-watchos-simulator-core",
+      "configurePreset": "apple-watchos-simulator-core"
+    },
+    {
+      "name": "apple-watchos-simulator-extended-core",
+      "configurePreset": "apple-watchos-simulator-extended-core"
+    },
+    {
+      "name": "apple-visionos-device-core",
+      "configurePreset": "apple-visionos-device-core"
+    },
+    {
+      "name": "apple-visionos-device-extended-core",
+      "configurePreset": "apple-visionos-device-extended-core"
+    },
+    {
+      "name": "apple-visionos-simulator-core",
+      "configurePreset": "apple-visionos-simulator-core"
+    },
+    {
+      "name": "apple-visionos-simulator-extended-core",
+      "configurePreset": "apple-visionos-simulator-extended-core"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-clang-tiff-telemetry-qa",
+      "configurePreset": "linux-clang-tiff-telemetry-qa",
+      "filter": {
+        "include": {
+          "name": "^iccdev\\.(specsep-|tiff-(tiles|tile-budget-cli|directory-listing-cli|telemetry-cli))"
+        }
+      },
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "vs2022-clangcl-x64-tiff-telemetry-qa",
+      "configurePreset": "vs2022-clangcl-x64-tiff-telemetry-qa",
+      "configuration": "Release",
+      "filter": {
+        "include": {
+          "name": "^iccdev\\.(specsep-|tiff-(tiles|tile-budget-cli|directory-listing-cli|telemetry-cli))"
+        }
+      },
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
     }
   ]
 }

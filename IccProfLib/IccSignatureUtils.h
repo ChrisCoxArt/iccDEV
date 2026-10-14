@@ -9,54 +9,34 @@ Copyright:  (c) see Software License
 */
 
 /*
-* Copyright (c) International Color Consortium.
-*
-* Redistribution and use in source and binary forms, with or without
-* modification, are permitted provided that the following conditions
-* are met:
-*
-* 1. Redistributions of source code must retain the above copyright
-*    notice, this list of conditions and the following disclaimer. 
-*
-* 2. Redistributions in binary form must reproduce the above copyright
-*    notice, this list of conditions and the following disclaimer in
-*    the documentation and/or other materials provided with the
-*    distribution.
-*
-* 3. In the absence of prior written permission, the names "ICC" and "The
-*    International Color Consortium" must not be used to imply that the
-*    ICC organization endorses or promotes products derived from this
-*    software.
-*
-*
-* THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
-* WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-* OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-* DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
-* ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-* SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-* LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-* USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-* OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-* SUCH DAMAGE.
-* ====================================================================
-*
-* This software consists of voluntary contributions made by many
-* individuals on behalf of the The International Color Consortium. 
-*
-*
-* Membership in the ICC is encouraged when this software is used for
-* commercial purposes. 
-*
-*  
-* For more information on The International Color Consortium, please
-* see <http://www.color.org/>.
-*  
-* 
-*/
-
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 ////////////////////////////////////////////////////////////////////////
 // Contributor: David H Hoyt LLC
 // FILE: IccSignatureUtils.h
@@ -87,6 +67,7 @@ Copyright:  (c) see Software License
 #define _ICC_SIGNATURE_UTILS_H
 
 #include "IccDefs.h"
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -103,6 +84,170 @@ Copyright:  (c) see Software License
 
 #ifndef icSigSpectralPcsData
 #define icSigSpectralPcsData ((icColorSpaceSignature)0x73706320)  // 'spc '
+#endif
+
+// -----------------------------------------------------------------------------
+// TAINTED READ/WRITE TRACEPOINTS
+//
+// Define ICC_TAINT_TRACE_ENABLED in a diagnostic build, then set
+// ICC_TAINT_TRACE=1 at runtime. MemorySanitizer builds and executions under
+// Valgrind report whether a source or destination contains poisoned bytes
+// without first reading those bytes. Other builds report state=unknown; C++
+// has no portable initialized-memory query, and reading a suspected value just
+// to log it would reproduce the undefined behavior being investigated.
+// ICC_JSON_CURVE_TRACE remains a runtime alias for the original focused repro.
+// -----------------------------------------------------------------------------
+
+#if defined(ICC_TAINT_TRACE_ENABLED) || defined(ICC_JSON_CURVE_TRACE_ENABLED)
+#include <cstdlib>
+#include <cstring>
+#if defined(__has_feature)
+  #if __has_feature(memory_sanitizer)
+    #include <sanitizer/msan_interface.h>
+    #define ICC_TAINT_TRACE_HAS_MSAN 1
+  #endif
+#endif
+#if !defined(ICC_TAINT_TRACE_HAS_MSAN) && defined(__has_include)
+  #if __has_include(<valgrind/memcheck.h>)
+    #include <valgrind/memcheck.h>
+    #define ICC_TAINT_TRACE_HAS_VALGRIND 1
+  #endif
+#endif
+
+struct IccTaintMemoryResult {
+  const char *state;
+  intptr_t offset;
+};
+
+inline bool IccTaintTraceEnabled()
+{
+  const char *value = std::getenv("ICC_TAINT_TRACE");
+  if (value && value[0] && std::strcmp(value, "0"))
+    return true;
+
+  value = std::getenv("ICC_JSON_CURVE_TRACE");
+  return value && value[0] && std::strcmp(value, "0");
+}
+
+inline IccTaintMemoryResult IccTaintMemoryState(const void *data, size_t size)
+{
+  if (!data && size)
+    return {"unaddressable", 0};
+
+#ifdef ICC_TAINT_TRACE_HAS_MSAN
+  const intptr_t offset = data && size ? __msan_test_shadow(data, size) : -1;
+  return {offset < 0 ? "initialized" : "poisoned", offset};
+#elif defined(ICC_TAINT_TRACE_HAS_VALGRIND)
+  if (RUNNING_ON_VALGRIND && data && size) {
+    const uintptr_t address = (uintptr_t)data;
+    const uintptr_t badAddress =
+      (uintptr_t)VALGRIND_CHECK_MEM_IS_ADDRESSABLE(data, size);
+    if (badAddress)
+      return {"unaddressable", (intptr_t)(badAddress - address)};
+
+    const uintptr_t poisonedAddress =
+      (uintptr_t)VALGRIND_CHECK_MEM_IS_DEFINED(data, size);
+    if (poisonedAddress)
+      return {"poisoned", (intptr_t)(poisonedAddress - address)};
+
+    return {"initialized", -1};
+  }
+  return {"unknown", -2};
+#else
+  (void)data;
+  (void)size;
+  return {"unknown", -2};
+#endif
+}
+
+#define ICC_TAINT_TRACE(format, ...) \
+  do { \
+    if (IccTaintTraceEnabled()) \
+      ICC_LOG_INFO("TAINT_TRACE " format, __VA_ARGS__); \
+  } while(0)
+
+#define ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, boundary, data, size) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const void *iccTaintData = (data); \
+      const size_t iccTaintSize = (size); \
+      const IccTaintMemoryResult iccTaintResult = \
+        IccTaintMemoryState(iccTaintData, iccTaintSize); \
+      if (iccTaintResult.offset >= 0) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s boundary=%s data=%p size=%zu state=%s first_bad=%td", \
+                     stage, access, boundary, iccTaintData, iccTaintSize, \
+                     iccTaintResult.state, (ptrdiff_t)iccTaintResult.offset); \
+      else \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s boundary=%s data=%p size=%zu state=%s", \
+                     stage, access, boundary, iccTaintData, iccTaintSize, \
+                     iccTaintResult.state); \
+    } \
+  } while(0)
+
+#define ICC_TAINT_TRACE_MEMORY(stage, access, data, size) \
+  ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, "internal", data, size)
+
+#define ICC_TAINT_TRACE_BUFFER(stage, access, data, count, elementSize) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const size_t iccTaintCount = (count); \
+      const size_t iccTaintElementSize = (elementSize); \
+      if (iccTaintElementSize && \
+          iccTaintCount > SIZE_MAX / iccTaintElementSize) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s data=%p count=%zu element_size=%zu state=invalid-size", \
+                     stage, access, (const void*)(data), iccTaintCount, \
+                     iccTaintElementSize); \
+      else \
+        ICC_TAINT_TRACE_MEMORY(stage, access, data, \
+                               iccTaintCount * iccTaintElementSize); \
+    } \
+  } while(0)
+
+#define ICC_TAINT_TRACE_INDEX(stage, access, index, count, data, elementSize) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const size_t iccTaintIndex = (index); \
+      const size_t iccTaintCount = (count); \
+      if (iccTaintIndex >= iccTaintCount) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=%s index=%zu count=%zu data=%p element_size=%zu bounds=out", \
+                     stage, access, iccTaintIndex, iccTaintCount, \
+                     (const void*)(data), (size_t)(elementSize)); \
+    } \
+  } while(0)
+
+#define ICC_JSON_CURVE_TRACE(format, ...) ICC_TAINT_TRACE(format, __VA_ARGS__)
+
+#define ICC_JSON_CURVE_TRACE_FLOAT(stage, index, count, valuePtr) \
+  do { \
+    if (IccTaintTraceEnabled()) { \
+      const icFloatNumber *iccTaintValue = (valuePtr); \
+      const IccTaintMemoryResult iccTaintResult = \
+        IccTaintMemoryState(iccTaintValue, sizeof(*iccTaintValue)); \
+      if (iccTaintResult.offset == -1) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=initialized value=%.9g", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue), \
+                     (double)*iccTaintValue); \
+      else if (iccTaintResult.offset >= 0) \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=%s first_bad=%td", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue), \
+                     iccTaintResult.state, \
+                     (ptrdiff_t)iccTaintResult.offset); \
+      else \
+        ICC_LOG_INFO("TAINT_TRACE stage=%s access=read index=%u count=%u data=%p size=%zu state=unknown", \
+                     stage, (unsigned)(index), (unsigned)(count), \
+                     (const void*)iccTaintValue, sizeof(*iccTaintValue)); \
+    } \
+  } while(0)
+#else
+#define ICC_TAINT_TRACE(format, ...) ((void)0)
+#define ICC_TAINT_TRACE_MEMORY_CONTEXT(stage, access, boundary, data, size) ((void)0)
+#define ICC_TAINT_TRACE_MEMORY(stage, access, data, size) ((void)0)
+#define ICC_TAINT_TRACE_BUFFER(stage, access, data, count, elementSize) ((void)0)
+#define ICC_TAINT_TRACE_INDEX(stage, access, index, count, data, elementSize) ((void)0)
+#define ICC_JSON_CURVE_TRACE(format, ...) ((void)0)
+#define ICC_JSON_CURVE_TRACE_FLOAT(stage, index, count, valuePtr) ((void)0)
 #endif
 
 inline bool IsSpaceSpectralPCS(icColorSpaceSignature sig)
@@ -255,14 +400,32 @@ enum IccPerfClutPath {
   icPerfClutPathCount
 };
 
+enum IccPerfClutKind {
+  icPerfClut1d,
+  icPerfClut2d,
+  icPerfClut3dLinear,
+  icPerfClut3dTetra,
+  icPerfClut4d,
+  icPerfClut5d,
+  icPerfClut6d,
+  icPerfClutNd,
+  icPerfClutKindCount
+};
+
 struct IccPerfStats {
   std::atomic<unsigned long long> clutCalls[icPerfClutPathCount] = {};
   std::atomic<unsigned long long> clutOutputChannels[17] = {};
   std::atomic<unsigned long long> clutElapsedNanoseconds = {};
+  std::atomic<unsigned long long> clutAllCalls[icPerfClutKindCount] = {};
+  std::atomic<unsigned long long> clutAllTimedSamples[icPerfClutKindCount] = {};
+  std::atomic<unsigned long long> clutAllElapsedNanoseconds[icPerfClutKindCount] = {};
+  std::atomic<unsigned long long> clutAllOutputChannels[17] = {};
+  std::atomic<unsigned long long> clutAllOutputChannelsOver16 = {};
   std::atomic<unsigned long long> threadedCalls = {};
   std::atomic<unsigned long long> threadedPixels = {};
   std::atomic<unsigned long long> threadedWorkerStrips = {};
   std::atomic<unsigned long long> threadedActiveWorkers = {};
+  std::atomic<unsigned long long> threadedElapsedNanoseconds = {};
 };
 
 inline IccPerfStats g_iccPerfStats;
@@ -274,6 +437,21 @@ inline bool IccPerfMonitoringEnabled()
     return value && value[0] && std::strcmp(value, "0");
   }();
   return enabled;
+}
+
+inline unsigned int IccPerfClutTimingStride()
+{
+  static const unsigned int stride = []() {
+    const char *value = std::getenv("ICC_PERF_CLUT_TIMING_STRIDE");
+    if (!value || !value[0])
+      return 1U;
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    return end && !end[0] && parsed >= 1 && parsed <= 1024 &&
+        !(parsed & (parsed - 1))
+      ? static_cast<unsigned int>(parsed) : 1U;
+  }();
+  return stride;
 }
 
 inline void IccPerfWriteReport()
@@ -289,6 +467,7 @@ inline void IccPerfWriteReport()
   }
 
   std::fprintf(stream, "format=iccdev-perf-v1\n");
+  std::fprintf(stream, "clut_timing_stride=%u\n", IccPerfClutTimingStride());
   std::fprintf(stream, "clut_elapsed_ns=%llu\n",
                g_iccPerfStats.clutElapsedNanoseconds.load(std::memory_order_relaxed));
   for (int pathIndex = 0; pathIndex < icPerfClutPathCount; pathIndex++) {
@@ -302,6 +481,44 @@ inline void IccPerfWriteReport()
     if (calls)
       std::fprintf(stream, "clut_calls_outputs_%d=%llu\n", outputChannels, calls);
   }
+  static const char *const kindNames[] = {
+    "1d", "2d", "3d_linear", "3d_tetra", "4d", "5d", "6d", "nd"
+  };
+  unsigned long long allCalls = 0;
+  unsigned long long allElapsedNanoseconds = 0;
+  for (int kind = 0; kind < icPerfClutKindCount; kind++) {
+    const unsigned long long calls =
+      g_iccPerfStats.clutAllCalls[kind].load(std::memory_order_relaxed);
+    const unsigned long long elapsed =
+      g_iccPerfStats.clutAllElapsedNanoseconds[kind].load(std::memory_order_relaxed);
+    std::fprintf(stream, "clut_all_calls_%s=%llu\n", kindNames[kind], calls);
+    std::fprintf(stream, "clut_all_timed_samples_%s=%llu\n", kindNames[kind],
+                 g_iccPerfStats.clutAllTimedSamples[kind].load(std::memory_order_relaxed));
+    std::fprintf(stream, "clut_all_elapsed_ns_%s=%llu\n", kindNames[kind], elapsed);
+    allCalls += calls;
+    allElapsedNanoseconds += elapsed;
+  }
+  std::fprintf(stream, "clut_all_calls_total=%llu\n", allCalls);
+  std::fprintf(stream, "clut_all_elapsed_ns_total=%llu\n", allElapsedNanoseconds);
+  const unsigned long long sse2Calls =
+    g_iccPerfStats.clutCalls[icPerfClutSse2].load(std::memory_order_relaxed);
+  const unsigned long long avx2Calls =
+    g_iccPerfStats.clutCalls[icPerfClutAvx2].load(std::memory_order_relaxed);
+  const unsigned long long avx512Calls =
+    g_iccPerfStats.clutCalls[icPerfClutAvx512].load(std::memory_order_relaxed);
+  std::fprintf(stream, "clut_all_calls_scalar=%llu\n",
+               allCalls - sse2Calls - avx2Calls - avx512Calls);
+  std::fprintf(stream, "clut_all_calls_sse2=%llu\n", sse2Calls);
+  std::fprintf(stream, "clut_all_calls_avx2=%llu\n", avx2Calls);
+  std::fprintf(stream, "clut_all_calls_avx512=%llu\n", avx512Calls);
+  for (int outputChannels = 0; outputChannels <= 16; outputChannels++) {
+    const unsigned long long calls =
+      g_iccPerfStats.clutAllOutputChannels[outputChannels].load(std::memory_order_relaxed);
+    if (calls)
+      std::fprintf(stream, "clut_all_calls_outputs_%d=%llu\n", outputChannels, calls);
+  }
+  std::fprintf(stream, "clut_all_calls_outputs_over_16=%llu\n",
+               g_iccPerfStats.clutAllOutputChannelsOver16.load(std::memory_order_relaxed));
   std::fprintf(stream, "threaded_calls=%llu\n",
                g_iccPerfStats.threadedCalls.load(std::memory_order_relaxed));
   std::fprintf(stream, "threaded_pixels=%llu\n",
@@ -310,6 +527,8 @@ inline void IccPerfWriteReport()
                g_iccPerfStats.threadedWorkerStrips.load(std::memory_order_relaxed));
   std::fprintf(stream, "threaded_active_workers=%llu\n",
                g_iccPerfStats.threadedActiveWorkers.load(std::memory_order_relaxed));
+  std::fprintf(stream, "threaded_elapsed_ns=%llu\n",
+               g_iccPerfStats.threadedElapsedNanoseconds.load(std::memory_order_relaxed));
   std::fclose(stream);
 }
 
@@ -329,13 +548,16 @@ inline void IccPerfEnsureReportWriter()
 
 class IccPerfClutScope {
 public:
-  explicit IccPerfClutScope(int outputChannels)
-    : m_outputChannels(outputChannels), m_path(icPerfClutScalar),
-      m_enabled(IccPerfMonitoringEnabled())
+  explicit IccPerfClutScope(int outputChannels, IccPerfClutKind kind)
+    : m_outputChannels(outputChannels), m_kind(kind), m_path(icPerfClutScalar),
+      m_enabled(IccPerfMonitoringEnabled()), m_timed(false)
   {
     if (m_enabled) {
       IccPerfEnsureReportWriter();
-      m_start = std::chrono::steady_clock::now();
+      static thread_local unsigned long long callsByKind[icPerfClutKindCount] = {};
+      m_timed = (++callsByKind[m_kind] & (IccPerfClutTimingStride() - 1)) == 0;
+      if (m_timed)
+        m_start = std::chrono::steady_clock::now();
     }
   }
 
@@ -344,15 +566,34 @@ public:
     if (!m_enabled)
       return;
 
-    const unsigned long long elapsedNanoseconds =
-      static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - m_start).count());
-    g_iccPerfStats.clutCalls[m_path].fetch_add(1, std::memory_order_relaxed);
-    if (m_outputChannels >= 0 && m_outputChannels <= 16)
-      g_iccPerfStats.clutOutputChannels[m_outputChannels].fetch_add(
+    unsigned long long elapsedNanoseconds = 0;
+    if (m_timed) {
+      elapsedNanoseconds =
+        static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - m_start).count()) *
+        IccPerfClutTimingStride();
+    }
+    g_iccPerfStats.clutAllCalls[m_kind].fetch_add(1, std::memory_order_relaxed);
+    if (m_timed) {
+      g_iccPerfStats.clutAllTimedSamples[m_kind].fetch_add(
         1, std::memory_order_relaxed);
-    g_iccPerfStats.clutElapsedNanoseconds.fetch_add(
-      elapsedNanoseconds, std::memory_order_relaxed);
+      g_iccPerfStats.clutAllElapsedNanoseconds[m_kind].fetch_add(
+        elapsedNanoseconds, std::memory_order_relaxed);
+    }
+    if (m_outputChannels >= 0 && m_outputChannels <= 16)
+      g_iccPerfStats.clutAllOutputChannels[m_outputChannels].fetch_add(
+        1, std::memory_order_relaxed);
+    else if (m_outputChannels > 16)
+      g_iccPerfStats.clutAllOutputChannelsOver16.fetch_add(1, std::memory_order_relaxed);
+    if (m_kind == icPerfClut3dLinear) {
+      g_iccPerfStats.clutCalls[m_path].fetch_add(1, std::memory_order_relaxed);
+      if (m_outputChannels >= 0 && m_outputChannels <= 16)
+        g_iccPerfStats.clutOutputChannels[m_outputChannels].fetch_add(
+          1, std::memory_order_relaxed);
+      if (m_timed)
+        g_iccPerfStats.clutElapsedNanoseconds.fetch_add(
+          elapsedNanoseconds, std::memory_order_relaxed);
+    }
   }
 
   void SetPath(IccPerfClutPath path)
@@ -362,8 +603,10 @@ public:
 
 private:
   int m_outputChannels;
+  IccPerfClutKind m_kind;
   IccPerfClutPath m_path;
   bool m_enabled;
+  bool m_timed;
   std::chrono::steady_clock::time_point m_start;
 };
 
@@ -381,15 +624,44 @@ inline void IccPerfRecordThreadedCmm(icUInt32Number pixels, int activeWorkers)
     static_cast<unsigned long long>(activeWorkers), std::memory_order_relaxed);
 }
 
+class IccPerfThreadedScope {
+public:
+  IccPerfThreadedScope() : m_enabled(IccPerfMonitoringEnabled())
+  {
+    if (m_enabled)
+      m_start = std::chrono::steady_clock::now();
+  }
+
+  ~IccPerfThreadedScope()
+  {
+    if (m_enabled) {
+      const unsigned long long elapsedNanoseconds =
+        static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - m_start).count());
+      g_iccPerfStats.threadedElapsedNanoseconds.fetch_add(
+        elapsedNanoseconds, std::memory_order_relaxed);
+    }
+  }
+
+private:
+  bool m_enabled;
+  std::chrono::steady_clock::time_point m_start;
+};
+
+#define ICC_PERF_CLUT_SCOPE_KIND(outputChannels, kind) \
+  IccPerfClutScope iccPerfClutScope(outputChannels, kind)
 #define ICC_PERF_CLUT_SCOPE(outputChannels) \
-  IccPerfClutScope iccPerfClutScope(outputChannels)
+  ICC_PERF_CLUT_SCOPE_KIND(outputChannels, icPerfClut3dLinear)
 #define ICC_PERF_CLUT_PATH(path) iccPerfClutScope.SetPath(path)
 #define ICC_PERF_THREADED_CMM(pixels, activeWorkers) \
   IccPerfRecordThreadedCmm(pixels, activeWorkers)
+#define ICC_PERF_THREADED_SCOPE() IccPerfThreadedScope iccPerfThreadedScope
 #else
+#define ICC_PERF_CLUT_SCOPE_KIND(outputChannels, kind) ((void)0)
 #define ICC_PERF_CLUT_SCOPE(outputChannels) ((void)0)
 #define ICC_PERF_CLUT_PATH(path) ((void)0)
 #define ICC_PERF_THREADED_CMM(pixels, activeWorkers) ((void)0)
+#define ICC_PERF_THREADED_SCOPE() ((void)0)
 #endif
 
   // -----------------------------------------------------------------------------
@@ -519,13 +791,13 @@ inline const char* ColorSpaceSignatureToStr(icUInt32Number sig)
     default: break;
   }
 
-  // v5/iccMAX: N-channel (0x6e63xxxx) — channels in low 16 bits
+  // v5/iccMAX: N-channel (0x6e63xxxx) - channels in low 16 bits
   icUInt32Number csType = sig & 0xffff0000;
   icUInt32Number nChan  = sig & 0x0000ffff;
   if (csType == 0x6e630000 && nChan > 0)
     return "NChannel";
 
-  // v5/iccMAX: MCS (0x6d63xxxx) — multiplex channel set
+  // v5/iccMAX: MCS (0x6d63xxxx) - multiplex channel set
   if (csType == 0x6d630000 && nChan > 0)
     return "MCS";
 
@@ -630,8 +902,19 @@ inline bool IsValidColorSpaceSignature(icUInt32Number sig)
 //   Debug and warning output is gated behind ICC_SIGNATURE_VERBOSE.
 //
 // NOTE:
-//   This should be used to verify the `technology` field in `profileDescription`
-//   tags or `outputDevice` blocks.
+//   A technology signature appears in exactly two places: the top-level
+//   technologyTag ('tech', a signatureType), and the `technology` field of each
+//   icProfileDescStruct entry in profileSequenceDescTag ('pseq'). Use this
+//   predicate for those. It is not carried by profileDescriptionTag ('desc'),
+//   which is a multiLocalizedUnicode, and there is no "outputDevice" block --
+//   this NOTE named both until #2368, contradicting the CAVEAT below.
+//
+//   CAVEAT: it rejects icSigUndefined (0), which CIccTagProfileSeqDesc::Validate
+//   accepts as "technology not defined" and which is a common real-world value --
+//   iccFromCube writes it (Tools/CmdLine/IccFromCube/iccFromCube.cpp:624). Gating a
+//   profileSequenceDesc entry on this predicate alone therefore rejects legitimate
+//   profiles; test for zero separately. It matches CIccTagSignature::Validate, where a
+//   technologyTag holding zero is genuinely non-compliant (#2101).
 //
 // HISTORY:
 //   Instrumented and standardized by David Hoyt on 01-MAR-2025.
@@ -660,12 +943,24 @@ inline bool IsValidTechnologySignature(icUInt32Number sig)
     case (icUInt32Number)icSigCRTDisplay:
     case (icUInt32Number)icSigPMDisplay:
     case (icUInt32Number)icSigAMDisplay:
+    // ICC.1:2022 Table 29's two display rows, absent from the enum until now (#2101).
+    case (icUInt32Number)icSigLCDDisplay:
+    case (icUInt32Number)icSigOLEDDisplay:
     case (icUInt32Number)icSigPhotoCD:
     case (icUInt32Number)icSigPhotoImageSetter:
     case (icUInt32Number)icSigGravure:
     case (icUInt32Number)icSigOffsetLithography:
     case (icUInt32Number)icSigSilkscreen:
     case (icUInt32Number)icSigFlexography:
+
+    // Same four ICC.1 v4.3 rows missing from CIccInfo::GetTechnologySigName().  This
+    // header ships as a public API, so its answer disagreeing with
+    // CIccTagSignature::Validate is visible to consumers even though nothing in the
+    // tree calls it today (#2101).
+    case (icUInt32Number)icSigMotionPictureFilmScanner:
+    case (icUInt32Number)icSigMotionPictureFilmRecorder:
+    case (icUInt32Number)icSigDigitalMotionPictureCamera:
+    case (icUInt32Number)icSigDigitalCinemaProjector:
       return true;
 
     default:
@@ -694,7 +989,7 @@ struct IccColorSpaceDescription {
 //
 // PURPOSE:
 //   Converts a signature into metadata: name, known/unknown, raw byte layout.
-//   Does NOT log — use DebugColorSpaceMeta() for diagnostic output.
+//   Does NOT log - use DebugColorSpaceMeta() for diagnostic output.
 //
 ///////////////////////////////////////////////////////////////////////////////
 inline IccColorSpaceDescription DescribeColorSpaceSignature(icUInt32Number sig)
@@ -702,7 +997,7 @@ inline IccColorSpaceDescription DescribeColorSpaceSignature(icUInt32Number sig)
   IccColorSpaceDescription desc;
   desc.name = ColorSpaceSignatureToStr(sig);
 
-  // Validate without triggering logs — inline the check directly
+  // Validate without triggering logs - inline the check directly
   bool known = false;
   switch (sig) {
     case (icUInt32Number)icSigXYZData:

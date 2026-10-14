@@ -20,18 +20,26 @@ on:
     paths:
       - '.github/**'
       - '.githooks/**'
+      - 'AGENTS.md'
+      - 'README.md'
+      - 'docs/**'
       - 'Dockerfile'
       - 'Dockerfile.*'
       - '.dockerignore'
+      - '.trivyignore*'
   pull_request:
     branches:
       - master
     paths:
       - '.github/**'
       - '.githooks/**'
+      - 'AGENTS.md'
+      - 'README.md'
+      - 'docs/**'
       - 'Dockerfile'
       - 'Dockerfile.*'
       - '.dockerignore'
+      - '.trivyignore*'
   workflow_dispatch:
 
 concurrency:
@@ -87,30 +95,30 @@ jobs:
           source trusted/.github/scripts/sanitize-sed.sh
 
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          sudo apt-get install -y -qq doxygen graphviz shellcheck
 
           python3 -m venv /tmp/iccdev-preflight
           /tmp/iccdev-preflight/bin/python -m pip install --upgrade pip --quiet
           /tmp/iccdev-preflight/bin/python -m pip install \
             'PyYAML>=6,<7' \
             'yamllint>=1.35,<2' \
-            'zizmor>=1.9,<2' \
+            'zizmor==1.30.0' \
             --quiet
           echo "/tmp/iccdev-preflight/bin" >> "$GITHUB_PATH"
 
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.10
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
           if command -v codeql >/dev/null 2>&1; then
             dirname "$(command -v codeql)" >> "$GITHUB_PATH"
           else
-            # Keep in lockstep with the same pin in ci-codeql-security.yml; the digest
-            # is the release asset's, so bump CODEQL_VER and CODEQL_SHA256 together:
+            # Keep this pin synchronized with the other workflow pins and Dockerfile.
+            # The digest is the release asset's, so bump CODEQL_VER and CODEQL_SHA256 together:
             #   gh api repos/github/codeql-action/releases/tags/codeql-bundle-v"$CODEQL_VER" \
             #     --jq '.assets[]|select(.name=="codeql-bundle-linux64.tar.gz").digest'
-            CODEQL_VER="2.25.6"
+            CODEQL_VER="2.27.2"
             CODEQL_ARCHIVE="/tmp/codeql-bundle-linux64.tar.gz"
-            CODEQL_SHA256="55c5a760f8a98d882ce452f69c427116a034d91450c627bef717d4acd896632c"
+            CODEQL_SHA256="f002864be6dd8d5d7bdb123aaf7291ec8e291012bd9f70b6d2362f730db52aeb"
             CODEQL_URL="https://github.com/github/codeql-action/releases/download"
             curl -fsSL --retry 3 \
               -o "${CODEQL_ARCHIVE}" \
@@ -163,7 +171,7 @@ jobs:
           cd target
           mapfile -t changed_files < <(
             git diff --name-only --diff-filter=ACMRT origin/master...HEAD -- \
-              .github .githooks Dockerfile 'Dockerfile.*' .dockerignore | sort
+              .github .githooks Dockerfile 'Dockerfile.*' .dockerignore '.trivyignore*' | sort
           )
           mapfile -t workflow_files < <(
             find .github/workflows -maxdepth 1 -type f \
@@ -180,6 +188,10 @@ jobs:
           mapfile -t docker_files < <(
             printf '%s\n' "${changed_files[@]}" |
               awk '/^Dockerfile$/ || /^Dockerfile\./'
+          )
+          mapfile -t trivy_policy_files < <(
+            printf '%s\n' "${changed_files[@]}" |
+              awk '/^\.trivyignore/'
           )
 
           failures=0
@@ -280,19 +292,21 @@ jobs:
             echo "[SKIP] No changed Python scripts"
           fi
 
-          if [ "${#docker_files[@]}" -gt 0 ]; then
+          if [ "${#docker_files[@]}" -gt 0 ] || [ "${#trivy_policy_files[@]}" -gt 0 ]; then
             if ! command -v docker >/dev/null 2>&1; then
-              echo "[FAIL] docker is required for Dockerfile security checks" >&2
+              echo "[FAIL] docker is required for container policy security checks" >&2
               failures=$((failures + 1))
             else
-              hadolint_image='hadolint/hadolint@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e'
-              trivy_image='aquasec/trivy@sha256:5c59e08f980b5d4d503329773480fcea2c9bdad7e381d846fbf9f2ecb8050f6b'
-              if ! docker run --rm \
-                -v "$PWD":/repo:ro \
-                -w /repo \
-                "$hadolint_image" \
-                hadolint "${docker_files[@]}"; then
-                failures=$((failures + 1))
+              hadolint_image='hadolint/hadolint@sha256:fdf19d026b54834f88c62774fdf2a61ff3b586a42632e5070674d41a796bfdf3'
+              trivy_image='aquasec/trivy@sha256:ee940acbf1f58ebadb42d01434ce4609530bf1b52536afbd1eee66cd7123c5c9'
+              if [ "${#docker_files[@]}" -gt 0 ]; then
+                if ! docker run --rm \
+                  -v "$PWD":/repo:ro \
+                  -w /repo \
+                  "$hadolint_image" \
+                  hadolint --failure-threshold warning "${docker_files[@]}"; then
+                  failures=$((failures + 1))
+                fi
               fi
               rm -rf "${RUNNER_TEMP:-/tmp}/trivy-cache"
               mkdir -p "${RUNNER_TEMP:-/tmp}/trivy-cache"
@@ -301,12 +315,13 @@ jobs:
                 -v "${RUNNER_TEMP:-/tmp}/trivy-cache":/root/.cache/ \
                 -w /repo \
                 "$trivy_image" \
-                config --skip-check-update --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 /repo; then
+                config --ignorefile /repo/.trivyignore.yaml --skip-check-update \
+                --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 /repo; then
                 failures=$((failures + 1))
               fi
             fi
           else
-            echo "[SKIP] No changed Dockerfile files"
+            echo "[SKIP] No changed Dockerfile or Trivy policy files"
           fi
 
           if [ -f .github/codeql-queries/iccdev-security-suite.qls ]; then
@@ -317,6 +332,30 @@ jobs:
           fi
 
           exit "$failures"
+
+      - name: Run Doxygen documentation check
+        if: env.PREFLIGHT_TRUST_MODE == 'bootstrap-inline'
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        working-directory: target
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source ../trusted/.github/scripts/sanitize-sed.sh
+
+          output_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/iccdev-doxygen.XXXXXX")"
+          trap 'rm -rf "$output_dir"' EXIT
+          doxygen_status=0
+          doxygen .github/ci/doxygen/Doxyfile \
+            "OUTPUT_DIRECTORY=$output_dir" \
+            "WARN_LOGFILE=$output_dir/doxygen-warnings.log" || doxygen_status=$?
+          if [ -s "$output_dir/doxygen-warnings.log" ]; then
+            sanitize_print "$(cat "$output_dir/doxygen-warnings.log")"
+            exit 1
+          fi
+          exit "$doxygen_status"
 
       - name: Write pre-flight summary
         if: always()

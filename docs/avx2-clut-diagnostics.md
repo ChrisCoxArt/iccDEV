@@ -59,12 +59,28 @@ an isolated kernel benchmark before claiming an ISA throughput improvement.
 ## Performance Telemetry and Profiler Capture
 
 Configure a separate release build with
-`-DICCDEV_ENABLE_PERF_MONITORING=ON` to collect aggregate, opt-in library
+`-DICCDEV_ENABLE_TELEMETRY=ON` to collect aggregate, opt-in library
 telemetry. The library remains silent unless `ICC_PERF_STATS_FILE` names a
 report file. The report records CLUT calls by scalar/SSE2/AVX2/AVX-512 path,
 output-channel counts, aggregate CLUT elapsed nanoseconds, and threaded-CMM
-call, pixel, strip, and active-worker totals. Each process appends one report
-block, so a CTest run preserves its child-process telemetry in one file.
+call, pixel, strip, active-worker, and elapsed-time totals. The original
+`clut_calls_*`, `clut_calls_outputs_*`, and `clut_elapsed_ns` fields count only
+linear 3D interpolation. Additive `clut_all_*` fields count every CLUT entry
+point: 1D, 2D, linear and tetrahedral 3D, 4D, 5D, 6D, and ND. They include
+per-kind calls and elapsed nanoseconds, total calls and elapsed nanoseconds,
+aggregate scalar/SSE2/AVX2/AVX-512 dispatch counts, output-channel counts
+through 16, and an over-16 count. The elapsed totals
+sum call durations; when calls overlap across threads, they are not wall time.
+`threaded_elapsed_ns` measures the wall duration inside the worker-pool Apply
+calls and includes synchronization. Each process appends one report block, so
+a CTest run preserves its child-process telemetry in one file. The focused
+`iccdev.clut-perf-counters` test is registered only for a perf-enabled build.
+For lower profiling cost, set `ICC_PERF_CLUT_TIMING_STRIDE` to a power of two
+from 2 through 1024. Call and output-channel counts remain exact. The elapsed
+fields then estimate full-workload time from one timed call per stride within
+each thread and interpolation kind; `clut_all_timed_samples_*` shows the sample
+count. The default stride of 1 times every call. A kind with fewer calls than
+the stride on each thread can have zero timed samples and no elapsed estimate.
 
 On Linux, capture the focused regression in a fresh output directory:
 
@@ -72,14 +88,30 @@ On Linux, capture the focused regression in a fresh output directory:
 ICCDEV_CLUT_PROFILE_AFFINITY=0 \
 ICCDEV_CLUT_PROFILE_RUNS=21 \
 ICCDEV_CLUT_PROFILE_FLAMEGRAPH=1 \
-FLAMEGRAPH_DIR=/path/to/FlameGraph \
+ICCDEV_FLAMEGRAPH_DIR=/path/to/FlameGraph \
 ./.github/scripts/iccdev-clut-profile.sh out/clut-avx2 out/clut-profile
 ```
 
+The unified container supplies this variable and a pinned checkout at
+`/opt/FlameGraph`.
+
 The report includes per-run wall/user/system time and RSS, median and p95
-elapsed time, `perf stat` counters when permitted by the host, a `strace -f -c`
-summary when available, and optional `perf.data`, folded stacks, and an SVG
-flamegraph. `perf` hardware counters may be unavailable when
+elapsed time, raw `perf stat` counters when permitted by the host, and derived
+IPC, instruction-rate, branch-miss-rate, and cache-miss-rate values in
+`perf-derived.tsv`. On hosts that advertise the required events, that TSV also
+contains numeric retired memory-load/store and floating-point event counts
+successfully scheduled together by the profiler's combined probe.
+Floating-point columns retain the exact `perf` event scope rather than claiming
+a cross-CPU FLOP total. Dynamic stack-operand counts are not available from a
+portable counter and require architecture-specific sampling or disassembly.
+On hybrid Intel hosts, `perf` may qualify generic events as `cpu_core/...` and
+`cpu_atom/...`; the profiler normalizes those names and sums their reported
+values into the matching generic column. A combined probe that yields no usable
+events is reported as unavailable and the timed run proceeds without `perf`.
+A ratio describes this end-to-end CTest envelope; it is not a kernel-only or
+per-pixel value. The report also includes a `strace -f -c` summary when
+available, and optional `perf.data`, folded stacks, and an SVG flamegraph.
+`perf` hardware counters may be unavailable when
 `kernel.perf_event_paranoid` disallows them; this is reported rather than
 treated as a correctness failure. Do not use `strace`, source coverage, or
 debug logging when collecting cycle or throughput comparisons.

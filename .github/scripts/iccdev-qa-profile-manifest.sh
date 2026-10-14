@@ -161,10 +161,9 @@ REPO_ROOT="$(git -C "$TESTING_DIR" rev-parse --show-toplevel 2>/dev/null || echo
 # profiles git tracks. Testing/hybrid/ICC and Testing/hybrid/Results are excluded
 # because they are not corpus at all: iccdev.hybrid-pipeline writes its own output
 # there while the suite runs, and Testing/hybrid/.gitignore - a committed file - says
-# so, listing "ICC/*.icc" and "Results/*.icc" as generated artifacts. It is the only
-# .gitignore under Testing/ that declares .icc output. Without this the manifest test
-# is ordering-dependent: it sees 213 profiles alone and 232 after the hybrid pipeline
-# has run, and the difference is not something a verdict baseline should adjudicate.
+# so, listing "ICC/*.icc" and "Results/*.icc" as generated artifacts. Without these
+# exclusions the manifest test is ordering-dependent, and the difference is not
+# something a verdict baseline should adjudicate.
 list_corpus() {
   find "$TESTING_DIR" -name '*.icc' \
     ! -path "$TESTING_DIR/hybrid/ICC/*" \
@@ -187,7 +186,9 @@ write_header() {
 #   expected_sanitizer  none  (a sanitizer finding fails every suite, negatives included)
 #   source              tracked | generated
 #   sha256              digest of the tracked git blob, or - when generated
-#   rationale           why this row reads the way it does
+#   rationale           why this row reads the way it does; generate keeps a
+#                       hand-written one while the row's suite, status and exit
+#                       are unchanged, and derives one otherwise
 #
 # Suite policy:
 #   positive       must validate clean; any new diagnostic is a regression
@@ -225,6 +226,22 @@ EOF
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 
+previous_rationale() {
+  local path="$1" suite="$2" status="$3" expected_exit="$4"
+  [ -f "$MANIFEST" ] || return 0
+
+  awk -F'\t' \
+    -v path="$path" \
+    -v suite="$suite" \
+    -v status="$status" \
+    -v expected_exit="$expected_exit" '
+      $0 !~ /^#/ && $1 == path && $2 == suite && $3 == status && $4 == expected_exit {
+        print $8
+        exit
+      }
+    ' "$MANIFEST"
+}
+
 emit_rows() {
   while IFS= read -r f; do
     local_rel="${f#"$TESTING_DIR"/}"
@@ -236,6 +253,10 @@ emit_rows() {
     san="$(classify_sanitizer "$tmp_log")"
     suite="$(classify_suite "$status")"
     rationale="$(classify_rationale "$status" "$tmp_log")"
+    preserved="$(previous_rationale "$local_rel" "$suite" "$status" "$rc")"
+    if [ -n "$preserved" ]; then
+      rationale="$preserved"
+    fi
 
     repo_rel="Testing/$local_rel"
     if [ -n "$REPO_ROOT" ] && git -C "$REPO_ROOT" ls-files --error-unmatch "$repo_rel" >/dev/null 2>&1; then

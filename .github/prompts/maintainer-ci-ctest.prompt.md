@@ -26,6 +26,8 @@ Confirm that the work is maintainer-owned before editing:
 - CPack, release packaging, installer, or artifact publishing logic
 - sanitizer helper scripts and sanitizer policy
 - CodeQL, workflow governance, or security automation
+- Apple mobile static-core presets, simulator/device smoke apps, or Apple
+  platform workflows
 - vcpkg port release verification
 
 If the request comes from a general contributor, ask them to describe the
@@ -36,26 +38,35 @@ maintainers unless an iccDEV maintainer explicitly approves the change.
 
 Choose the smallest gate that proves the behavior:
 
-- `ci-pr-action` full: explicit long-cycle Unix GCC/Clang Release and Debug,
-  exact GCC 15.2 strict Release LTO, GCC 15.2 ASAN+UBSAN tool tests, Windows,
-  and Docker verification. Its tool-test caller excludes the `pr-extended`
-  CTest label; labelled tests remain enabled in `ci-regression-checks`.
-- `ci-pr-action` fast lane: exact GCC 15.2 strict Release LTO plus GCC 15.2
-  ASAN+UBSAN Release tool validation and the latest CTest by default, with
-  Windows opt-in. Docker verification is scheduled when the selected PR changes
-  the container surface.
-- `ci-pr-action` auto: default path-scoped selection. Source, build, test, and
-  container changes select the full matrix; workflow-only changes use preflight
-  and workflow-security gates.
+- `ci-pr-action` full: deterministic Unix GCC/Clang Release and Debug, exact
+  GCC 15.2 strict Release LTO, non-sanitized GCC core tool tests, and Windows
+  validation. Its tool-test caller excludes `pr-extended` and
+  `ci-infrastructure` CTests.
+- `ci-pr-action` fast lane: exact GCC 15.2 strict Release LTO plus
+  non-sanitized GCC core tool validation and the latest CTest by default, with
+  Windows opt-in. It does not run Docker verification for a container-surface
+  change.
+- `ci-pr-action` auto: default path-scoped selection. Source, build, and test
+  changes select the full matrix; documentation-only changes use the constrained
+  fast-lane settings. Workflow-only changes keep the core orchestrator at setup
+  and finalization while standalone preflight and risk-analysis checks remain
+  required. Container-only changes use those standalone security gates and local
+  container validation.
 - CTest suite: cross-platform tool/profile behavior that belongs in the normal
   local and CI test surface.
 - Focused `.github/scripts/*.sh` regression: reusable Linux regression logic or
   parser/security invariant.
 - Workflow inline step: short one-off CI assertion tied to a specific workflow.
+- Apple mobile platform gate: static-library SDK coverage and native
+  simulator/device smoke. Keep dependency-free `apple-*-core` presets available,
+  use `apple-*-extended-core` for zlib/IccXML/IccJSON/IccConnect where
+  dependencies are discoverable, and preserve app-reported mobile gaps for
+  desktop CLI and image-tool packaging.
 - CPack or package smoke: install/export/uninstall, bundled consumers, or
   release artifact structure.
 - Sanitizer gate: memory-safety, parser, or profile-controlled undefined
-  behavior where sanitizer output is the pass/fail signal.
+  behavior where sanitizer output is the pass/fail signal. Use the standalone
+  path-scoped/manual `ci-regression-checks` workflow, not `ci-pr-action`.
 - vcpkg gate: overlay port, triplet, static CRT, or packaged consumer behavior.
 
 ## Required Updates
@@ -65,6 +76,9 @@ Choose the smallest gate that proves the behavior:
 - Update `.github/instructions/testing.instructions.md` when the test becomes
   standard policy.
 - Update `docs/regression-workflow-governance.md` for workflow process changes.
+- Update `docs/build.md`, `.github/instructions/build-system.instructions.md`,
+  and Apple workflow governance notes when changing Apple mobile presets,
+  `Build/AppleMobile`, or simulator/device smoke behavior.
 - Update `docs/build.md` and `docs/regression-workflow-governance.md` when
   changing maintainer Dockerfiles, container dependencies, GHCR publish flow, or
   pinned unified image digests.
@@ -75,11 +89,17 @@ Choose the smallest gate that proves the behavior:
   log excerpts by default; rerun with `registry_qa_log_tail_lines=0` only when
   complete raw per-tool logs are required. Preserve downloaded registry profile
   payloads in developer reports so failing inputs remain available for review.
-- Container changes require the Docker PR verification lane. Do not claim the
-  container surface is verified until its local image build and hosted lane pass.
+  Package and upload the developer report with `always()` so a failed registry
+  scan retains its classifier counters and raw evidence.
+- Container changes require the local canonical-image build and smoke in
+  `docs/regression-container.md`. The Docker PR verification job is disabled.
 - When adding cases inside an existing script-backed suite, document that the
   CTest suite count is unchanged and validate both direct script execution and
   the CTest wrapper.
+- For legacy packed intent decoding or named-color overprint behavior, include
+  `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`,
+  `.github/scripts/iccdev-applysearch-cli-args-regression.sh`, and
+  `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh` in the focused validation.
 - When changing generated-profile totals, update every assertion source. For
   WASM parity this includes `Build/Cmake/wasm-package/regression.js`,
   `.github/workflows/ci-pr-wasm.yml`, `.github/workflows/ci-pr-action.yml`, and
@@ -118,10 +138,23 @@ docker build -t iccdev-container-check -f <Dockerfile> .
 docker run --rm iccdev-container-check <smoke-command>
 ```
 
-For the unified `Dockerfile`, use a no-cache build and smoke `clang`,
-`clang++`, `gcc`, `g++`, `cmake`, `afl-fuzz`, and `/usr/bin/time`. If the image must be published,
-publish through the maintainer-controlled container release path, then pass the
-published branch or SHA tag to `ci-iccdev-tool-tests.yml`.
+For unified-image platform changes, build and smoke both native image variants
+before publishing a manifest tag. Apple Silicon hosts must validate
+`linux/arm64` without amd64 emulation:
+
+```bash
+docker buildx build --platform linux/arm64 --load -t iccdev-container-arm64 -f Dockerfile .
+docker run --rm iccdev-container-arm64 bash -lc 'codeql version && hadolint --version'
+```
+
+For the unified `Dockerfile`, run the complete local development-environment
+preflight in `docs/regression-container.md#maintainer-preflight-and-security-checks`.
+Cached builds are permitted for development iterations. The final pre-push
+proof covers workflow and Dockerfile policy, a no-cache build, analyzer
+inventory, runtime smoke, image health, and Trivy vulnerability/secret triage.
+If the image must be published, publish through the maintainer-controlled
+container release path, then pass the published branch or SHA tag to
+`ci-iccdev-tool-tests.yml`.
 
 For PR or issue proof with the published maintainer image, follow
 [Prove a Local PR Worktree](../../docs/regression-container.md#prove-a-local-pr-worktree).
@@ -137,6 +170,20 @@ python3 -c "import yaml; [yaml.safe_load(open(p)) for p in ['.github/workflows/<
 actionlint -no-color .github/workflows/<workflow>.yml
 ```
 
+Apple mobile core and simulator smoke on macOS:
+
+```bash
+cmake --list-presets=configure -S Build/Cmake | grep -E 'apple-.*(extended-core|core)'
+bash .github/scripts/iccdev-apple-simulator-smoke.sh ios
+bash .github/scripts/iccdev-apple-simulator-smoke.sh watchos
+bash .github/scripts/iccdev-xcode-ctest-smoke.sh
+```
+
+For the dependency-free app path, set `ICCDEV_APPLE_CORE_FLAVOR=minimal` and
+record that it was an explicit minimal-tier check. For extended smoke, require
+the app report to include JSON, XML, IccConnect, the public invalid-profile
+substitution control, and non-failing mobile gap notes.
+
 GitHub verification:
 
 ```bash
@@ -147,8 +194,8 @@ gh run watch <run-id> --repo InternationalColorConsortium/iccDEV --exit-status
 Trigger workflows with shared concurrency sequentially. Use `ci-pr-action` for
 normal maintainer validation; it defaults to `ci_scope=auto`. Use
 `ci_scope=fast-lane` with an open same-repository PR number for the shortest
-exact GCC 15.2 lane. Use `ci-regression-checks` through the orchestrator for
-ASAN/UBSAN CTest coverage.
+exact GCC 15.2 core lane. Use the standalone `ci-regression-checks` workflow
+for ASAN/UBSAN CTest coverage.
 
 ## Handoff Format
 

@@ -28,7 +28,7 @@ work_dir="${AFL_WORK_DIR:-$repo_root/.afl-smoke}"
 build_type="${AFL_BUILD_TYPE:-Debug}"
 exec_timeout_ms="${AFL_EXEC_TIMEOUT_MS:-30000}"
 # Raised from 49152 to admit the whole committed seed corpus, matching
-# cfl/build.sh after #2120. Exactly one committed seed exceeds the old default --
+# .github/ci/cfl/build.sh after #2120. Exactly one committed seed exceeds the old default --
 # .github/ci/test-data/fuzz-clut-hbo-69197729.icc at 61,015 bytes -- so every AFL
 # smoke run staged that file and then deleted it again before fuzzing.
 #
@@ -232,6 +232,41 @@ else
 fi
 
 if [ "$skip_build" -eq 0 ]; then
+    if [ -z "${AFL_CC:-}" ]; then
+        if command -v clang-21 >/dev/null 2>&1; then
+            AFL_CC=clang-21
+        elif command -v clang-22 >/dev/null 2>&1; then
+            AFL_CC=clang-22
+        else
+            echo "ERROR: AFL++ requires clang-21 or clang-22" >&2
+            exit 127
+        fi
+    fi
+    if [ -z "${AFL_CXX:-}" ]; then
+        case "$AFL_CC" in
+            *clang-21) AFL_CXX="${AFL_CC%clang-21}clang++-21" ;;
+            *clang-22) AFL_CXX="${AFL_CC%clang-22}clang++-22" ;;
+            *)
+                echo "ERROR: set AFL_CXX to the matching Clang 21 or 22 compiler" >&2
+                exit 2
+                ;;
+        esac
+    fi
+    require_tool "$AFL_CC"
+    require_tool "$AFL_CXX"
+
+    afl_cc_major="$($AFL_CC -dumpversion | cut -d. -f1)"
+    afl_cxx_major="$($AFL_CXX -dumpversion | cut -d. -f1)"
+    case "$afl_cc_major:$afl_cxx_major" in
+        21:21|22:22)
+            ;;
+        *)
+            echo "ERROR: AFL++ requires matching Clang 21 or 22; found C=$afl_cc_major CXX=$afl_cxx_major" >&2
+            exit 2
+            ;;
+    esac
+    export AFL_CC AFL_CXX
+
     if [ "$apply_patches" != "0" ]; then
         patch_applicator="${ICCDEV_FUZZ_PATCH_APPLICATOR:-$repo_root/.github/scripts/iccdev-apply-fuzz-patches.sh}"
         "$patch_applicator" --mode afl --patch-dir "$patch_dir"
@@ -344,7 +379,7 @@ prune_large_seeds() {
             # traced only by the TSV line below and the summary it feeds.
             #
             # So committed seeds are never pruned, they are a hard error, as in
-            # cfl/build.sh. Adding an oversized regression seed now forces an
+            # .github/ci/cfl/build.sh. Adding an oversized regression seed now forces an
             # explicit decision about the cap. Generated seeds still prune
             # silently, which is what the cap is for.
             if committed_source="$(committed_seed_source "$(basename "$file")")"; then

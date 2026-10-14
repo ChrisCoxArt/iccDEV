@@ -73,6 +73,15 @@ LD_LIBRARY_PATH=IccProfLib:IccXML \
   Tools/IccDumpProfile/iccDumpProfile ../Testing/Display/sRGB_D65_MAT.icc
 ```
 
+### Maintainer static analysis
+
+Install `clang-tidy`, `clang-tools`, and `cppcheck` on Ubuntu before running
+the reusable lint configuration. `docs/build.md#maintainer-static-analysis`
+contains the canonical local reproduction: it generates a compile database and
+separate cppcheck and clang-tidy reports for IccProfLib, IccXML, IccJSON,
+IccConnect, and Tools. Treat the reports as diagnostics, prioritizing memory
+safety, parser, and type-punning findings over modernization-only warnings.
+
 ### Windows
 
 ```powershell
@@ -142,7 +151,8 @@ that define complex color transforms. Each `CIccMultiProcessElement` has
 
 - C++17, 2-space indent, K&R braces, `m_` prefix for members
 - Return-value error handling (no C++ exceptions)
-- ICC copyright + BSD 3-Clause header on all new files
+- ICC copyright + canonical BSD-3-Clause notice on all new owned source files;
+  run `.github/scripts/check-license-notices.py` for C/C++ files
 - Match existing patterns in the file you're modifying
 - Zero compiler warnings on all platforms
 

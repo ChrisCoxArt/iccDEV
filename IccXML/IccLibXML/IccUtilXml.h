@@ -10,53 +10,33 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #ifndef _ICCUTILXML_H
 #define _ICCUTILXML_H
 
@@ -66,6 +46,7 @@
 #include "libxml/parser.h"
 #include <vector>
 #include <string>
+#include "libxml/relaxng.h"
 
 // CIccUTF16String, icUtf16ToUtf8, icUtf8ToUtf16 are now declared in IccUtil.h
 // and available here via the #include "IccUtil.h" above.
@@ -73,8 +54,13 @@
 const char *icFixXml(char *szDest, const char *szStr);
 const char *icFixXml(std::string &buf, const char *szStr);
 const char *icFixXmlComment(std::string &buf, const char *szStr);
+// szSrc is a NUL-terminated string, converted whole; NULL gives "".
 const char *icAnsiToUtf8(std::string &buf, const char *szSrc);
 const char *icUtf8ToAnsi(std::string &buf, const char *szSrc);
+// szSrc is a fixed-size field that need not be NUL-terminated: at most
+// nMaxLen bytes are read.  Use these for the 32-byte name fields; NULL gives "".
+const char *icAnsiToUtf8(std::string &buf, const char *szSrc, size_t nMaxLen);
+const char *icUtf8ToAnsi(std::string &buf, const char *szSrc, size_t nMaxLen);
 
 bool icCLUTDataToXml(std::string &xml, CIccCLUT *pCLUT, icConvertType nType, std::string blanks,
                      bool bSaveGridPoints=false);
@@ -90,6 +76,9 @@ icUInt32Number icXmlGetChildSigVal(xmlNode *pNode);
 icUInt32Number icXmlGetHexData(void *pBuf, const char *szText, icUInt32Number nBufSize);
 
 icUInt32Number icXmlGetHexDataSize(const char *szText);
+
+// True when szText is hex digits in pairs, with whitespace only between pairs.
+bool icXmlValidHexData(const char *szText);
 
 size_t icXmlDumpHexData(std::string &xml, std::string blanks, void *pBuf, size_t nBufSize);
 
@@ -112,6 +101,18 @@ static const size_t icXmlMaxTextFileBytes = 256ULL * 1024 * 1024;
 // round-trip - the writer bounding its own text nodes is (issue #2160).
 // Diagnostics are appended to parseStr when one is supplied.
 xmlDoc *icXmlReadFileBounded(const char *szFilename, int nOptions, std::string *parseStr = NULL);
+
+// Points a RelaxNG parser and validation context at the same sanitising
+// error handler icXmlReadFileBounded uses for the document parse (#2698).
+// Either pointer may be NULL.
+void icXmlSetSanitizedErrorHandlers(xmlRelaxNGParserCtxt *pParser, xmlRelaxNGValidCtxt *pValid);
+
+// Installs (true) or removes (false) the same handler as the process-wide
+// structured error handler, for the libxml2 calls that take no context:
+// the document parse, and the XML parse of a RelaxNG schema file inside
+// xmlRelaxNGParse(), which reports through the global handler rather than
+// the parser context's.  Scoped to the call by the caller (#2698).
+void icXmlSetGlobalSanitizedErrorHandler(bool bOn);
 
 #define icXmlStrCmp(x, y) strcmp((const char *)(x), (const char*)(y))
 
@@ -196,6 +197,15 @@ bool icXmlParseU16(const char *s, icUInt16Number &out,
                    icUInt16Number max_value = 0xFFFFu);
 bool icXmlParseU32(const char *s, icUInt32Number &out,
                    icUInt32Number max_value = 0xFFFFFFFFu);
+
+// Safe floating-point parser for XML attribute values and element text, the
+// replacement for atof() (#2548).  Returns false (leaving `out` unchanged) when:
+//   - the string is NULL, empty or only whitespace,
+//   - strtod converts nothing, or anything but whitespace follows the number,
+//   - the value is a NaN or an infinity, or lies beyond icFloatNumber's range.
+// Surrounding whitespace is accepted, so pretty-printed element text such as
+// "\n  5000\n" parses; atof() read "50abc" as 50 and "not-a-number" as 0.
+bool icXmlParseFloat(const char *s, icFloatNumber &out);
 
 
 #endif //_ICCUTILXML_H

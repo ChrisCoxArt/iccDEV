@@ -1,4 +1,4 @@
-# CIccThreadedCmm — Parallel CMM Apply
+# CIccThreadedCmm - Parallel CMM Apply
 
 `CIccThreadedCmm` is a decorator over an existing `CIccCmm` that runs
 multi-pixel `Apply()` calls in parallel by splitting the pixel buffer into
@@ -50,7 +50,7 @@ delete tcmm;   // deletes the wrapped cmm when bDeleteCmm=true
 | `nThreads` | `0` selects `std::thread::hardware_concurrency()`; clamped to `>= 1`. |
 | `bDeleteCmm` | Take ownership of `pCmm`. Also deletes `pCmm` if `Attach` fails. |
 
-`AddXform()` is disabled on the wrapper — every overload returns
+`AddXform()` is disabled on the wrapper - every overload returns
 `icCmmStatBad`. Build the transform chain on the wrapped CMM before calling
 `Attach()`.
 
@@ -80,6 +80,31 @@ thread launches.
 - **No shared mutable xform state**: every worker allocates its own
   `CIccApplyCmm` from the wrapped CMM, so transforms that maintain
   per-apply scratch state (e.g. calculator stacks) stay isolated.
+- **Decorator CMMs must own their inner apply object.** A CMM that wraps
+  another one has to take its own `CIccApplyCmm` from the inner CMM in its
+  apply object, not call `innerCmm->Apply()`. `CIccCmm::Apply()` dispatches
+  through the inner CMM's single `m_pApply`, so every worker would share one
+  set of `m_Pixel` / `m_Pixel2` / `m_ChunkBuf` stage buffers. Both decorators
+  in the tree do this now: `CIccApplyCmmSearch` holds one apply object per
+  sub-chain, and `CIccApplyMruCmm` holds `m_pCachedApply` for the cached CMM.
+
+## Cached Apply: `CIccMruCmm`
+
+`CIccMruCmm::Attach(pCmm, nCacheSize, bDeleteCmm)` decorates a `Begin()`-ed CMM
+with a small most-recently-used cache, so a repeated source pixel skips the
+transform entirely. It is safe to thread: each `CIccApplyMruCmm` from
+`GetNewApplyCmm()` holds both its own cache and its own apply object for the
+cached CMM, so nothing is shared between workers. Nest it inside the threaded
+wrapper -- `CIccThreadedCmm::Attach(CIccMruCmm::Attach(cmm))` -- and each worker
+gets a private cache.
+
+The cache is a linear scan of at most `nCacheSize` entries (`icUInt8Number`, so
+1..255), and a miss scans the whole list before inserting. That bounds the
+worst case at a fraction of one transform for a chain of any real cost, but it
+does not scale: a much larger cache would need a hash rather than a longer
+walk. Hit rate depends entirely on image content -- exact bit equality of the
+source pixel -- so integer sources with flat regions do far better than
+high-entropy float data.
 
 ## Buffer Requirements
 
@@ -88,7 +113,7 @@ thread launches.
 - Strip partitioning is contiguous, so callers do not need to align on any
   boundary; `dst` and `src` must not alias the same memory region.
 
-## CLI Example: `iccApplyProfiles -threads`
+## CLI Example: `iccApplyProfiles --threads`
 
 [`iccApplyProfiles`](../Tools/CmdLine/IccApplyProfiles/iccApplyProfiles.cpp)
 exposes the wrapper through a `-threads` flag. The value is forwarded
@@ -97,7 +122,7 @@ parameter; the connect factory installs the `CIccThreadedCmm` wrapper
 when `nThreads != 1` and returns the underlying CMM otherwise.
 
 ```text
-iccApplyProfiles -threads N -cfg config.json
+iccApplyProfiles --threads N --cfg config.json
 ```
 
 | Value | Behaviour |
@@ -108,6 +133,10 @@ iccApplyProfiles -threads N -cfg config.json
 | `-threads N` (N > 1) | Allow up to `N` workers, subject to the per-call workload cap. |
 
 The flag is parsed before `-cfg`, so it must come first.
+
+`iccApplySearch` accepts the same leading option for inverse-search batches;
+explicit values are limited to `CIccThreadedCmm::GetMaxThreads()`, and
+`-debugcalc` requires `-threads 1`.
 
 ## TIFF Performance Benchmark
 
@@ -142,9 +171,9 @@ undefined.
 ## Use From IccConnect
 
 When a CMM is built through [`CIccConnectCmm`](icc-connect.md), pass
-`nThreads` into `CreateStandard` directly — the factory installs the
-wrapper internally and `CIccConnectCmm` keeps single ownership of the
-whole stack:
+`nThreads` into `CreateStandard` or the three-argument `CreateSearch`; the
+factory installs the wrapper internally and `CIccConnectCmm` keeps single
+ownership of the whole stack:
 
 ```cpp
 std::string sError;
@@ -164,14 +193,13 @@ delete conn;                                 // tears down wrapper + underlying 
 
 `conn->IsThreaded()` reports whether the wrapper was installed;
 `conn->GetThreadedCmm()` returns the wrapper directly when needed. The
-type-specific accessors `GetNamedCmm()` and `GetSearchCmm()` return null
-once the threaded wrapper is in place — striped apply only fits the
-standard pixel-pipeline use case.
+`GetNamedCmm()` accessor returns null through a threaded wrapper;
+`GetSearchCmm()` unwraps a threaded search CMM.
 
 ## See Also
 
-- [IccConnect library](icc-connect.md) — factory that constructs a
+- [IccConnect library](icc-connect.md) - factory that constructs a
   `Begin()`-ed CMM from JSON config, with an `nThreads` parameter on
-  `CreateStandard` for parallel apply.
-- [CLI tool reference](tools-cli-reference.md) — shared option tables for
+  `CreateStandard` and `CreateSearch` for parallel apply.
+- [CLI tool reference](tools-cli-reference.md) - shared option tables for
   the `iccApply*` tools.

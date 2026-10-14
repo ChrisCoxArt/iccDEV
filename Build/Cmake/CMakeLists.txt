@@ -134,6 +134,84 @@ if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     endif()
 endif()
 
+function(iccdev_normalize_apple_architectures OUTPUT_VAR ARM64_32_ALLOWED CONTEXT)
+  # CMAKE_OSX_ARCHITECTURES is already a CMake list (semicolon-separated,
+  # e.g. "arm64;x86_64" for universal builds). Do NOT run separate_arguments()
+  # on it: that performs UNIX-command-line whitespace splitting and corrupts
+  # multi-arch lists that contain no whitespace, collapsing them into a
+  # single malformed token.
+  set(_iccdev_archs "${CMAKE_OSX_ARCHITECTURES}")
+  set(_iccdev_normalized_archs "")
+  foreach(a IN LISTS _iccdev_archs)
+    string(TOLOWER "${a}" a_lc)
+    if(a_lc MATCHES "^arm64e?$")
+      list(APPEND _iccdev_normalized_archs "arm64")
+    elseif(a_lc MATCHES "^(x86_64|amd64)$")
+      list(APPEND _iccdev_normalized_archs "x86_64")
+    elseif(a_lc STREQUAL "arm64_32" AND ARM64_32_ALLOWED)
+      list(APPEND _iccdev_normalized_archs "arm64_32")
+    else()
+      message(FATAL_ERROR "Unsupported requested ${CONTEXT} architecture: '${a}'")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES _iccdev_normalized_archs)
+  list(JOIN _iccdev_normalized_archs ";" _iccdev_archs_final)
+  set(${OUTPUT_VAR} "${_iccdev_archs_final}" PARENT_SCOPE)
+endfunction()
+
+function(iccdev_apple_sysroot_allows_arm64_32 OUTPUT_VAR)
+  set(_iccdev_apple_sdk "${CMAKE_OSX_SYSROOT}")
+  if(NOT _iccdev_apple_sdk)
+    set(_iccdev_apple_sdk "macosx")
+  endif()
+  get_filename_component(_iccdev_apple_sdk "${_iccdev_apple_sdk}" NAME)
+  string(TOLOWER "${_iccdev_apple_sdk}" _iccdev_apple_sdk)
+  if(_iccdev_apple_sdk MATCHES "^watchos")
+    set(${OUTPUT_VAR} TRUE PARENT_SCOPE)
+  else()
+    set(${OUTPUT_VAR} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(iccdev_resolve_apple_sdk_path OUTPUT_VAR)
+  set(_iccdev_apple_sdk "${CMAKE_OSX_SYSROOT}")
+  if(NOT _iccdev_apple_sdk)
+    set(${OUTPUT_VAR} "" PARENT_SCOPE)
+    return()
+  endif()
+  if(IS_ABSOLUTE "${_iccdev_apple_sdk}")
+    set(${OUTPUT_VAR} "${_iccdev_apple_sdk}" PARENT_SCOPE)
+    return()
+  endif()
+
+  find_program(_iccdev_xcrun xcrun)
+  if(_iccdev_xcrun)
+    execute_process(
+      COMMAND "${_iccdev_xcrun}" --sdk "${_iccdev_apple_sdk}" --show-sdk-path
+      OUTPUT_VARIABLE _iccdev_apple_sdk_path
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_iccdev_apple_sdk_path AND IS_DIRECTORY "${_iccdev_apple_sdk_path}")
+      set(${OUTPUT_VAR} "${_iccdev_apple_sdk_path}" PARENT_SCOPE)
+      return()
+    endif()
+  endif()
+
+  set(${OUTPUT_VAR} "" PARENT_SCOPE)
+endfunction()
+
+# Normalize Apple architecture aliases before project() so CMake's compiler
+# probe does not receive invalid -arch spellings such as ARM64 or amd64.
+if(DEFINED CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "")
+  iccdev_apple_sysroot_allows_arm64_32(_iccdev_pre_project_arm64_32_allowed)
+  iccdev_normalize_apple_architectures(_iccdev_pre_project_archs_final
+    "${_iccdev_pre_project_arm64_32_allowed}" Apple)
+  if(NOT _iccdev_pre_project_archs_final STREQUAL "${CMAKE_OSX_ARCHITECTURES}")
+    set(CMAKE_OSX_ARCHITECTURES "${_iccdev_pre_project_archs_final}"
+      CACHE STRING "Apple target architectures" FORCE)
+  endif()
+endif()
+
 # ----------------------------------------------------------------------
 # Project Identity and Versioning
 # ----------------------------------------------------------------------
@@ -141,6 +219,49 @@ endif()
 project(RefIccMAX LANGUAGES C CXX)
 set(PROJECT_UP_NAME "REFICCMAX")
 set(PROJECT_DOWN_NAME "reficcmax")
+
+# Apple targets share CMAKE_SYSTEM_NAME=Darwin.  The selected SDK identifies
+# whether that target is desktop macOS or one of the mobile Apple platforms.
+set(ICCDEV_APPLE_PLATFORM "")
+set(ICCDEV_IS_MACOS FALSE)
+set(ICCDEV_APPLE_SDK_PATH "")
+if(APPLE)
+  set(_iccdev_apple_sdk "${CMAKE_OSX_SYSROOT}")
+  if(NOT _iccdev_apple_sdk)
+    set(_iccdev_apple_sdk "macosx")
+  endif()
+  get_filename_component(_iccdev_apple_sdk "${_iccdev_apple_sdk}" NAME)
+  string(TOLOWER "${_iccdev_apple_sdk}" _iccdev_apple_sdk)
+
+  if(_iccdev_apple_sdk MATCHES "^macosx")
+    set(ICCDEV_APPLE_PLATFORM "macos")
+    set(ICCDEV_IS_MACOS TRUE)
+  elseif(_iccdev_apple_sdk MATCHES "^iphoneos")
+    set(ICCDEV_APPLE_PLATFORM "ios")
+  elseif(_iccdev_apple_sdk MATCHES "^iphonesimulator")
+    set(ICCDEV_APPLE_PLATFORM "ios-simulator")
+  elseif(_iccdev_apple_sdk MATCHES "^appletvos")
+    set(ICCDEV_APPLE_PLATFORM "tvos")
+  elseif(_iccdev_apple_sdk MATCHES "^appletvsimulator")
+    set(ICCDEV_APPLE_PLATFORM "tvos-simulator")
+  elseif(_iccdev_apple_sdk MATCHES "^watchos")
+    set(ICCDEV_APPLE_PLATFORM "watchos")
+  elseif(_iccdev_apple_sdk MATCHES "^watchsimulator")
+    set(ICCDEV_APPLE_PLATFORM "watchos-simulator")
+  elseif(_iccdev_apple_sdk MATCHES "^xros")
+    set(ICCDEV_APPLE_PLATFORM "visionos")
+  elseif(_iccdev_apple_sdk MATCHES "^xrsimulator")
+    set(ICCDEV_APPLE_PLATFORM "visionos-simulator")
+  else()
+    message(FATAL_ERROR
+      "Unsupported Apple SDK '${CMAKE_OSX_SYSROOT}'. Set CMAKE_OSX_SYSROOT "
+      "to a supported Apple SDK.")
+  endif()
+
+  if(NOT ICCDEV_IS_MACOS)
+    iccdev_resolve_apple_sdk_path(ICCDEV_APPLE_SDK_PATH)
+  endif()
+endif()
 
 # Version components (4-part version: 2.3.2.3)
 set(${PROJECT_UP_NAME}_MAJOR_VERSION 2)
@@ -290,7 +411,7 @@ message(STATUS "Processor Architecture : ${CMAKE_SYSTEM_PROCESSOR}")
 execute_process(COMMAND hostname OUTPUT_VARIABLE BUILD_HOST OUTPUT_STRIP_TRAILING_WHITESPACE)
 execute_process(COMMAND whoami OUTPUT_VARIABLE BUILD_USER OUTPUT_STRIP_TRAILING_WHITESPACE)
 message(STATUS "Build Host             : ${BUILD_HOST} (${BUILD_USER})")
-message(STATUS "MSBuild Path            : $ENV{MSBUILD_PATH}")
+message(STATUS "Build Program           : ${CMAKE_MAKE_PROGRAM}")
 message(STATUS "=========================================")
 message(STATUS "")
 
@@ -383,34 +504,31 @@ if(WIN32)
   # ----------------------------------------------------------------------
   # MSBuild Detection for Windows
   # ----------------------------------------------------------------------
-  if(NOT DEFINED ENV{MSBUILD_PATH})
-    # Attempt to auto-detect common VS2022+ MSBuild paths.
-    set(_msbuild_candidates)
-    foreach(_vs_edition Enterprise Professional Community BuildTools)
-      list(APPEND _msbuild_candidates
-        "C:/Program Files/Microsoft Visual Studio/2022/${_vs_edition}/MSBuild/Current/Bin/MSBuild.exe"
-        "C:/Program Files (x86)/Microsoft Visual Studio/2022/${_vs_edition}/MSBuild/Current/Bin/MSBuild.exe"
-      )
-    endforeach()
-
-    foreach(_msbuild_candidate IN LISTS _msbuild_candidates)
-      if(EXISTS "${_msbuild_candidate}")
-        set(ENV{MSBUILD_PATH} "${_msbuild_candidate}")
-        if(VERBOSE_CONFIG)
-          message(STATUS "MSBuild path auto-detected and set to: ${_msbuild_candidate}")
-        endif()
-        break()
-      endif()
-    endforeach()
-
-    if(NOT DEFINED ENV{MSBUILD_PATH})
-      message(WARNING "MSBuild Path is not defined in environment variables and default path not found.")
+  # CMake owns the selected build program. setup-msbuild also places MSBuild
+  # on PATH, so a separate MSBUILD_PATH environment contract is unnecessary.
+  # MinGW and Ninja generators do not require MSBuild and must not warn about it.
+  if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    unset(_iccdev_msbuild_path)
+    unset(_iccdev_msbuild_path CACHE)
+    get_filename_component(_iccdev_build_program_name
+      "${CMAKE_MAKE_PROGRAM}" NAME)
+    if(_iccdev_build_program_name MATCHES "^[Mm][Ss][Bb]uild(\\.exe)?$")
+      set(_iccdev_msbuild_path "${CMAKE_MAKE_PROGRAM}")
+    else()
+      find_program(_iccdev_msbuild_path NAMES MSBuild.exe MSBuild msbuild)
     endif()
+
+    if(_iccdev_msbuild_path)
+      message(STATUS "MSBuild Path            : ${_iccdev_msbuild_path}")
+    else()
+      message(WARNING
+        "Visual Studio generator selected, but MSBuild was not found by CMake or on PATH.")
+    endif()
+  elseif(VERBOSE_CONFIG)
+    message(STATUS "MSBuild Path            : not required for ${CMAKE_GENERATOR}")
   endif()
 
-  # Always print final value
   if(VERBOSE_CONFIG)
-    message(STATUS "MSBuild Path            : $ENV{MSBUILD_PATH}")
     message(STATUS "Linker Flags            : ${CMAKE_EXE_LINKER_FLAGS}")
   endif()
 endif()
@@ -513,6 +631,12 @@ if(WIN32 AND ICCDEV_WINDOWS_UNIFIED_RUNTIME)
       CACHE PATH "Windows build-tree directory for iccDEV executable and DLL runtime artifacts")
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}")
   set(CMAKE_PDB_OUTPUT_DIRECTORY "${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}")
+  if(DEFINED VCPKG_TARGET_TRIPLET)
+    # iccdev-stage-windows-runtime owns dependency staging for the shared bin
+    # directory. Per-target applocal hooks race while copying the same DLLs.
+    set(VCPKG_APPLOCAL_DEPS OFF CACHE BOOL
+        "Let iccDEV stage vcpkg runtime dependencies into its unified bin directory" FORCE)
+  endif()
   message(STATUS "Windows runtime output directory: ${ICCDEV_WINDOWS_RUNTIME_OUTPUT_DIR}")
 endif()
 
@@ -542,6 +666,17 @@ if(ICC_JSON_ORDERED AND _ICC_JSON_ORDERED_DEFAULT)
   message(STATUS "ICC_JSON_ORDERED auto-enabled: libstdc++<11 cannot build unordered basic_json")
 endif()
 option(ICC_TRACE_NAN_ENABLED      "Enable tracing NaN inputs in debug builds"           OFF)
+option(ICCDEV_ENABLE_TAINT_TRACE  "Enable runtime-gated tainted read/write diagnostics" OFF)
+set(_ICCDEV_TAINT_TRACE_ACTIVE "${ICCDEV_ENABLE_TAINT_TRACE}")
+set(_ICCDEV_RELEASE_BUILD_TYPES RELEASE RELWITHDEBINFO MINSIZEREL)
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _ICCDEV_BUILD_TYPE_UPPER)
+get_property(_ICCDEV_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(ICCDEV_ENABLE_TAINT_TRACE AND NOT _ICCDEV_IS_MULTI_CONFIG AND
+   _ICCDEV_BUILD_TYPE_UPPER IN_LIST _ICCDEV_RELEASE_BUILD_TYPES)
+  message(STATUS
+    "ICCDEV_ENABLE_TAINT_TRACE inactive: diagnostics are compiled out of ${CMAKE_BUILD_TYPE} builds")
+  set(_ICCDEV_TAINT_TRACE_ACTIVE OFF)
+endif()
 option(ICC_CLUT_DEBUG             "Enable CLUT debugging support"                       OFF)
 option(ICC_AVX2_CLUT_DEBUG        "Enable AVX2 CLUT dispatch and timing diagnostics"    OFF)
 option(ICC_ENABLE_ASSERTS         "Enable ICC_ASSERT traps and debug assertions"        OFF)
@@ -562,8 +697,31 @@ option(ICCDEV_ENABLE_AVX512
   "Build runtime-dispatched AVX-512 CLUT interpolation on supported x86-64 toolchains"
   OFF)
 option(ICCDEV_ENABLE_PERF_MONITORING
-  "Build opt-in aggregate CLUT and threaded-CMM performance telemetry"
+  "Deprecated alias for ICCDEV_ENABLE_TELEMETRY"
   OFF)
+if(ICCDEV_ENABLE_PERF_MONITORING AND NOT ICCDEV_ENABLE_TELEMETRY)
+  set(ICCDEV_ENABLE_TELEMETRY ON CACHE BOOL
+    "Build tool receipts and aggregate CLUT/threaded-CMM telemetry" FORCE)
+endif()
+option(ICCDEV_ENABLE_TELEMETRY
+  "Build tool receipts and aggregate CLUT/threaded-CMM telemetry"
+  OFF)
+if(ICCDEV_ENABLE_PERF_MONITORING)
+  message(DEPRECATION
+    "ICCDEV_ENABLE_PERF_MONITORING is deprecated and takes precedence when ON; "
+    "set it to OFF before disabling ICCDEV_ENABLE_TELEMETRY")
+endif()
+option(ICCDEV_ENABLE_APPLY_BATCH_TIMING
+  "Build opt-in iccApplyProfiles per-batch debug timing"
+  OFF)
+if(ICCDEV_ENABLE_APPLY_BATCH_TIMING AND NOT ICCDEV_ENABLE_TELEMETRY)
+  message(FATAL_ERROR
+    "ICCDEV_ENABLE_APPLY_BATCH_TIMING requires ICCDEV_ENABLE_TELEMETRY=ON")
+endif()
+set(ICCDEV_LIBCPP_HARDENING_MODE "none" CACHE STRING
+  "Apple libc++ hardening mode: none, fast, extensive, or debug")
+set_property(CACHE ICCDEV_LIBCPP_HARDENING_MODE PROPERTY STRINGS
+  none fast extensive debug)
 option(ENABLE_SANITIZERS          "Enable runtime sanitizers (ASan, UBSan, etc.)"       OFF)
 option(ENABLE_ASAN                "Enable AddressSanitizer only"                        OFF)
 option(ENABLE_FUZZING             "Enable libFuzzer harnesses (Clang only)"             OFF)
@@ -576,19 +734,99 @@ IF(ICC_JSON_ORDERED)
   add_definitions(-DICC_JSON_ORDERED=1)
 ENDIF()
 option(ENABLE_TSAN                "Enable ThreadSanitizer (conflicts with ASan)"        OFF)
-option(ENABLE_MSAN                "Enable MemorySanitizer (Clang only)"                 OFF)
+option(ENABLE_MSAN                "Enable MemorySanitizer for iccDEV targets (instrumented external runtime required)" OFF)
 option(ENABLE_LSAN                "Enable LeakSanitizer standalone"                     OFF)
 option(ENABLE_COVERAGE            "Enable code coverage instrumentation"                OFF)
 option(ENABLE_PROFILING           "Enable gprof/perf profiling instrumentation"         OFF)
 option(ENABLE_SPECTRE_MITIGATION  "Enable /Qspectre on MSVC for Spectre V1 mitigation"  OFF)
 option(SANITIZER_RECOVER          "Allow sanitizer violations to continue (runtime control)" OFF)
-set(UBSAN_IGNORELIST "" CACHE STRING "Path to UBSAN ignorelist file for compile-time suppression")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  get_filename_component(_default_ubsan_ignorelist
+                         "${CMAKE_CURRENT_LIST_DIR}/../../.github/ci/ubsan-ignorelist.txt"
+                         ABSOLUTE)
+  set(UBSAN_IGNORELIST "${_default_ubsan_ignorelist}" CACHE STRING
+      "Path to UBSAN ignorelist file for compile-time suppression (empty disables)")
+else()
+  set(UBSAN_IGNORELIST "" CACHE STRING
+      "Path to UBSAN ignorelist file for compile-time suppression (empty disables)")
+endif()
 option(ENABLE_USEICCDEVNAMESPACE  "Use iccDEV namespace wrapping"                       OFF)
 option(ENABLE_LTO                 "Enable Link-Time Optimization for Release builds"     ON)
 # Pass -DENABLE_LTO=OFF to disable without needing to know the internal
 # CMAKE_INTERPROCEDURAL_OPTIMIZATION variable.  Useful on Raspberry Pi,
 # constrained build environments, or when linking against third-party
 # archives that do not carry LTO bitcode.
+
+# libc++ hardening changes inline standard-library operations, so apply one
+# mode consistently to every C++ translation unit in the build. The default
+# leaves the SDK's configured mode untouched; the macOS sanitizer preset opts
+# into EXTENSIVE for QA. Probe the selected spelling so unsupported or
+# non-libc++ toolchains fail at configure time instead of silently dropping the
+# requested checks. _LIBCPP_ENABLE_ASSERTIONS is intentionally not used: it was
+# removed by the libc++ shipped with Xcode 26.
+# A libc++ that predates hardening modes defines none of the
+# _LIBCPP_HARDENING_MODE_* macros. The preprocessor reads both sides of the mode comparison as 0 there,
+# so they match and the probe passes with hardening off. Require the selected
+# macro to exist before comparing against it.
+string(TOLOWER "${ICCDEV_LIBCPP_HARDENING_MODE}"
+  _iccdev_libcpp_hardening_mode)
+set(_iccdev_libcpp_hardening_modes none fast extensive debug)
+list(FIND _iccdev_libcpp_hardening_modes
+  "${_iccdev_libcpp_hardening_mode}" _iccdev_libcpp_hardening_index)
+if(_iccdev_libcpp_hardening_index EQUAL -1)
+  message(FATAL_ERROR
+    "ICCDEV_LIBCPP_HARDENING_MODE must be none, fast, extensive, or debug "
+    "(got '${ICCDEV_LIBCPP_HARDENING_MODE}')")
+endif()
+set(ICCDEV_LIBCPP_HARDENING_MODE "${_iccdev_libcpp_hardening_mode}"
+  CACHE STRING "Apple libc++ hardening mode: none, fast, extensive, or debug" FORCE)
+set_property(CACHE ICCDEV_LIBCPP_HARDENING_MODE PROPERTY STRINGS
+  none fast extensive debug)
+
+if(NOT _iccdev_libcpp_hardening_mode STREQUAL "none")
+  if(NOT APPLE OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+      "ICCDEV_LIBCPP_HARDENING_MODE=${_iccdev_libcpp_hardening_mode} requires "
+      "an Apple Clang/libc++ target")
+  endif()
+
+  string(TOUPPER "${_iccdev_libcpp_hardening_mode}"
+    _iccdev_libcpp_hardening_mode_upper)
+  set(_iccdev_libcpp_hardening_macro
+    "_LIBCPP_HARDENING_MODE_${_iccdev_libcpp_hardening_mode_upper}")
+  set(_iccdev_saved_required_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
+  list(APPEND CMAKE_REQUIRED_DEFINITIONS
+    "-D_LIBCPP_HARDENING_MODE=${_iccdev_libcpp_hardening_macro}")
+  # check_cxx_source_compiles() caches its result under this name and does not
+  # re-run when the probe source changes. The name changed when the probe gained
+  # its hardening-macro check, so a tree that cached the old false pass probes
+  # again.
+  set(_iccdev_libcpp_probe_var
+    "_ICCDEV_LIBCPP_HARDENING_${_iccdev_libcpp_hardening_mode_upper}_MODE_DEFINED")
+  check_cxx_source_compiles("#include <vector>
+#ifndef _LIBCPP_VERSION
+#error The selected C++ standard library is not libc++
+#endif
+#ifndef ${_iccdev_libcpp_hardening_macro}
+#error The selected libc++ does not define hardening modes
+#endif
+#if _LIBCPP_HARDENING_MODE != ${_iccdev_libcpp_hardening_macro}
+#error The requested libc++ hardening mode was not selected
+#endif
+int main() { return 0; }
+" ${_iccdev_libcpp_probe_var})
+  set(CMAKE_REQUIRED_DEFINITIONS "${_iccdev_saved_required_definitions}")
+  if(NOT ${_iccdev_libcpp_probe_var})
+    message(FATAL_ERROR
+      "The selected Apple libc++ does not support "
+      "ICCDEV_LIBCPP_HARDENING_MODE=${_iccdev_libcpp_hardening_mode}")
+  endif()
+
+  add_compile_definitions(
+    $<$<COMPILE_LANGUAGE:CXX>:_LIBCPP_HARDENING_MODE=${_iccdev_libcpp_hardening_macro}>)
+  message(STATUS
+    "Apple libc++ hardening mode: ${_iccdev_libcpp_hardening_mode}")
+endif()
 
 # ----------------------------------------------------------------------
 # Third-Party Dependencies
@@ -601,6 +839,35 @@ endif()
 
 # --- LibXml2 ---
 if(ENABLE_ICCXML)
+  if(APPLE AND NOT ICCDEV_IS_MACOS)
+    if(NOT ICCDEV_APPLE_SDK_PATH)
+      message(FATAL_ERROR
+        "Unable to resolve selected Apple SDK path for LibXml2 discovery.")
+    endif()
+
+    set(_iccdev_libxml2_include_dir "${ICCDEV_APPLE_SDK_PATH}/usr/include/libxml2")
+    if(NOT IS_DIRECTORY "${_iccdev_libxml2_include_dir}")
+      message(FATAL_ERROR
+        "Selected Apple SDK does not provide LibXml2 headers: "
+        "${_iccdev_libxml2_include_dir}")
+    endif()
+    set(LIBXML2_INCLUDE_DIR "${_iccdev_libxml2_include_dir}"
+      CACHE PATH "LibXml2 include directory for selected Apple SDK" FORCE)
+
+    if(EXISTS "${ICCDEV_APPLE_SDK_PATH}/usr/lib/libxml2.tbd")
+      set(_iccdev_libxml2_library "${ICCDEV_APPLE_SDK_PATH}/usr/lib/libxml2.tbd")
+    elseif(EXISTS "${ICCDEV_APPLE_SDK_PATH}/usr/lib/libxml2.dylib")
+      set(_iccdev_libxml2_library "${ICCDEV_APPLE_SDK_PATH}/usr/lib/libxml2.dylib")
+    else()
+      message(FATAL_ERROR
+        "Selected Apple SDK does not provide a LibXml2 library under "
+        "${ICCDEV_APPLE_SDK_PATH}/usr/lib.")
+    endif()
+    set(LIBXML2_LIBRARY "${_iccdev_libxml2_library}"
+      CACHE FILEPATH "LibXml2 library for selected Apple SDK" FORCE)
+    set(LIBXML2_LIBRARIES "${_iccdev_libxml2_library}"
+      CACHE STRING "LibXml2 libraries for selected Apple SDK" FORCE)
+  endif()
   find_package(LibXml2 REQUIRED)
   if(VERBOSE_CONFIG)
     message(STATUS "LibXml2                : ${LIBXML2_LIBRARIES} (version: ${LIBXML2_VERSION})")
@@ -737,6 +1004,17 @@ if(ICC_TRACE_NAN_ENABLED)
   add_compile_definitions(ICC_TRACE_NAN_ENABLED=1)
 endif()
 
+if(_ICCDEV_TAINT_TRACE_ACTIVE)
+  if(_ICCDEV_IS_MULTI_CONFIG)
+    add_compile_definitions(
+      "$<$<NOT:$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>>:ICC_TAINT_TRACE_ENABLED=1>")
+    message(STATUS
+      "ICCDEV_ENABLE_TAINT_TRACE enabled for non-Release configurations only")
+  else()
+    add_compile_definitions(ICC_TAINT_TRACE_ENABLED=1)
+  endif()
+endif()
+
 if(ICC_CLUT_DEBUG)
   add_compile_definitions(ICC_CLUT_DEBUG=1)
 endif()
@@ -779,6 +1057,7 @@ message(STATUS "ENABLE_CMM_TOOLS           = ${ENABLE_CMM_TOOLS}")
 message(STATUS "ENABLE_IIS_TOOLS           = ${ENABLE_IIS_TOOLS}")
 message(STATUS "ICCDEV_WINDOWS_UNIFIED_RUNTIME = ${ICCDEV_WINDOWS_UNIFIED_RUNTIME}")
 message(STATUS "ICC_TRACE_NAN_ENABLED      = ${ICC_TRACE_NAN_ENABLED}")
+message(STATUS "ICCDEV_ENABLE_TAINT_TRACE  = ${ICCDEV_ENABLE_TAINT_TRACE}")
 message(STATUS "ICC_CLUT_DEBUG             = ${ICC_CLUT_DEBUG}")
 message(STATUS "ICC_AVX2_CLUT_DEBUG        = ${ICC_AVX2_CLUT_DEBUG}")
 message(STATUS "ICC_ENABLE_ASSERTS         = ${ICC_ENABLE_ASSERTS}")
@@ -790,6 +1069,8 @@ message(STATUS "ICCDEV_ENABLE_STRICT_WARNINGS = ${ICCDEV_ENABLE_STRICT_WARNINGS}
 message(STATUS "ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS = ${ICCDEV_SUPPRESS_LEGACY_CRT_WARNINGS}")
 message(STATUS "ICCDEV_ENABLE_AVX2         = ${ICCDEV_ENABLE_AVX2}")
 message(STATUS "ICCDEV_ENABLE_AVX512       = ${ICCDEV_ENABLE_AVX512}")
+message(STATUS "ICCDEV_ENABLE_TELEMETRY     = ${ICCDEV_ENABLE_TELEMETRY}")
+message(STATUS "ICCDEV_LIBCPP_HARDENING_MODE = ${ICCDEV_LIBCPP_HARDENING_MODE}")
 message(STATUS "ENABLE_SANITIZERS          = ${ENABLE_SANITIZERS}")
 message(STATUS "ENABLE_ASAN                = ${ENABLE_ASAN}")
 message(STATUS "ENABLE_UBSAN               = ${ENABLE_UBSAN}")
@@ -805,7 +1086,7 @@ message(STATUS "ENABLE_PROFILING           = ${ENABLE_PROFILING}")
 message(STATUS "ENABLE_SPECTRE_MITIGATION  = ${ENABLE_SPECTRE_MITIGATION}")
 message(STATUS "SANITIZER_RECOVER          = ${SANITIZER_RECOVER}")
 message(STATUS "ENABLE_LTO                 = ${ENABLE_LTO}")
-if(UBSAN_IGNORELIST)
+if(UBSAN_IGNORELIST AND ICCDEV_COMPILER_IS_CLANG)
   message(STATUS "UBSAN_IGNORELIST           = ${UBSAN_IGNORELIST}")
 endif()
 message(STATUS "")
@@ -824,7 +1105,7 @@ if(ENABLE_MSAN AND (ENABLE_ASAN OR ENABLE_SANITIZERS OR ENABLE_TSAN OR ENABLE_LS
 endif()
 
 if(ENABLE_MACOS_GUARD_MALLOC)
-  if(NOT APPLE)
+  if(NOT ICCDEV_IS_MACOS)
     message(FATAL_ERROR "ENABLE_MACOS_GUARD_MALLOC is only supported on macOS")
   endif()
   if(ENABLE_ASAN OR ENABLE_SANITIZERS OR ENABLE_FUZZING OR ENABLE_TSAN OR ENABLE_MSAN OR ENABLE_LSAN)
@@ -957,6 +1238,17 @@ else()
       message(FATAL_ERROR "MemorySanitizer not available on MSVC")
     else()
       list(APPEND SANITIZER_LIST "memory")
+      if(DEFINED ENV{ICCDEV_MSAN_LIBCXX_DIR} AND
+         NOT "$ENV{ICCDEV_MSAN_LIBCXX_DIR}" STREQUAL "")
+        message(STATUS
+          "MemorySanitizer runtime: $ENV{ICCDEV_MSAN_LIBCXX_DIR}")
+      else()
+        message(WARNING
+          "ENABLE_MSAN instruments iccDEV targets only. Distribution C++ and "
+          "libxml2 libraries can produce false reports. Set "
+          "ICCDEV_MSAN_LIBCXX_DIR to an instrumented runtime and use the "
+          "MSan runtime bootstrap and QA scripts for actionable evidence.")
+      endif()
     endif()
   endif()
   if(ENABLE_LSAN)
@@ -998,18 +1290,21 @@ if(SANITIZER_LIST)
     message(STATUS ">>> Sanitizer recovery enabled (runtime UBSAN_OPTIONS controls halt behavior)")
   endif()
   # Apply UBSAN ignorelist for compile-time suppression of known-benign findings
-  if(UBSAN_IGNORELIST)
-    if(EXISTS "${UBSAN_IGNORELIST}")
-      list(APPEND SANITIZER_FLAGS "-fsanitize-ignorelist=${UBSAN_IGNORELIST}")
-      message(STATUS ">>> UBSAN ignorelist: ${UBSAN_IGNORELIST}")
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/../../${UBSAN_IGNORELIST}")
-      set(_abs_ignorelist "${CMAKE_SOURCE_DIR}/../../${UBSAN_IGNORELIST}")
+  if(UBSAN_IGNORELIST AND ICCDEV_COMPILER_IS_CLANG)
+    if(IS_ABSOLUTE "${UBSAN_IGNORELIST}")
+      set(_abs_ignorelist "${UBSAN_IGNORELIST}")
+    else()
+      set(_abs_ignorelist "${CMAKE_CURRENT_LIST_DIR}/../../${UBSAN_IGNORELIST}")
       get_filename_component(_abs_ignorelist "${_abs_ignorelist}" ABSOLUTE)
+    endif()
+    if(EXISTS "${_abs_ignorelist}")
       list(APPEND SANITIZER_FLAGS "-fsanitize-ignorelist=${_abs_ignorelist}")
       message(STATUS ">>> UBSAN ignorelist: ${_abs_ignorelist}")
     else()
-      message(WARNING "UBSAN_IGNORELIST set to '${UBSAN_IGNORELIST}' but file not found")
+      message(WARNING "UBSAN_IGNORELIST resolved to '${_abs_ignorelist}' but file not found")
     endif()
+  elseif(UBSAN_IGNORELIST)
+    message(WARNING "UBSAN_IGNORELIST is supported only by Clang; ignoring it for ${CMAKE_CXX_COMPILER_ID}")
   endif()
 endif()
 
@@ -1110,10 +1405,14 @@ endif()
 # Apply profiling instrumentation flags
 if(ENABLE_PROFILING)
   message(STATUS ">>> Profiling instrumentation enabled (-pg)")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg -fno-omit-frame-pointer")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pg -fno-omit-frame-pointer")
+  add_compile_options(-pg -fno-omit-frame-pointer)
+  # Executables need the profiling startup/runtime objects selected by -pg.
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pg")
+  # GCC accepts -pg for shared links. Clang does not need it there and emits an
+  # unused-command-line-argument warning when it is passed to a shared link.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pg")
+  endif()
 endif()
 
 # ----------------------------------------------------------------------
@@ -1136,7 +1435,9 @@ include(CheckCXXCompilerFlag)
 # aarch64 Clang 11) are correctly rejected rather than added to the build.
 # VAR is a unique cache variable name used to memoize the probe result.
 macro(_iccdev_add_cxx_flag_if_supported FLAG VAR)
-  set(CMAKE_REQUIRED_FLAGS "-Werror=unused-command-line-argument")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_REQUIRED_FLAGS "-Werror=unused-command-line-argument")
+  endif()
   check_cxx_compiler_flag("${FLAG}" ${VAR})
   unset(CMAKE_REQUIRED_FLAGS)
   if(${VAR})
@@ -1286,62 +1587,53 @@ endif()
 # Architecture and Platform Detection
 # ----------------------------------------------------------------------
 if(APPLE)
-  message(STATUS "Detected platform: macOS")
+  message(STATUS "Detected platform: Apple ${ICCDEV_APPLE_PLATFORM}")
 
-  # Host architecture (where CMake is running)
-  set(_HOST_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
-  if(NOT _HOST_ARCH)
-    execute_process(COMMAND uname -m
-      OUTPUT_VARIABLE _HOST_ARCH
-      OUTPUT_STRIP_TRAILING_WHITESPACE)
-  endif()
-  string(TOLOWER "${_HOST_ARCH}" _HOST_ARCH_LC)
-  if(_HOST_ARCH_LC MATCHES "^arm64e?$")
-    set(_HOST_ARCH "arm64")
-  elseif(_HOST_ARCH_LC MATCHES "^(x86_64|amd64)$")
-    set(_HOST_ARCH "x86_64")
-  endif()
-  message(STATUS "Host architecture       : ${_HOST_ARCH}")
-
-  # Detect Rosetta (1 means translated)
-  execute_process(
-    COMMAND /usr/sbin/sysctl -n sysctl.proc_translated
-    OUTPUT_VARIABLE _ROSETTA
-    ERROR_QUIET
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(_ROSETTA STREQUAL "1")
-    message(STATUS "Rosetta translation     : active (terminal running under Rosetta)")
-  else()
-    message(STATUS "Rosetta translation     : not active")
-  endif()
-
-  # Target architectures: respect user/toolchain if already set
-  if(DEFINED CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "")
-    set(_REQ_ARCHS "${CMAKE_OSX_ARCHITECTURES}")
-    # Normalize list elements
-    separate_arguments(_REQ_ARCHS)
-    set(_NORM_ARCHS "")
-    foreach(a IN LISTS _REQ_ARCHS)
-      string(TOLOWER "${a}" a_lc)
-      if(a_lc MATCHES "^arm64e?$")
-        list(APPEND _NORM_ARCHS "arm64")
-      elseif(a_lc MATCHES "^(x86_64|amd64)$")
-        list(APPEND _NORM_ARCHS "x86_64")
-      else()
-        message(FATAL_ERROR "Unsupported requested macOS arch: '${a}'")
-      endif()
-    endforeach()
-    list(REMOVE_DUPLICATES _NORM_ARCHS)
-    list(JOIN _NORM_ARCHS ";" _ARCHS_FINAL)
-    if(NOT _ARCHS_FINAL STREQUAL "${CMAKE_OSX_ARCHITECTURES}")
-      set(CMAKE_OSX_ARCHITECTURES "${_ARCHS_FINAL}" CACHE STRING "macOS architectures" FORCE)
+  if(ICCDEV_IS_MACOS)
+    # Host architecture (where CMake is running)
+    set(_HOST_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    if(NOT _HOST_ARCH)
+      execute_process(COMMAND uname -m
+        OUTPUT_VARIABLE _HOST_ARCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
     endif()
-    message(STATUS "Requested target archs  : ${CMAKE_OSX_ARCHITECTURES}")
-  else()
-    # Default to host arch if nothing specified
-    set(CMAKE_OSX_ARCHITECTURES "${_HOST_ARCH}" CACHE STRING "macOS architectures" FORCE)
-    message(STATUS "Defaulting target archs : ${CMAKE_OSX_ARCHITECTURES}")
+    string(TOLOWER "${_HOST_ARCH}" _HOST_ARCH_LC)
+    if(_HOST_ARCH_LC MATCHES "^arm64e?$")
+      set(_HOST_ARCH "arm64")
+    elseif(_HOST_ARCH_LC MATCHES "^(x86_64|amd64)$")
+      set(_HOST_ARCH "x86_64")
+    endif()
+    message(STATUS "Host architecture       : ${_HOST_ARCH}")
+
+    # Detect Rosetta (1 means translated).
+    execute_process(
+      COMMAND /usr/sbin/sysctl -n sysctl.proc_translated
+      OUTPUT_VARIABLE _ROSETTA
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_ROSETTA STREQUAL "1")
+      message(STATUS "Rosetta translation     : active (terminal running under Rosetta)")
+    else()
+      message(STATUS "Rosetta translation     : not active")
+    endif()
+
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES OR CMAKE_OSX_ARCHITECTURES STREQUAL "")
+      set(CMAKE_OSX_ARCHITECTURES "${_HOST_ARCH}" CACHE STRING "macOS architectures" FORCE)
+      message(STATUS "Defaulting target archs : ${CMAKE_OSX_ARCHITECTURES}")
+    endif()
   endif()
+
+  set(_iccdev_arm64_32_allowed FALSE)
+  if(ICCDEV_APPLE_PLATFORM STREQUAL "watchos")
+    set(_iccdev_arm64_32_allowed TRUE)
+  endif()
+  iccdev_normalize_apple_architectures(_iccdev_archs_final
+    "${_iccdev_arm64_32_allowed}" "${ICCDEV_APPLE_PLATFORM}")
+  if(NOT _iccdev_archs_final STREQUAL "${CMAKE_OSX_ARCHITECTURES}")
+    set(CMAKE_OSX_ARCHITECTURES "${_iccdev_archs_final}"
+      CACHE STRING "Apple target architectures" FORCE)
+  endif()
+  message(STATUS "Requested target archs  : ${CMAKE_OSX_ARCHITECTURES}")
 
   # Add compile definitions for single-arch builds
   list(LENGTH CMAKE_OSX_ARCHITECTURES _ARCHLEN)
@@ -1353,9 +1645,9 @@ if(APPLE)
     endif()
   endif()
 
-  message(STATUS "Final macOS architectures: ${CMAKE_OSX_ARCHITECTURES}")
+  message(STATUS "Final Apple architectures: ${CMAKE_OSX_ARCHITECTURES}")
 
-  # macOS hardening flags (parity with Linux)
+  # Apple hardening flags (parity with Linux)
   # Base set: works on any C++17-capable compiler.
   add_compile_options(
     -Wall
@@ -1388,16 +1680,16 @@ if(APPLE)
       -Wundef
       -Wpointer-arith
     )
-    message(STATUS "macOS: strict warnings ENABLED (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+    message(STATUS "Apple ${ICCDEV_APPLE_PLATFORM}: strict warnings ENABLED (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
   elseif(ICCDEV_ENABLE_STRICT_WARNINGS)
-    message(STATUS "macOS: strict warnings DISABLED -- ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} below floor (GCC 15 / Clang 14). Base hardening still active.")
+    message(STATUS "Apple ${ICCDEV_APPLE_PLATFORM}: strict warnings DISABLED -- ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} below floor (GCC 15 / Clang 14). Base hardening still active.")
   else()
-    message(STATUS "macOS: strict warnings DISABLED by ICCDEV_ENABLE_STRICT_WARNINGS=OFF. Base hardening still active.")
+    message(STATUS "Apple ${ICCDEV_APPLE_PLATFORM}: strict warnings DISABLED by ICCDEV_ENABLE_STRICT_WARNINGS=OFF. Base hardening still active.")
   endif()
 
-  _iccdev_configure_fortify_source("macOS")
+  _iccdev_configure_fortify_source("Apple ${ICCDEV_APPLE_PLATFORM}")
 
-  message(STATUS "macOS build: Warning flags and security hardening applied.")
+  message(STATUS "Apple ${ICCDEV_APPLE_PLATFORM} build: Warning flags and security hardening applied.")
 
 elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
   message(STATUS "Detected platform: Linux")
@@ -1804,11 +2096,11 @@ IF(ENABLE_TOOLS)
   ADD_SUBDIRECTORY(Tools/IccApplyToLink)
   IF(TARGET_LIB_ICCCONNECT)
     ADD_SUBDIRECTORY(Tools/IccApplySearch)
-  ENDIF()
-  ADD_SUBDIRECTORY(Tools/IccProfileVisualize)
-  ADD_SUBDIRECTORY(Tools/IccProfilePlot)
+    ENDIF()
+    ADD_SUBDIRECTORY(Tools/IccProfileVisualize)
+    ADD_SUBDIRECTORY(Tools/IccProfilePlot)
 
-  # Ensure IccXML-dependent tools are built after IccXML library (safety net)
+    # Ensure IccXML-dependent tools are built after IccXML library (safety net)
   IF(ENABLE_ICCXML)
     IF(TARGET iccFromXml AND TARGET ${TARGET_LIB_ICCXML})
       ADD_DEPENDENCIES(iccFromXml ${TARGET_LIB_ICCXML})
@@ -1830,6 +2122,9 @@ IF(ENABLE_TOOLS)
 
 
   if(ENABLE_IMAGE_TOOLS)
+    message(STATUS "Adding Subdirectory IccHeifDump.")
+    ADD_SUBDIRECTORY(Tools/IccHeifDump)
+
     message(STATUS "Adding Subdirectory IccJpegDump.")
     ADD_SUBDIRECTORY(Tools/IccJpegDump)
 
@@ -1905,6 +2200,7 @@ IF(ENABLE_TOOLS)
       iccToXml
       iccFromJson
       iccToJson
+      iccHeifDump
       iccJpegDump
       iccApplyNamedCmm
       iccDescribeSinkTest
@@ -1928,7 +2224,7 @@ IF(ENABLE_TOOLS)
     iccdev_fixup_msvc_compile_pdb(${_iccdev_tool_target})
   endforeach()
 
-  if(APPLE AND ENABLE_MACOS_GUARD_MALLOC)
+  if(ICCDEV_IS_MACOS AND ENABLE_MACOS_GUARD_MALLOC)
     add_custom_target(check-macos-guard-malloc
       COMMAND "${CMAKE_COMMAND}"
         "-DICCDEV_BINARY_DIR=${CMAKE_BINARY_DIR}"

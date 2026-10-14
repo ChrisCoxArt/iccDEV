@@ -10,53 +10,34 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
+#include <cctype>
 #include "IccUtilJson.h"
 #include "IccUtil.h"
 #include "IccTagLut.h"
@@ -115,6 +96,27 @@ size_t icJsonGetHexData(void *pBuf, const char *szText, size_t nBufSize)
     szText++;
   }
   return rv;
+}
+
+bool icJsonValidHexData(const char *szText)
+{
+  if (!szText)
+    return false;
+
+  // icJsonDumpHexData() writes the digits in pairs with nothing between them.
+  // Whitespace is accepted between pairs, as the XML twin's writer produces,
+  // but a character the decoder cannot read as part of a pair is no longer
+  // skipped silently: "0g11" gave the single byte 0x11 (#2610).
+  while (*szText) {
+    if (isspace((unsigned char)*szText)) {
+      szText++;
+      continue;
+    }
+    if (hexVal(szText[0]) < 0 || !szText[1] || hexVal(szText[1]) < 0)
+      return false;
+    szText += 2;
+  }
+  return true;
 }
 
 icUInt32Number icJsonGetHexDataSize(const char *szText)
@@ -235,7 +237,13 @@ IccJson icJsonGetDeviceAttr(icUInt64Number devAttr)
   j["GlossyOrMatte"]            = (devAttr & icMatte)              ? "matte"         : "glossy";
   j["MediaPolarity"]            = (devAttr & icMediaNegative)      ? "negative"      : "positive";
   j["MediaColour"]              = (devAttr & icMediaBlackAndWhite) ? "blackAndWhite"  : "colour";
-  icUInt64Number knownBits = (icUInt64Number)(icTransparency | icMatte | icMediaNegative | icMediaBlackAndWhite);
+  // ICC.2 Table 19 bits 4-7, named only when set.
+  if (devAttr & icNonPaperBased) j["MediaBase"]     = "nonPaper";
+  if (devAttr & icTextured)      j["MediaTexture"]  = "textured";
+  if (devAttr & icNonIsotropic)  j["MediaIsotropy"] = "nonIsotropic";
+  if (devAttr & icSelfLuminous)  j["SelfLuminous"]  = true;
+  icUInt64Number knownBits = (icUInt64Number)(icTransparency | icMatte | icMediaNegative | icMediaBlackAndWhite |
+                                              icNonPaperBased | icTextured | icNonIsotropic | icSelfLuminous);
   icUInt64Number other = devAttr & ~knownBits;
   if (other) {
     char buf[32];
@@ -253,6 +261,10 @@ icUInt64Number icJsonParseDeviceAttr(const IccJson &j)
   s.clear(); jGetString(j, "GlossyOrMatte",  s); if (s == "matte")         attr |= icMatte;
   s.clear(); jGetString(j, "MediaPolarity",  s); if (s == "negative")      attr |= icMediaNegative;
   s.clear(); jGetString(j, "MediaColour",    s); if (s == "blackAndWhite") attr |= icMediaBlackAndWhite;
+  s.clear(); jGetString(j, "MediaBase",      s); if (s == "nonPaper")      attr |= icNonPaperBased;
+  s.clear(); jGetString(j, "MediaTexture",   s); if (s == "textured")      attr |= icTextured;
+  s.clear(); jGetString(j, "MediaIsotropy",  s); if (s == "nonIsotropic")  attr |= icNonIsotropic;
+  bool b = false; jGetValue(j, "SelfLuminous", b); if (b)                  attr |= icSelfLuminous;
   s.clear(); jGetString(j, "VendorSpecific", s);
   if (!s.empty()) {
     unsigned long long vendor = 0;

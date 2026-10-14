@@ -1,8 +1,13 @@
 # AFL++ Smoke Fuzzing
 
-iccDEV has a maintainer-owned AFL++ smoke workflow for short, manual checks of
-command-line tool fuzzability. It is intentionally bounded and complements the
-CTest, sanitizer, CodeQL, and regression-container gates.
+iccDEV the maintainer-owned AFL++ smoke workflow for short, manual checks of
+command-line tool fuzzability. It is being Refactored.
+
+## CI Status
+
+The automated AFL/CFL CI invocation has been removed. The retained
+`ci-afl-smoke` and `ci-cfl-smoke` workflow definitions are manual or reusable
+maintainer tools; they are not pull-request, push, or scheduled CI gates.
 
 ## Review Scope
 
@@ -49,6 +54,11 @@ AFL_PATH=/path/to/AFLplusplus AFL_CC=clang-22 AFL_CXX=clang++-22 \
 AFL_PATH=/path/to/AFLplusplus AFL_CC=clang-22 AFL_CXX=clang++-22 \
   /path/to/AFLplusplus/afl-clang-fast++ -c test.cpp -o testxx.o
 ```
+
+The smoke driver accepts only a matching Clang 21 or Clang 22 C/C++ pair. When
+the caller does not set `AFL_CC` and `AFL_CXX`, it prefers the packaged Clang
+21 pair and falls back to Clang 22. Older or mismatched compiler pairs fail
+before the iccDEV build starts.
 
 The workflow intentionally builds only the AFL++ pieces needed by the smoke
 job: `afl-fuzz`, `afl-showmap`, `afl-cc`, `afl-compiler-rt.o`,
@@ -105,7 +115,7 @@ AFL patches locally before configuring iccDEV with:
 ```
 
 The default AFL patch directory is `.github/ci/fuzz-patches/afl`. CFL uses the
-parallel `.github/ci/fuzz-patches/cfl` stack through `cfl/build.sh --patches`.
+parallel `.github/ci/fuzz-patches/cfl` stack through `.github/ci/cfl/build.sh --patches`.
 Run `.github/scripts/check-fuzz-patches.sh` before committing patch-stack
 edits; it validates both stacks with `git apply --check` from a fresh temporary
 clone.
@@ -264,11 +274,11 @@ The workflow follows the repository workflow-governance model:
 
 ## CFL Core Smoke
 
-The matching CFL smoke entry point is `cfl/build.sh` and the manual
+The matching CFL smoke entry point is `.github/ci/cfl/build.sh` and the manual
 `ci-cfl-smoke` workflow:
 
 ```bash
-cfl/build.sh --seconds 30
+.github/ci/cfl/build.sh --seconds 30
 
 gh workflow run ci-cfl-smoke.yml \
   -f cfl_targets=dump,toxml,fromxml,tojson,fromjson,roundtrip,profilevisualize,writerserialize \

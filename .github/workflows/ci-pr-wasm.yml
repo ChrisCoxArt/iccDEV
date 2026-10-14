@@ -79,12 +79,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      EMSDK_VERSION: 4.0.20
-      EMSDK_REF: e4fe26ef59168ff44f4c23c466e497bf60b3411e
-      ZLIB_REF: f9dd6009be3ed32415edf1e89d1bc38380ecb95d
-      LIBTIFF_REF: 97ae1f6f0bba8999326f084f04950ecfd6166580
-      LIBXML2_REF: 39b66eb2089f491eacf8e22a7965a235f7f5735e
-      NLOHMANN_JSON_REF: f0bf4c731a53aab29ebde0234385b9e63bf70dcd
+      EMSDK_VERSION: 4.0.21
+      EMSDK_REF: b2436aafa7351ee1b581f15841f1b45ed716a279
+      ZLIB_REF: da607da739fa6047df13e66a2af6b8bec7c2a498
+      LIBTIFF_REF: 5fe20d0e9aba49a6a350ed533459d1505203838f
+      LIBXML2_REF: b7fa62cbe8ef0df5869e000d5b690bdedd07f33e
+      NLOHMANN_JSON_REF: 55f93686c01528224f448c19128836e7df245f72
       WASM_DEPS_CACHE_VERSION: v2
     defaults:
       run:
@@ -174,8 +174,12 @@ jobs:
           emmake make install
           cd "$THIRD_PARTY"
 
-          # libpng
-          curl -sLO https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
+          # libpng (bounded download retries and checksum verification)
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+            --connect-timeout 30 --max-time 60 \
+            --output libpng-1.6.57.tar.gz \
+            https://download.sourceforge.net/libpng/libpng-1.6.57.tar.gz
           echo "01fdab044cdc575c74a9ef62a4042fbe24fea8bedfe8aa5c89f4467b781bbb60  libpng-1.6.57.tar.gz" | sha256sum -c -
           tar -xzf libpng-1.6.57.tar.gz && mv libpng-1.6.57 libpng && cd libpng
           CPPFLAGS="-I$THIRD_PARTY/zlib" LDFLAGS="-L$THIRD_PARTY/zlib/out/lib" \
@@ -184,8 +188,12 @@ jobs:
           emmake make install
           cd "$THIRD_PARTY"
 
-          # libjpeg
-          curl -sLO https://ijg.org/files/jpegsrc.v9e.tar.gz
+          # libjpeg (bounded download retries and checksum verification)
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+            --connect-timeout 30 --max-time 60 \
+            --output jpegsrc.v9e.tar.gz \
+            https://ijg.org/files/jpegsrc.v9e.tar.gz
           echo "4077d6a6a75aeb01884f708919d25934c93305e49f7e3f36db9129320e6f4f3d  jpegsrc.v9e.tar.gz" | sha256sum -c -
           tar -xzf jpegsrc.v9e.tar.gz && mv jpeg-9e libjpeg && cd libjpeg
           emconfigure ./configure --prefix="$THIRD_PARTY/libjpeg/out" --disable-shared --enable-static

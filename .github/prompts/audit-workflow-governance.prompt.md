@@ -13,7 +13,7 @@ Review only a frozen head that passes
 `docs/governance/UPSTREAM_PR_READINESS.md`. Review the complete PR and
 cumulative diff, not incremental slices. A requested change returns the branch
 to branch-only grooming; renew the readiness evidence before a complete
-re-review. If a re-review finds an issue in unchanged code, stop serial
+re-review. If a re-review finds any new blocker, including one in the repair, stop serial
 automated review and require maintainer direction.
 
 ## Audit Checklist
@@ -73,8 +73,9 @@ For EVERY `run:` step in the workflow, verify:
 - [ ] Container changes have runtime smoke and image/config scan evidence
 - [ ] Push triggers, PR verification, reusable workflow calls, and manual
       dispatches test the same changed helper behavior where practical
-- [ ] Runner-reduction changes retain a read-only Docker verification lane for
-      `container_changed` paths, and aggregate it into the PR status when run
+- [ ] Runner-reduction changes retain workflow-security gates for
+      container-surface (`image_definition_changed`) paths; Docker image
+      validation remains a local and publishing-workflow responsibility
 - [ ] Branch-specific publish or promotion logic has matching branch triggers
       and documentation
 - [ ] Documented container commands work from a fresh checkout or clean
@@ -82,6 +83,9 @@ For EVERY `run:` step in the workflow, verify:
 
 ### 9. Review-Churn Prevention
 - [ ] Review the repeat-review avoidance checklist for the changed surface (canonical: `docs/regression-workflow-governance.md`, section "Recent maintainer PRs...").
+- [ ] Contract matrix maps every changed workflow, helper, Dockerfile, manifest,
+      and dependency updater to its consumer, failure path, trigger, and local
+      evidence before the first review.
 
 ### 10. Full Run Log Audit
 - [ ] Full log archive downloaded with `gh api /repos/OWNER/REPO/actions/runs/RUN_ID/logs`
@@ -149,7 +153,7 @@ actionlint -no-color "$FILE"
 yamllint -d '{extends: default, rules: {document-start: disable, truthy: disable, line-length: {max: 120}}}' "$FILE"
 zizmor "$FILE"
 hadolint Dockerfile*
-trivy config --severity HIGH,CRITICAL .
+trivy config --ignorefile .trivyignore.yaml --severity HIGH,CRITICAL .
 gh codeql resolve queries .github/codeql-queries/iccdev-security-suite.qls
 ```
 
@@ -162,7 +166,7 @@ For Dockerfile or container-policy changes, also run:
 
 ```bash
 hadolint Dockerfile Dockerfile.*
-trivy config --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 .
+trivy config --ignorefile .trivyignore.yaml --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 .
 docker build -f Dockerfile -t iccdev-local:ubuntu .
 trivy image --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 iccdev-local:ubuntu
 ```

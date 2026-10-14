@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -79,6 +55,7 @@
 #include "IccEval.h"
 #include "IccPrmg.h"
 #include "IccProfLibVer.h"
+#include "IccFileUtil.h"
 
 class CIccMinMaxEval : public CIccEvalCompare
 {
@@ -190,10 +167,16 @@ int main(int argc, char* argv[])
   }
 
   if (argc > 4) {
-    printf("Unexpected extra argument: '%s'\n", argv[4]);
+    printf("Unexpected extra argument: '%s'\n",
+           icSanitizeConsoleText(argv[4]).c_str());
     PrintUsage();
     return 1;
   }
+
+  // #2414: the profile path is echoed by the failure paths and by the report header,
+  // so a path carrying terminal control sequences reached the console verbatim
+  // (#2406).  EvaluateProfile() still receives the real path.
+  std::string srcName = icSanitizeConsoleText(argv[1]);
 
   icRenderingIntent nIntent = icRelativeColorimetric;
   bool nUseMPE = false;
@@ -201,7 +184,8 @@ int main(int argc, char* argv[])
   if (argc>2) {
     int temp = 0;
     if (!ParseIntArg(argv[2], (int)icPerceptual, (int)icAbsoluteColorimetric, temp)) {
-      printf("Invalid rendering_intent: '%s'\n", argv[2]);
+      printf("Invalid rendering_intent: '%s'\n",
+             icSanitizeConsoleText(argv[2]).c_str());
       PrintUsage();
       return 1;
     }
@@ -210,7 +194,8 @@ int main(int argc, char* argv[])
     if (argc > 3) {
       int tempUseMPE = 0;
       if (!ParseIntArg(argv[3], 0, 1, tempUseMPE)) {
-        printf("Invalid use_mpe: '%s'\n", argv[3]);
+        printf("Invalid use_mpe: '%s'\n",
+               icSanitizeConsoleText(argv[3]).c_str());
         PrintUsage();
         return 1;
       }
@@ -226,7 +211,8 @@ int main(int argc, char* argv[])
     // Decode the status so callers can tell an outright failure (e.g. an
     // unreadable profile) from a deliberate refusal such as "Too many samples
     // used", which guards the round trip against wide device spaces (#1405).
-    printf("Unable to perform round trip on '%s': %s\n", argv[1], CIccCmm::GetStatusText(stat));
+    printf("Unable to perform round trip on '%s': %s\n", srcName.c_str(),
+           CIccCmm::GetStatusText(stat));
     if (stat == icCmmStatTooManySamples) {
       return 0;
     }
@@ -241,7 +227,7 @@ int main(int argc, char* argv[])
 
   CIccInfo info;
 
-  printf("Profile:          '%s'\n", argv[1]);
+  printf("Profile:          '%s'\n", srcName.c_str());
   printf("Rendering Intent: %s\n", info.GetRenderingIntentName(nIntent));
   if (prmgOk) {
     printf("Specified Gamut:  %s\n", prmg.m_bPrmgImplied ? "Perceptual Reference Medium Gamut" : "Not Specified");

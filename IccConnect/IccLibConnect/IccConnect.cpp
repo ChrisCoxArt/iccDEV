@@ -11,53 +11,33 @@
 
 /*
  * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium.
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes.
- *
- *
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *
- *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
  //////////////////////////////////////////////////////////////////////
  // HISTORY:
  //
@@ -105,7 +85,12 @@ CIccNamedColorCmm* CIccConnectCmm::GetNamedCmm() const
 
 CIccCmmSearch* CIccConnectCmm::GetSearchCmm() const
 {
-  return dynamic_cast<CIccCmmSearch*>(m_pCmm);
+  CIccCmmSearch* search = dynamic_cast<CIccCmmSearch*>(m_pCmm);
+  if (search)
+    return search;
+
+  CIccThreadedCmm* threaded = GetThreadedCmm();
+  return threaded ? dynamic_cast<CIccCmmSearch*>(threaded->GetBaseCmm()) : nullptr;
 }
 
 CIccThreadedCmm* CIccConnectCmm::GetThreadedCmm() const
@@ -463,8 +448,32 @@ CIccConnectCmm* CIccConnectCmm::CreateStandard(const CIccCfgProfileSequence& pro
 CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApply,
                                               std::string* pErrorMsg)
 {
+  return CreateSearch(searchApply, pErrorMsg, 1);
+}
+
+CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApply,
+                                              std::string* pErrorMsg,
+                                              int nThreads)
+{
+  return CreateSearch(searchApply, nullptr, 0, nThreads, pErrorMsg);
+}
+
+CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApply,
+                                              const unsigned char* pEmbeddedData,
+                                              unsigned int nEmbeddedLen,
+                                              int nThreads,
+                                              std::string* pErrorMsg)
+{
   std::string localErr;
   std::string& sErrorMsg = pErrorMsg ? *pErrorMsg : localErr;
+
+  if (nThreads < 0 || nThreads > CIccThreadedCmm::GetMaxThreads()) {
+    std::ostringstream oss;
+    oss << "invalid thread count " << nThreads << " (maximum "
+        << CIccThreadedCmm::GetMaxThreads() << ")";
+    sErrorMsg = oss.str();
+    return nullptr;
+  }
 
   IccProfilePtrList pccList;
   auto pCmm = std::unique_ptr<CIccCmmSearch>(new (std::nothrow) CIccCmmSearch());
@@ -475,10 +484,12 @@ CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApp
 
   // Add forward profile chain.  Explicitly scope to CIccCmm::AddXform to bypass
   // CIccCmmSearch's override which is reserved for the reverse/destination profile.
+  bool bFirst = true;
   size_t stageIdx = 0;
   for (const auto& profPtr : searchApply.m_profiles) {
     CIccCfgProfile* pCfg = profPtr.get();
     if (!pCfg) {
+      bFirst = false;
       ++stageIdx;
       continue;
     }
@@ -487,6 +498,31 @@ CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApp
     CIccCreateXformHintManager Hint;
     icStatusCMM stat = icCmmStatOk;
     std::string sStageErr;
+
+    // An empty first m_iccFile with embedded bytes in hand means "use the ICC
+    // profile carried by the source image".  The memory overload of
+    // CIccCmm::AddXform attaches a CIccMemIO and then dispatches virtually, so
+    // it still lands in CIccCmmSearch::AddXform; the bytes only have to outlive
+    // the Begin() below, which this function performs.  Unlike the file-path
+    // stages here, this branch builds the BPC and PCS-luminance hints, matching
+    // CreateStandard's embedded branch.
+    const bool bUseEmbedded = bFirst && pCfg->m_iccFile.empty() &&
+                              pEmbeddedData && nEmbeddedLen;
+
+    if (bUseEmbedded && pCfg->m_useBPC) {
+      stat = AddHintNoThrow(Hint, new (std::nothrow) CIccApplyBPCHint());
+      if (stat != icCmmStatOk) {
+        sStageErr = "failed to attach BPC hint for embedded source profile";
+        goto search_stage_failed;
+      }
+    }
+    if (bUseEmbedded && pCfg->m_adjustPcsLuminance) {
+      stat = AddHintNoThrow(Hint, new (std::nothrow) CIccLuminanceMatchingHint());
+      if (stat != icCmmStatOk) {
+        sStageErr = "failed to attach PCS-luminance hint for embedded source profile";
+        goto search_stage_failed;
+      }
+    }
 
     if (!pCfg->m_pccFile.empty()) {
       // Caller-selected config paths intentionally name ICC/PCC profile files.
@@ -515,26 +551,49 @@ CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApp
       }
     }
 
-    stat = pCmm->CIccCmm::AddXform(
-      pCfg->m_iccFile.c_str(),
-      pCfg->m_intent < 0 ? icUnknownIntent : (icRenderingIntent)pCfg->m_intent,
-      pCfg->m_interpolation,
-      pPcc,
-      pCfg->m_transform,
-      pCfg->m_useD2BxB2Dx,
-      &Hint,
-      pCfg->m_useV5SubProfile
-    );
-    if (stat == icCmmStatCantOpenProfile) {
-      sStageErr = "unable to open ICC profile '" + pCfg->m_iccFile + "'";
+    if (bUseEmbedded) {
+      stat = pCmm->CIccCmm::AddXform(
+        const_cast<unsigned char*>(pEmbeddedData),
+        (icUInt32Number)nEmbeddedLen,
+        pCfg->m_intent < 0 ? icUnknownIntent : (icRenderingIntent)pCfg->m_intent,
+        pCfg->m_interpolation,
+        pPcc,
+        pCfg->m_transform,
+        pCfg->m_useD2BxB2Dx,
+        &Hint,
+        pCfg->m_useV5SubProfile
+      );
+      if (stat != icCmmStatOk) {
+        // Same status decoding as AddXformFromConfig (issue #1323): report
+        // the icStatusCMM name, not just the raw number.
+        std::ostringstream oss;
+        oss << "AddXform failed for embedded source profile (status " << (int)stat
+            << ": " << CIccCmm::GetStatusText(stat) << ")";
+        sStageErr = oss.str();
+      }
     }
-    else if (stat != icCmmStatOk) {
-      // Same status decoding as AddXformFromConfig (issue #1323): report
-      // the icStatusCMM name, not just the raw number.
-      std::ostringstream oss;
-      oss << "AddXform failed for '" << pCfg->m_iccFile << "' (status " << (int)stat
-          << ": " << CIccCmm::GetStatusText(stat) << ")";
-      sStageErr = oss.str();
+    else {
+      stat = pCmm->CIccCmm::AddXform(
+        pCfg->m_iccFile.c_str(),
+        pCfg->m_intent < 0 ? icUnknownIntent : (icRenderingIntent)pCfg->m_intent,
+        pCfg->m_interpolation,
+        pPcc,
+        pCfg->m_transform,
+        pCfg->m_useD2BxB2Dx,
+        &Hint,
+        pCfg->m_useV5SubProfile
+      );
+      if (stat == icCmmStatCantOpenProfile) {
+        sStageErr = "unable to open ICC profile '" + pCfg->m_iccFile + "'";
+      }
+      else if (stat != icCmmStatOk) {
+        // Same status decoding as AddXformFromConfig (issue #1323): report
+        // the icStatusCMM name, not just the raw number.
+        std::ostringstream oss;
+        oss << "AddXform failed for '" << pCfg->m_iccFile << "' (status " << (int)stat
+            << ": " << CIccCmm::GetStatusText(stat) << ")";
+        sStageErr = oss.str();
+      }
     }
 
   search_stage_failed:
@@ -545,6 +604,7 @@ CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApp
       ReleasePccList(pccList);
       return nullptr;
     }
+    bFirst = false;
     ++stageIdx;
   }
 
@@ -633,7 +693,14 @@ CIccConnectCmm* CIccConnectCmm::CreateSearch(const CIccCfgSearchApply& searchApp
   }
 
   ReleasePccList(pccList);
-  return Attach(pCmm.release());
+  // Each CIccThreadedCmm worker gets its own CIccApplyCmmSearch, which owns a
+  // private CIccApplyCmm for every sub-chain (m_srcToMidApply / m_dstToMidApply
+  // / m_pMidToDstApply), so strip partitioning is safe.
+  std::unique_ptr<CIccCmm> baseCmm(pCmm.release());
+  CIccConnectCmm* pConnect = AttachStandardCmm(baseCmm, nThreads);
+  if (!pConnect)
+    sErrorMsg = "failed to attach search CMM";
+  return pConnect;
 }
 
 #ifdef USEICCDEVNAMESPACE

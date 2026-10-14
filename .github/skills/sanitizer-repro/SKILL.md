@@ -1,7 +1,7 @@
 ---
 name: sanitizer-repro
 description: >
-  Reproduce and triage ASAN/UBSAN findings against iccDEV tools with
+  Reproduce and triage sanitizer and Valgrind findings against iccDEV tools with
   authoritative exit-code and stack-frame handling.
 allowed-tools:
   - bash
@@ -18,15 +18,20 @@ manual findings involving iccDEV command-line tools.
 
 ## Workflow
 
-1. Build from a clean CMake cache with sanitizer flags.
-2. Verify sanitizer linkage before claiming coverage.
-3. Run the exact reproduction command and capture exit code plus stderr.
-4. Classify exit codes: `0` success, `1-127` graceful failure, `128+` signal.
-5. Attribute root cause from sanitizer stack frames, not PoC filenames.
-6. Inspect tool argument semantics before writing a one-liner. If a tool
+1. For a CodeQL alert, establish profile-to-tool reachability before creating a
+   PoC. Trace parser, `Begin()`, and `Apply()` return propagation. If setup
+   rejects the field and every tool caller propagates failure, classify the
+   alert as a query false positive and add a guarded plus unguarded query test;
+   do not force reachability with a direct API call that violates the contract.
+2. Build from a clean CMake cache with sanitizer flags.
+3. Verify sanitizer linkage before claiming coverage.
+4. Run the exact reproduction command and capture exit code plus stderr.
+5. Classify exit codes: `0` success, `1-127` graceful failure, `128+` signal.
+6. Attribute root cause from sanitizer stack frames, not PoC filenames.
+7. Inspect tool argument semantics before writing a one-liner. If a tool
    appends channel numbers, expands prefixes, or parses config files, preserve
    that behavior in the command instead of copying artifacts to synthetic names.
-7. For sanitizer noise triage, distinguish runtime suppressions from compile-time
+8. For sanitizer noise triage, distinguish runtime suppressions from compile-time
    ignorelists:
    - Use `Testing/silence.txt` only for recoverable runtime UBSAN suppressions.
    - Use `.github/ci/ubsan-ignorelist.txt` plus a rebuild for fatal
@@ -37,11 +42,50 @@ manual findings involving iccDEV command-line tools.
      `*/include/c++/*/bits/...` can be noise; project-owned `Icc*`, `Tools`,
      `IccConnect`, AFL, and CFL paths stay actionable unless a separate source
      fix or issue proves otherwise.
-8. Minimize reproduction steps while keeping them copy-pasteable. When a
+9. Minimize reproduction steps while keeping them copy-pasteable. When a
    maintainer asks for no substitutions, the command must start with the tool
    binary and use literal arguments only; do not use shell variables, loops,
    `mktemp`, or copy helpers.
-9. File or update issues using the canonical security format.
+10. File or update issues using the canonical security format.
+
+## Uninitialized-memory and race matrix
+
+Do not treat ASAN or UBSAN as coverage for uninitialized reads. Use each lane
+for its own signal:
+
+- Run Memcheck and Helgrind against a non-sanitized build. Do not stack
+  Valgrind on an ASAN build.
+- Run TSan separately for data races; it does not replace MSan or Memcheck.
+- Run MSan only when dependent runtime code is also instrumented. A normal
+  distro `libstdc++`, `libc++`, or `libxml2` can leave destination shadow bytes
+  poisoned after initializing them and produce misleading reports.
+- Do not suppress a sequence of STL frames to make MSan advance. Build the
+  pinned instrumented libc++ runtime, then rerun the same input and controls.
+
+Build the repository runtime and run the JSON, XML, and threaded controls with:
+
+```bash
+.github/scripts/iccdev-build-msan-libcxx.sh --prefix /tmp/iccdev-msan-libcxx
+.github/scripts/iccdev-msan-taint-qa.sh \
+  --source-dir "$PWD" \
+  --build-dir /tmp/iccdev-msan-build \
+  --runtime-dir /tmp/iccdev-msan-libcxx
+```
+
+Despite its historical name, `iccdev-build-msan-libcxx.sh` installs pinned,
+instrumented libc++, libc++abi, and libxml2. A plain `-DENABLE_MSAN=ON` build
+instruments iccDEV itself but not distribution dependencies; do not classify
+reports from those libraries as iccDEV bugs.
+
+For Valgrind-assisted taint tracing, configure with
+`-DCMAKE_BUILD_TYPE=Debug -DICCDEV_ENABLE_TAINT_TRACE=ON`, set
+`ICC_TAINT_TRACE=1`, and use
+`.github/scripts/iccdev-taint-trace-qa.sh`. The trace helpers inspect shadow
+state before formatting values, so logging must never dereference poisoned or
+unaddressable storage. Release, RelWithDebInfo, and MinSizeRel builds always
+compile these diagnostics out, even if the option is explicitly requested.
+After #2543, malformed parametric-curve arrays are rejection controls; the
+nonnumeric colorant PCS fixture remains the positive uninitialized-read proof.
 
 ## Build
 

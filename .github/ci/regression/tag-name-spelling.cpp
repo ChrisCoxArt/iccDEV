@@ -1,7 +1,32 @@
-// Copyright (c) 2026 The International Color Consortium. All rights reserved.
-// Licensed under the BSD 3-Clause "New" or "Revised" License; see the ICC
-// Software License in the repository root and CONTRIBUTING.md.
-//
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 // Regression: g_icTagNameTable published ten tag names that matched neither the
 // signature nor their own siblings (#2012, #2013, #2014).
 //
@@ -69,6 +94,56 @@ static const TagNameFix kCorrected[] = {
   {icSigBRDFDToB3Tag, "brdfDToB3Tag", "BRDFDToB3Tag", "#2013"},
   {icSigHToS2Tag,     "HToS2Tag",     "HTSB2Tag",     "#2012"},
   {icSigCxFTag,       "cxfTag",       "CxfTag",       "#2014"},
+};
+
+// #2564: 28 ICC.2-2023 9.2 tags that had no enum value and no name, so every
+// dump showed them as Unknown and iccToXml wrote them as PrivateTag. There is no
+// legacy name to keep readable -- nothing was ever emitted for them -- so each
+// row pins three things: the signature matches the clause's hex, that signature
+// emits the clause's name, and the name reads back to it.
+//
+// The hex is spelled out as a literal rather than taken from the enum, so a
+// typo in icProfileHeader.h fails here instead of being echoed. Two clauses
+// print text that disagrees with this table:
+//   9.2.63 heading "directionalfAToB2Tag" -- the name follows its 15 siblings
+//   9.2.71 signature 'bBD2' next to hex 64424432h ('dBD2') -- the hex is taken,
+//          because 'bBD2' is brdfBToD2Tag (9.2.24), which has its own row below
+struct TagNameAdded {
+  icTagSignature sig;
+  unsigned long ulHex;
+  const char *szName;
+};
+
+static const TagNameAdded kAdded[] = {
+  {icSigBRDFBToA0Tag,        0x62424130UL, "brdfBToA0Tag"},         // 9.2.18
+  {icSigBRDFBToA1Tag,        0x62424131UL, "brdfBToA1Tag"},
+  {icSigBRDFBToA2Tag,        0x62424132UL, "brdfBToA2Tag"},
+  {icSigBRDFBToA3Tag,        0x62424133UL, "brdfBToA3Tag"},
+  {icSigBRDFBToD0Tag,        0x62424430UL, "brdfBToD0Tag"},         // 9.2.22
+  {icSigBRDFBToD1Tag,        0x62424431UL, "brdfBToD1Tag"},
+  {icSigBRDFBToD2Tag,        0x62424432UL, "brdfBToD2Tag"},
+  {icSigBRDFBToD3Tag,        0x62424433UL, "brdfBToD3Tag"},
+  {icSigDirectionalAToB0Tag, 0x64414230UL, "directionalAToB0Tag"},  // 9.2.61
+  {icSigDirectionalAToB1Tag, 0x64414231UL, "directionalAToB1Tag"},
+  {icSigDirectionalAToB2Tag, 0x64414232UL, "directionalAToB2Tag"},
+  {icSigDirectionalAToB3Tag, 0x64414233UL, "directionalAToB3Tag"},
+  {icSigDirectionalBToA0Tag, 0x64424130UL, "directionalBToA0Tag"},  // 9.2.65
+  {icSigDirectionalBToA1Tag, 0x64424131UL, "directionalBToA1Tag"},
+  {icSigDirectionalBToA2Tag, 0x64424132UL, "directionalBToA2Tag"},
+  {icSigDirectionalBToA3Tag, 0x64424133UL, "directionalBToA3Tag"},
+  {icSigDirectionalBToD0Tag, 0x64424430UL, "directionalBToD0Tag"},  // 9.2.69
+  {icSigDirectionalBToD1Tag, 0x64424431UL, "directionalBToD1Tag"},
+  {icSigDirectionalBToD2Tag, 0x64424432UL, "directionalBToD2Tag"},
+  {icSigDirectionalBToD3Tag, 0x64424433UL, "directionalBToD3Tag"},
+  {icSigDirectionalDToB0Tag, 0x64444230UL, "directionalDToB0Tag"},  // 9.2.73
+  {icSigDirectionalDToB1Tag, 0x64444231UL, "directionalDToB1Tag"},
+  {icSigDirectionalDToB2Tag, 0x64444232UL, "directionalDToB2Tag"},
+  {icSigDirectionalDToB3Tag, 0x64444233UL, "directionalDToB3Tag"},
+  {icSigMeasurementInfoTag,  0x6D696E66UL, "measurementInfoTag"},     // 9.2.91
+  {icSigMeasurementInputInfoTag, 0x6D69696EUL, "measurementInputInfoTag"}, // 9.2.92
+  {icSigProfileSequenceInformationTag, 0x7073696EUL,
+                                       "profileSequenceInformationTag"},  // 9.2.107
+  {icSigSourcePccTag,        0x73504343UL, "sourcePccTag"},         // 9.2.110
 };
 
 // Names that must NOT have moved. The brdfM* pair guards against lowercasing
@@ -184,6 +259,21 @@ int main()
     expectNotEmitted(kCorrected[i].szOld);
   expectNotEmitted("materialTypeArrayTag");
   expectNotEmitted("materialDefaultValuesTag");
+
+  // 8 -- #2564: each added tag has the clause's signature, emits the clause's
+  // name, and that name reads back. Comparing against the literal rather than
+  // the enum is what makes the first check more than a tautology.
+  const size_t nAdded = sizeof(kAdded) / sizeof(kAdded[0]);
+  for (size_t i = 0; i < nAdded; i++) {
+    if ((unsigned long)kAdded[i].sig != kAdded[i].ulHex) {
+      printf("FAIL [#2564 signature %s]: enum is 0x%08lX, clause gives 0x%08lX\n",
+             kAdded[i].szName, (unsigned long)kAdded[i].sig, kAdded[i].ulHex);
+      g_failures++;
+    }
+    TagNameFix fix = {kAdded[i].sig, kAdded[i].szName, NULL, "#2564"};
+    expectEmitted(fix);
+    expectResolves("#2564 name reads", kAdded[i].szName, kAdded[i].sig);
+  }
 
   if (g_failures) {
     printf("\n%d tag-name case(s) regressed\n", g_failures);

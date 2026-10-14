@@ -6,15 +6,16 @@
 """
 MCP server exposing iccDEV ICC color profile tools to AI assistants.
 
-Provides 26 tools:
-- 7 Python-native (header inspection, validation, color transforms, enums)
-- 17 subprocess-backed (dump, XML/JSON conversion, image I/O)
-- 2 service tools (health and profile discovery)
+Provides profile tooling through:
+- Python-native (header inspection, validation, color transforms, enums)
+- subprocess-backed (dump, XML/JSON conversion, image I/O)
+- service tools (health and profile discovery)
 
 Quick start::
 
     # Install
-    pip install iccdev-mcp
+    pip install "git+https://github.com/InternationalColorConsortium/iccDEV.git#subdirectory=iccdev-mcp"
+    # Or install the universal wheel URL from a successful GitHub release.
 
     # Run MCP server (stdio transport for Claude Desktop / VS Code)
     iccdev-mcp

@@ -9,58 +9,34 @@
 */
 
 /*
- * The ICC Software License, Version 0.2
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
  *
- * Copyright (c) 2003-2012 The International Color Consortium. All rights 
- * reserved.
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
  *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. In the absence of prior written permission, the names "ICC" and "The
- *    International Color Consortium" must not be used to imply that the
- *    ICC organization endorses or promotes products derived from this
- *    software.
- *
- *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE INTERNATIONAL COLOR CONSORTIUM OR
- * ITS CONTRIBUTING MEMBERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * ====================================================================
- *
- * This software consists of voluntary contributions made by many
- * individuals on behalf of the The International Color Consortium. 
- *
- *
- * Membership in the ICC is encouraged when this software is used for
- * commercial purposes. 
- *
- *  
- * For more information on The International Color Consortium, please
- * see <http://www.color.org/>.
- *  
- * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 ////////////////////////////////////////////////////////////////////// 
 // HISTORY:
 //
@@ -231,27 +207,15 @@ std::string wstringToUTF8Converter( std::wstring &input )
 {
 
 #if 1
-  size_t maxBufferSize = 6 * ( input.size() + 1 );  // assume worst case conversion to UTF8
-  std::vector<char> outputBuffer ( maxBufferSize );
-  UTF8 *output_data( (UTF8 *)outputBuffer.data() );
-  UTF8 *output_end = output_data + maxBufferSize;
-  UTF8 *output_start = output_data;  // because this will be modified in the conversion routine
-
-  // wstring can be 16 or 32 bits depending on platform - so we need a conditional implementation to convert to UTF8
-  static_assert( sizeof(wchar_t) == 4 || sizeof(wchar_t) == 2, "wchar_t has an unexpected size." );
-  if (sizeof(wchar_t) == 4) {
-    const UTF32 *input_data( (const UTF32 *)input.data() );
-    const UTF32 *input_end = input_data + input.size();
-    (void) icConvertUTF32toUTF8 ( &input_data, input_end, &output_start, output_end, lenientConversion );
-  } else  {
-    const UTF16 *input_data( (const UTF16 *)input.data() );
-    const UTF16 *input_end = input_data + input.size();
-    (void) icConvertUTF16toUTF8 ( &input_data, input_end, &output_start, output_end, lenientConversion );
-  }
-
-// output_start has been moved to point to the end of the output, and should have a terminating NULL
-
-  return std::string ( (char *)output_data );     // this makes a copy of the output string data
+  // #2526: the entry text holds UTF-16 code units, one per wchar_t, on every
+  // platform.  The UTF-32 arm this function had for a 32-bit wchar_t encoded
+  // each half of a surrogate pair on its own, so iccDumpProfile printed six
+  // bytes of CESU-8 for a character above U+FFFF.  icWCharToUtf8 handles
+  // both widths.  Building the result from c_str() keeps the old behaviour at
+  // an embedded NUL: the text is still cut there.
+  std::string buf;
+  icWCharToUtf8(buf, input.c_str(), input.size());
+  return std::string(buf.c_str());
 #else
 // deprecated implementation that still works for now, but is marked for removal in C++26
 // saving this, just in case the new code fails in testing
@@ -342,6 +306,15 @@ bool CIccDictEntry::SetNameLocalized(CIccTagMultiLocalizedUnicode *pNameLocalize
 {
   bool rv;
 
+  // GetNameLocalized() hands this member out -- the header says so explicitly --
+  // so SetNameLocalized(GetNameLocalized()) is reachable.  Releasing first would
+  // free the object being installed and then write through it in
+  // SetParentObject() below, a heap use-after-free WRITE measured under ASan.
+  // Returning whether a value was held keeps the documented result for both the
+  // NULL and the non-NULL alias.
+  if (m_pNameLocalized == pNameLocalized)
+    return m_pNameLocalized != NULL;
+
   if (m_pNameLocalized) {
     m_pNameLocalized->SetParentObject(nullptr);
     delete m_pNameLocalized;
@@ -371,6 +344,11 @@ bool CIccDictEntry::SetNameLocalized(CIccTagMultiLocalizedUnicode *pNameLocalize
 bool CIccDictEntry::SetValueLocalized(CIccTagMultiLocalizedUnicode *pValueLocalized)
 {
   bool rv;
+
+  // Same contract as SetNameLocalized above: GetValueLocalized() hands the
+  // member out, so reinstalling it must not release it first.
+  if (m_pValueLocalized == pValueLocalized)
+    return m_pValueLocalized != NULL;
 
   if (m_pValueLocalized) {
     m_pValueLocalized->SetParentObject(nullptr);
@@ -658,8 +636,11 @@ bool CIccTagDict::Read(icUInt32Number size, CIccIO *pIO)
     //GetName
     if (pos[i].posName.offset) {
       if (!pos[i].posName.size) {
+        // #2527: this called SetValue, copied from the empty-value branch
+        // below, so an entry with an empty name and no value read back with
+        // an empty value that Write then stored.
         str.clear();
-        ptr.ptr->SetValue(str);
+        ptr.ptr->GetName() = str;
       }
       else {
         if (pos[i].posName.size > size || pos[i].posName.offset > size - pos[i].posName.size ||

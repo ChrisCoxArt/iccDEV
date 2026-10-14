@@ -13,16 +13,37 @@ mkdir -p Tools/CmdLine/IccNewTool
 Create `Tools/CmdLine/IccNewTool/iccNewTool.cpp`:
 
 ```cpp
+/*
+ * Copyright (c) International Color Consortium.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ *     1. Redistributions of source code must retain the above copyright notice,
+ *        this list of conditions and the following disclaimer.
+ *
+ *     2. Redistributions in binary form must reproduce the above copyright
+ *        notice, this list of conditions and the following disclaimer in the
+ *        documentation and/or other materials provided with the distribution.
+ *
+ *     3. Neither the name of International Color Consortium (ICC) nor the names of
+ *        its contributors may be used to endorse or promote products derived from
+ *        this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 /** @file
  *  @brief iccDEV - IccNewTool
- */
-
-/*
- * Copyright (c) 2024-2026 The International Color Consortium.
- *                           All rights reserved.
- *
- * Copy the complete ICC Software License block from an adjacent existing
- * C++ source file. Do not use an abbreviated or placeholder license banner.
  */
 
 #include <cstdio>
@@ -123,6 +144,7 @@ Add the same to `Testing/RunTests.bat` for Windows.
 - Add tool description and example to `docs/tools-cli-reference.md`
 - Confirm `.github/ci/doxygen/Doxyfile` includes Markdown so `Tools/CmdLine/*/Readme.md` files are generated
 - Keep tool and reference links Doxygen-safe: if a link points outside the Doxygen INPUT tree, use an explicit HTML anchor (`<a href="...">...</a>`) instead of a Markdown link that will trigger warning-only docs failures
+- Run `doxygen .github/ci/doxygen/Doxyfile` and require an empty `docs/generated/doxygen-warnings.log`; do not add generated Doxygen output or warning logs
 - Add tool description to `docs/index.md` under "Tools based upon these libraries"
 - Add to `docs/install.md` Docker examples if applicable
 - Update `.github/prompts/contributor-onboarding.prompt.md` when the repository map changes

@@ -18,6 +18,7 @@ commands here.
 | `ports/**` | `instructions/vcpkg-port.instructions.md` | vcpkg overlay port and CI |
 | `python/**` | `instructions/python-bindings.instructions.md` | Cython build, tests, and `ICCDEV_BUILD_DIR` |
 | `matlab/**` | `instructions/matlab-mex.instructions.md` | MEX gateway, OOP layer, and `build_mex.m` |
+| `matlab/**` | `instructions/matlab-code-review.instructions.md` | Focused MATLAB MEX review checks |
 | `Tools/Winnt/IccIisIsapi/**` | `Tools/Winnt/IccIisIsapi/isapi-instructions.md` | IIS ISAPI setup and hardening |
 
 ## Agent Instructions
@@ -34,6 +35,15 @@ This repository uses all three GitHub custom-instruction types:
 
 Keep agent rules in `AGENTS.md`, not in the mirrors. See
 https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/add-custom-instructions/add-repository-instructions
+
+For documentation edits, run the bounded graph-light Doxygen check in
+`docs/documentation-maintenance.md` before handoff and require
+`docs/generated/doxygen-warnings.log` to be empty. Time is valuable: full
+graph generation belongs to release packaging or graph changes. Keep
+`HAVE_DOT=YES` for checked-in diagrams; exclude CTest implementation and
+fixtures from the generated package. Keep
+Markdown links inside the Doxygen INPUT tree; use explicit HTML anchors for
+outside-tree references. Never commit generated Doxygen output or warning logs.
 
 Copilot code review reads repository-wide instructions, the nearest applicable
 `AGENTS.md`, path-specific instructions, and relevant skills from the PR head
@@ -57,6 +67,11 @@ Canonical regression scripts:
 - `.github/scripts/iccdev-cam-degenerate-regression-tests.sh`
 - `.github/scripts/iccdev-namedcolor-apply-regression-tests.sh`
 - `.github/scripts/iccdev-v5-namedcmm-regression-tests.sh`
+- `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`
+- `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`
+- `.github/scripts/iccdev-applysearch-cli-args-regression.sh`
+- `.github/scripts/iccdev-heif-carrier-qa.sh`
+- `.github/scripts/iccdev-xml-spec-qa.sh`
 
 For regression workflow updates, use
 `.github/skills/regression-workflow-governance/SKILL.md` and
@@ -66,12 +81,30 @@ For maintainer regression-container use, PR validation, and issue reproduction,
 use `.github/skills/regression-container-maintainer/SKILL.md` and
 `docs/regression-container.md`.
 
+ClusterFuzzLite `memory` builds must use the repository-pinned instrumented
+libc++/libc++abi and instrumented libxml2 for the XML target, verify every
+fuzzer runtime boundary, and replay the pinned #2687 artifact before fuzzing.
+
 ## Build, Test, and Safety
 
 - User build instructions: `docs/build.md`
 - Maintainer build and sanitizer policy: `.github/instructions/build-system.instructions.md`
 - Test profile workflow: `.github/instructions/testing.instructions.md`
 - Workflow governance: `.github/instructions/workflow-governance.instructions.md`
+- Apple mobile static-core and smoke-app flow: `docs/build.md` and
+  `.github/instructions/build-system.instructions.md`
+- Manual iOS example app helpers: `examples/ios-apply-preview/README.md`,
+  `examples/ios-benchapply/README.md`, `examples/ios-clut-editor/README.md`,
+  and `.github/skills/ios-manual-examples/SKILL.md`
+- iOS CLUT editor proof-of-concept: `examples/ios-clut-editor/README.md`,
+  `.github/skills/ios-clut-editor/SKILL.md`, and
+  `.github/prompts/ios-clut-editor.prompt.md`
+- HEIF ICC carrier research tooling: `.github/ci/tooling/heif/Readme.md`,
+  `.github/skills/heif-icc-qa/SKILL.md`, and
+  `.github/prompts/heif-icc-qa.prompt.md`
+- libpng iCCP fault research tooling: `.github/ci/tooling/libpng/Readme.md`,
+  `.github/skills/libpng-iccp-qa/SKILL.md`, and
+  `.github/prompts/libpng-iccp-qa.prompt.md`
 - Windows session helper: dot-source `.\.github\scripts\icc-session.ps1`, then
   run `icc-session` to create the next `DD-mmm-YYYY-NNN` workspace directory.
 - AVX2 CLUT debugging and optimization handoff:
@@ -96,6 +129,9 @@ use `.github/skills/regression-container-maintainer/SKILL.md` and
   `docs/governance/UPSTREAM_PR_READINESS.md` and use
   `.github/skills/upstream-pr-readiness/SKILL.md`. A branch push, CI request,
   or review request is not PR-creation authorization.
+- For maintainer branch grooming, set repository-local Git defaults from
+  `docs/linear-stack-workflow.md` so pulls rebase, non-fast-forward merges fail,
+  repository hooks run, and the final `base..HEAD` range remains merge-free.
 - Run the smallest complete validation for the changed surface. For workflow,
   Docker, release, CMake, parser, or security automation changes, follow the
   additional checks required by the path-specific instructions and pre-PR
@@ -139,19 +175,22 @@ agent-policy surfaces.
   compatibility, or maintainability impact. Do not report pre-existing code
   unless the change makes it newly reachable or materially worsens it.
 - Verify each finding with the smallest relevant evidence before commenting.
-- Treat a missing, abbreviated, or placeholder ICC Software License block in a
-  new or relocated C/C++ source/header as a blocking changed-line finding.
+- Treat a missing, abbreviated, or placeholder canonical BSD-3-Clause notice
+  derived from `LICENSE.md` in a new or relocated ICC-owned C/C++ source/header
+  as a blocking changed-line finding. Verify with
+  `.github/scripts/check-license-notices.py` and preserve third-party and
+  generated-file attribution.
   Avoid speculative concerns, style-only comments, duplicate findings, and
   generic requests for broader tests when focused validation covers the diff.
 - Use one comment for one root cause. State the affected path, triggering
   condition, and the smallest safe remediation.
-- Review each head SHA once. For a later PR update, review only the changed
-  delta and do not re-post prior findings, summaries, or resolved concerns
+- Review every head against the complete cumulative `base...HEAD` diff and
+  contract matrix. For a later PR update, use the changed delta only to focus
+  new evidence; do not narrow the review scope or re-post resolved findings
   unless the update reintroduces the defect.
 - Request review only after the head is frozen and the readiness evidence is
-  current. If a re-review finds a missed issue in unchanged code, stop serial
-  automated review and return the branch to grooming until a maintainer directs
-  the next step.
+  current. If a re-review finds any new blocker, stop serial automated review
+  and return the branch to grooming until a maintainer directs the next step.
 - Conserve maintainer attention: prioritize a small set of high-confidence,
   actionable findings over exhaustive comment volume. No comment is better
   than a low-value concern.
@@ -162,6 +201,10 @@ agent-policy surfaces.
 - Use repository MCP context or agent skills only when relevant to the changed
   surface; do not invent a tool dependency or repeat information already in
   repository instructions.
+- For `matlab/**`, apply
+  `.github/instructions/matlab-code-review.instructions.md` before reporting a
+  finding. Verify the MEX boundary, wrapper cleanup, native-tool invocation,
+  focused regression, and dependent Release/CI/documentation surfaces.
 
 ## iccdev-mcp Review Notes
 
@@ -187,7 +230,9 @@ Key safety rules:
 - 2-space C++ indentation, K&R braces, no tabs.
 - Member prefix `m_`; match nearby naming and ownership patterns.
 - Error handling uses return values, not exceptions.
-- New files need ICC copyright and BSD 3-Clause header unless generated.
+- New ICC-owned C/C++ files need the complete canonical BSD-3-Clause notice
+  derived from `LICENSE.md` unless generated; run
+  `.github/scripts/check-license-notices.py`.
 - Validate all file-controlled sizes, offsets, counts, and loop bounds.
 - Bounds check pattern: `if (size > limit || offset > limit - size)`.
 - Exit 1-127 is graceful failure, not a crash; exit 128+ is signal termination.
@@ -203,12 +248,18 @@ Key safety rules:
 | Reduce documentation noise | `.github/prompts/reduce-doc-noise.prompt.md` |
 | Build/test/coverage | `.github/prompts/build-and-test.prompt.md` |
 | Add a CLI tool | `.github/prompts/add-new-tool.prompt.md` |
+| iOS CLUT editor planning | `.github/prompts/ios-clut-editor.prompt.md` |
 | Contributor onboarding | `.github/prompts/contributor-onboarding.prompt.md` |
 | Cross-platform CI | `.github/prompts/cross-platform-ci.prompt.md` |
+| Manual iOS examples | `.github/prompts/ios-manual-examples.prompt.md` |
 | Regression workflow gate | `.github/prompts/add-regression-workflow.prompt.md` |
+| ICC.2 XML specification QA | `.github/prompts/icc2-xml-spec-qa.prompt.md` |
 | Maintainer AFL smoke | `.github/prompts/maintainer-afl-smoke.prompt.md` |
+| ClusterFuzzLite integration | `.github/prompts/clusterfuzzlite.prompt.md` |
 | Maintainer CTest selection | `.github/prompts/maintainer-ci-ctest.prompt.md` |
 | Maintainer regression container | `.github/prompts/regression-container-maintainer.prompt.md` |
+| libpng iCCP fault QA | `.github/prompts/libpng-iccp-qa.prompt.md` |
+| Valgrind-family analysis | `.github/prompts/valgrind-analysis.prompt.md` |
 | Workflow governance audit | `.github/prompts/audit-workflow-governance.prompt.md` |
 | Pre-PR security cycle | `.github/prompts/pre-pr-security-cycle.prompt.md` |
 | Maintainer label triage | `.github/prompts/maintainer-label-triage.prompt.md` |
@@ -228,14 +279,20 @@ Key safety rules:
 | Task | Skill |
 |------|-------|
 | Documentation maintenance | `.github/skills/docs-maintenance/SKILL.md` |
+| Manual iOS example app helpers | `.github/skills/ios-manual-examples/SKILL.md` |
+| iOS CLUT editor app | `.github/skills/ios-clut-editor/SKILL.md` |
 | AFL smoke workflow | `.github/skills/afl-smoke/SKILL.md` |
+| ClusterFuzzLite integration | `.github/skills/clusterfuzzlite/SKILL.md` |
 | Sanitizer reproduction | `.github/skills/sanitizer-repro/SKILL.md` |
+| Valgrind-family analysis | `.github/skills/valgrind-analysis/SKILL.md` |
 | iccSpecSepToTiff QA | `.github/skills/specsep-qa/SKILL.md` |
 | IIS ISAPI endpoint QA | `.github/skills/iis-isapi-qa/SKILL.md` |
 | JSON/config regressions | `.github/skills/json-config-regression/SKILL.md` |
+| ICC.2 XML specification QA | `.github/skills/icc2-xml-spec-qa/SKILL.md` |
 | Regression workflow governance | `.github/skills/regression-workflow-governance/SKILL.md` |
 | Regression container maintainer | `.github/skills/regression-container-maintainer/SKILL.md` |
 | Maintainer CI and CTest | `.github/skills/maintainer-ci-ctest/SKILL.md` |
+| libpng iCCP fault QA | `.github/skills/libpng-iccp-qa/SKILL.md` |
 | Pre-PR security cycle | `.github/skills/pre-pr-security-cycle/SKILL.md` |
 | Focused pull request review | `.github/skills/code-review/SKILL.md` |
 | Stacked PR and fast-lane workflow | `.github/skills/stacked-pr-fast-lane/SKILL.md` |

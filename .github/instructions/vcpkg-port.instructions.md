@@ -2,15 +2,15 @@
 applyTo: "ports/**"
 ---
 
-# vcpkg Port — Auto-Loaded Instructions
+# vcpkg Port - Auto-Loaded Instructions
 
 ## Port Structure
 
 ```
 ports/iccdev/
-├── portfile.cmake   — Build logic and feature flags
-├── usage            — CMake consumption hint printed by vcpkg
-└── vcpkg.json       — Port manifest (version, port-version, deps, features)
+|-- portfile.cmake   - Build logic and feature flags
+|-- usage            - CMake consumption hint printed by vcpkg
+`-- vcpkg.json       - Port manifest (version, port-version, deps, features)
 ```
 
 ## Architecture Decisions
@@ -29,7 +29,7 @@ libtiff/libpng/libjpeg causes transitive dependency failures across
 platforms (e.g., deflate, lzma, jpeg symbols unresolved on Linux).
 
 ### wxWidgets Disabled
-wxProfileDump GUI is excluded (`ENABLE_WXWIDGETS=OFF`) — the port
+wxProfileDump GUI is excluded (`ENABLE_WXWIDGETS=OFF`) - the port
 targets library consumers and headless CLI usage.
 
 ## Upstream CMake Options
@@ -85,10 +85,9 @@ not duplicate its transitive dependencies.
 
 ## CI Workflow
 
-`ci-vcpkg-ports.yml` validates the port on 3 platforms:
-- windows-latest (x64-windows, MSVC)
-- ubuntu-24.04 (x64-linux, GCC)
-- macos-14 (arm64-osx, Apple Clang)
+`ci-vcpkg-ports.yml` validates the port on Windows 2022 with the
+`x64-windows` triplet and MSVC. Linux and macOS vcpkg diagnostics remain
+manual until those lanes stabilize.
 
 Verification checks: headers present, static libs exist, CMake config
 resolves, and core/XML/JSON/connect tools execute: iccDumpProfile,
@@ -105,5 +104,9 @@ When updating the port:
    port manifests, then increment `"port-version"`.
 4. Update `REF` and `SHA512` in `portfile.cmake` for non-local consumers when
    the pinned source changes.
-5. Test locally before pushing: set `VCPKG_ICCDEV_SOURCE` and run
+5. For a vcpkg registry baseline update, synchronize `vcpkg.json`,
+   `Build/Cmake/vcpkg.json`, `examples/hello-iccdev/vcpkg-configuration.json`,
+   `.github/workflows/ci-vcpkg-ports.yml`, and `.github/workflows/ci.yml`.
+   The overlay port manifest intentionally does not carry a registry baseline.
+6. Test locally before pushing: set `VCPKG_ICCDEV_SOURCE` and run
    `vcpkg install iccdev --overlay-ports=ports --classic`

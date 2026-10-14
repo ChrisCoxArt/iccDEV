@@ -1,8 +1,13 @@
 function plots = plot(profile_path, varargin)
 %PLOT Plot graph visualizations available in an ICC profile.
 %
+%   Display figures interactively (the default):
 %   plots = iccdev.plot(profile_path)
+%
+%   Create hidden figures for automated checks or export, then close them:
 %   plots = iccdev.plot(profile_path, 'Visible', 'off')
+%   close([plots.figure])
+%
 %   plots = iccdev.plot(profile_path, 'BuildDir', build_dir)
 %   plots = iccdev.plot(profile_path, 'PlotTool', tool_path)
 %
@@ -13,6 +18,17 @@ function plots = plot(profile_path, varargin)
 %
 % Copyright (c) International Color Consortium.
 % BSD 3-Clause License. See LICENSE.md for details.
+
+  if nargin < 1
+    message = sprintf([ ...
+      'Provide an ICC profile path.\n\n' ...
+      'Display plots interactively (Visible defaults to on):\n' ...
+      '  plots = iccdev.plot(profile_path);\n\n' ...
+      'Create hidden figures for automated checks or export:\n' ...
+      '  plots = iccdev.plot(profile_path, ''Visible'', ''off'');\n' ...
+      '  close([plots.figure]);']);
+    error('iccdev:plotProfileRequired', '%s', message);
+  end
 
   p = inputParser;
   addRequired(p, 'profile_path', @is_text_scalar);
