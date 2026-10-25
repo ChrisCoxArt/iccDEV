@@ -103,8 +103,12 @@ ctest --test-dir /workspace/build -N --no-tests=error
 
 ## CodeQL, coverage, and profiling tools
 
-The image includes the pinned CodeQL CLI bundle, `lcov`, `genhtml`, `gcovr`, `llvm-cov`, `llvm-profdata`,
-`gprof`, `perf`, `strace`, and a pinned FlameGraph checkout at
+The image includes the pinned CodeQL CLI bundle with the Actions, C++, and
+Python analysis surfaces used by iccDEV. The Actions extractor retains its
+JavaScript support; unused C#, Go, Java, Ruby, Rust, and Swift extractors and
+query packs are removed in the archive extraction layer. The image also
+includes `lcov`, `genhtml`, `gcovr`, `llvm-cov`, `llvm-profdata`, `gprof`,
+`perf`, `strace`, and a pinned FlameGraph checkout at
 `$ICCDEV_FLAMEGRAPH_DIR` (`/opt/FlameGraph`). Its exact revision is exposed as
 `ICCDEV_FLAMEGRAPH_REVISION`. Build coverage, profiling, and sanitizer modes in
 separate directories so their instrumentation does not contaminate results.
@@ -437,6 +441,7 @@ runtime behavior, and image health check.
 
 ```bash
 command -v docker gh actionlint zizmor hadolint trivy
+git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
 PREFLIGHT_BASE_REF=origin/master .github/scripts/preflight-safety-checks.sh --require-tools
 
 IMAGE=iccdev-container-check:local
@@ -461,6 +466,15 @@ trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
 sleep 35
 test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy
 ```
+
+Keep security-related package versions synchronized. The unified Dockerfile
+uses one `CURL_VERSION` pin for `curl`, `libcurl3t64-gnutls`, and
+`libcurl4t64`; update that pin atomically after reviewing Ubuntu security
+advisories and the current Trivy findings. Rebuild with `--no-cache`, confirm
+the installed package versions in the image, and rerun the image scan before
+publishing. Do not replace explicit package pins with an unbounded upgrade as a
+shortcut: that makes otherwise identical image builds resolve different
+dependencies over time.
 
 ### SAST and image scanning
 

@@ -109,6 +109,17 @@ if ($LASTEXITCODE -ne 0) {
   throw "Required MATLAB targets failed with exit code $LASTEXITCODE."
 }
 
+$StageArgs = @(
+  "-DICCDEV_BUILD_DIR=$Build"
+  "-DICCDEV_RUNTIME_DIR=$(Join-Path $Build 'bin\Release')"
+  '-DICCDEV_CONFIG=Release'
+  '-P', (Join-Path $Repo 'Build\Cmake\StageWindowsRuntime.cmake')
+)
+cmake @StageArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "Windows runtime staging failed with exit code $LASTEXITCODE."
+}
+
 $PlotTool = Join-Path $Build 'bin\Release\iccProfilePlot.exe'
 $PawgTool = Join-Path $Build 'bin\Release\iccPawgReport.exe'
 $HeifTool = Join-Path $Build 'bin\Release\iccHeifDump.exe'
@@ -123,6 +134,10 @@ The preceding target list is the minimum for MEX, IccJSON conversion, plotting,
 PAWG Q1 audit interoperability, and native Q1 contract evidence. Do not remove
 `iccPawgReport`: `run_local_qa()` invokes `test_pawg_q1()`, which requires that
 executable.
+The explicit runtime-staging step is required for this minimum-target build:
+the default unified Windows runtime disables per-target vcpkg DLL copying.
+Without staging, native tools can exist but fail to start with `0xC0000135`
+(missing DLL). The full `ALL_BUILD` target below includes runtime staging.
 To build every enabled Windows library, tool, and helper instead:
 
 ```powershell
@@ -158,9 +173,22 @@ The build script selects a Release `IccProfLib2` library. If the selected CMake
 tree has `ICC_USE_ZLIB=ON`, it also links the matching Windows import library
 and stages the runtime DLL beside `icc_mex.mexw64`.
 
-The Windows archive published by `ci-latest-release.yml` includes the MATLAB
-tree, the R2026a MEX gateway, and its zlib runtime. It also preserves the
-repository-relative support paths used by QA and examples:
+The rolling release bundles include the MATLAB tree and a platform-native MEX
+gateway: `icc_mex.mexw64` for Windows x64, `icc_mex.mexa64` for Linux x86_64,
+and `icc_mex.mexmaca64` for Apple Silicon macOS. All three are built and
+staged-tested with MATLAB R2023b and are expected to load in R2023b or later.
+This is the compatibility floor for the prebuilt release binaries; source
+builds remain available for the broader MATLAB/Octave versions described in
+the requirements above.
+
+The MEX gateway itself does not need Java. The plotting, PAWG, IccJSON, and
+HEIF helpers do; if `usejava('jvm')` is false because your MATLAB release does
+not include a Java runtime, install a supported JRE and select it with
+`jenv` before calling those helpers.
+
+The Windows archive also includes the MEX zlib runtime when required by its
+build. It preserves the repository-relative support paths used by QA and
+examples:
 
 - `Testing/` for profile and luminance fixtures.
 - `Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc` for ICC.2/v5
@@ -884,3 +912,10 @@ native PAWG Q1 quality-contract CTest, the MATLAB/native structured Q1
 comparison over a checked-in profile, a
 digest-pinned container interoperability job, and no cache or artifact
 publication.
+
+`.github/workflows/ci-latest-release.yml` builds the three shipped MEX
+variants with MATLAB R2023b. Linux release jobs use x86_64 MATLAB; the macOS
+release job uses the Apple Silicon `macos-15` runner. Each platform runs the
+MATLAB checks and examples from its staged bundle before artifact upload, and
+the release packaging job verifies the expected MEX extension and support
+files after artifact download.

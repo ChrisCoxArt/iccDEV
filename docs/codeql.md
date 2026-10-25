@@ -100,6 +100,15 @@ specific, and its classic-loop model requires a literal bound. Keep the query
 test's 16-entry/16-iteration negative control so broad integer type ranges do
 not turn a safe fixed loop into an alert.
 
+`fixed-buffer-transform-output` covers the #2868 cross-function variant: a
+fixed local buffer is passed as output to a helper that calls `CIccCmm::Apply()`
+without a matching `GetDestSamples()` capacity guard. Keep the test's guarded
+fixed-buffer, mismatched-capacity, different-transform, non-transform, and
+dynamically sized controls so the rule stays scoped to unsafe fixed-output
+wrappers. Only a direct `GetDestSamples() > capacity` check counts as a guard;
+arithmetic expressions involving the destination count do not establish this
+capacity contract.
+
 `counted-buffer-off-by-one` covers the nearby counted-buffer family. Review the allocation count, loop count, and
 serialization count as one contract. In particular, `index > count` does not
 protect `buffer[index]` when `index == count`; valid indices end at

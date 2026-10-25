@@ -8,7 +8,7 @@
 #
 ###############################################################
 
-FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7
+FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -18,6 +18,7 @@ ARG TARGETARCH
 ARG FLAMEGRAPH_COMMIT=41fee1f99f9276008b7cd112fca19dc3ea84ac32
 ARG LLVM_MSAN_LIBCXX_COMMIT=1ab49a973e210e97d61e5db6557180dcb92c3e98
 ARG LIBXML2_MSAN_COMMIT=3d840e17858de03a09fba8b202e3a89267d5795a
+ARG CURL_VERSION=8.18.0-1ubuntu2.8
 ARG CODEQL_VERSION=2.27.2
 ARG CODEQL_AMD64_SHA256=f002864be6dd8d5d7bdb123aaf7291ec8e291012bd9f70b6d2362f730db52aeb
 ARG CODEQL_ARM64_SHA256=c1779ce6335606ef86fce4aae0db2ac4d7da869527d6a67bf055d9135695473c
@@ -48,7 +49,7 @@ RUN for attempt in 1 2 3; do \
     clang-tools-22=1:22.1.2-1ubuntu1 \
     cmake=4.2.3-2ubuntu2 \
     cppcheck=2.19.0-3 \
-    curl=8.18.0-1ubuntu2.7 \
+    curl=${CURL_VERSION} \
     diffutils=1:3.12-1ubuntu0.1 \
     file=1:5.46-5build2 \
     g++=4:15.2.0-5ubuntu1 \
@@ -68,7 +69,8 @@ RUN for attempt in 1 2 3; do \
     libtiff-tools=4.7.0-3ubuntu5 \
     liblzma-dev=5.8.3-1 \
     libpng-dev=1.6.57-1ubuntu0.1 \
-    libcurl4t64=8.18.0-1ubuntu2.7 \
+    libcurl3t64-gnutls=${CURL_VERSION} \
+    libcurl4t64=${CURL_VERSION} \
     libssl-dev=3.5.5-1ubuntu3.7 \
     libssl3t64=3.5.5-1ubuntu3.7 \
     libtiff-dev=4.7.0-3ubuntu5 \
@@ -194,6 +196,8 @@ RUN hadolint_version="2.15.1" \
  && rm -f /tmp/hadolint \
  && hadolint --version
 
+# Keep only the CodeQL languages used by iccDEV. Removing the other extractors
+# in the extraction layer avoids shipping their unused runtimes and query packs.
 RUN case "$TARGETARCH" in \
       amd64) codeql_platform="linux64"; codeql_sha256="$CODEQL_AMD64_SHA256" ;; \
       arm64) codeql_platform="linux-arm64"; codeql_sha256="$CODEQL_ARM64_SHA256" ;; \
@@ -204,10 +208,42 @@ RUN case "$TARGETARCH" in \
       "https://github.com/github/codeql-action/releases/download/codeql-bundle-v${CODEQL_VERSION}/codeql-bundle-${codeql_platform}.tar.gz" \
  && printf '%s  %s\n' "$codeql_sha256" "$codeql_archive" | sha256sum -c - \
  && tar -xzf "$codeql_archive" -C /opt \
+ && rm -rf \
+      /opt/codeql/csharp \
+      /opt/codeql/go \
+      /opt/codeql/java \
+      /opt/codeql/ruby \
+      /opt/codeql/rust \
+      /opt/codeql/swift \
+      /opt/codeql/qlpacks/codeql/csharp-all \
+      /opt/codeql/qlpacks/codeql/csharp-examples \
+      /opt/codeql/qlpacks/codeql/csharp-queries \
+      /opt/codeql/qlpacks/codeql/go-all \
+      /opt/codeql/qlpacks/codeql/go-examples \
+      /opt/codeql/qlpacks/codeql/go-queries \
+      /opt/codeql/qlpacks/codeql/java-all \
+      /opt/codeql/qlpacks/codeql/java-examples \
+      /opt/codeql/qlpacks/codeql/java-queries \
+      /opt/codeql/qlpacks/codeql/ruby-all \
+      /opt/codeql/qlpacks/codeql/ruby-examples \
+      /opt/codeql/qlpacks/codeql/ruby-queries \
+      /opt/codeql/qlpacks/codeql/rust-all \
+      /opt/codeql/qlpacks/codeql/rust-queries \
+      /opt/codeql/qlpacks/codeql/swift-all \
+      /opt/codeql/qlpacks/codeql/swift-queries \
  && test -x /opt/codeql/codeql \
  && ln -s /opt/codeql/codeql /usr/local/bin/codeql \
  && rm -f "$codeql_archive" \
- && codeql version
+ && codeql version \
+ && codeql_languages="$(codeql resolve languages --format=json)" \
+ && for language in actions cpp python; do \
+      printf '%s\n' "$codeql_languages" \
+        | jq -e --arg language "$language" 'has($language)' >/dev/null; \
+    done \
+ && for language in csharp go java ruby rust swift; do \
+      printf '%s\n' "$codeql_languages" \
+        | jq -e --arg language "$language" 'has($language) | not' >/dev/null; \
+    done
 
 RUN python3 -m venv /opt/iccdev-workflow-qa \
  && /opt/iccdev-workflow-qa/bin/python -m pip install \

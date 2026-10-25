@@ -53,6 +53,7 @@
 #include <string>
 #include <vector>
 
+#include "IccFileUtil.h"
 #include "IccProfile.h"
 #include "HeifIccProperties.h"
 #include <libheif/heif.h>
@@ -148,6 +149,14 @@ int main(int argc, char* argv[])
     printUsage(argv[0]);
     return 3;
   }
+
+  const std::string inputName = icSanitizeConsoleText(argv[1]);
+  std::FILE* input = std::fopen(argv[1], "rb");
+  if (!input) {
+    std::cerr << "Error: unable to open HEIF input file: " << inputName << std::endl;
+    return 2;
+  }
+  std::fclose(input);
 
   std::vector<iccdev_heif::IccProperty> properties;
   std::vector<std::uint8_t> bytes;

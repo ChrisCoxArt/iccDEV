@@ -34,6 +34,19 @@ profiles, examples, and native handle lifecycle behavior.
      '--', '/m'
    )
    cmake @BuildArgs
+   if ($LASTEXITCODE -ne 0) {
+     throw "Required MATLAB targets failed with exit code $LASTEXITCODE."
+   }
+   $StageArgs = @(
+     "-DICCDEV_BUILD_DIR=$Build"
+     "-DICCDEV_RUNTIME_DIR=$(Join-Path $Build 'bin\Release')"
+     '-DICCDEV_CONFIG=Release'
+     '-P', (Join-Path $Repo 'Build\Cmake\StageWindowsRuntime.cmake')
+   )
+   cmake @StageArgs
+   if ($LASTEXITCODE -ne 0) {
+     throw "Windows runtime staging failed with exit code $LASTEXITCODE."
+   }
    $ToJsonTool = Join-Path $Build 'bin\Release\iccToJson.exe'
    $FromJsonTool = Join-Path $Build 'bin\Release\iccFromJson.exe'
    $HeifTool = Join-Path $Build 'bin\Release\iccHeifDump.exe'
@@ -50,6 +63,10 @@ profiles, examples, and native handle lifecycle behavior.
    `ALL_BUILD` rather than stopping at the minimum MEX and QA targets. Keep
    `iccToJson`, `iccFromJson`, and `iccPawgReport` in the minimum target list:
    `test_json_bindings()` and `run_local_qa()` invoke them.
+   Individual targets do not trigger the default unified-runtime DLL staging.
+   Run the explicit staging step above before launching native tools; an
+   executable's presence alone does not prove it can start. `ALL_BUILD`
+   includes staging automatically.
 5. Build the MEX gateway:
 
    ```powershell
@@ -211,6 +228,15 @@ profiles, examples, and native handle lifecycle behavior.
     `Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc`. Add the staged
     bundle root to the
     MATLAB process `PATH` before `run_local_qa()`.
+    Validate each shipped native gateway on its matching MATLAB platform:
+    `icc_mex.mexw64` on Windows x64, `icc_mex.mexa64` on Linux x86_64, and
+    `icc_mex.mexmaca64` on Apple Silicon macOS. The rolling release gateways
+    are built and staged-tested with MATLAB R2023b, the prebuilt compatibility
+    floor. Require the expected MEX extension, successful gateway loading, and
+    the same staged QA before artifact upload; after artifact download, verify
+    each platform archive still contains its gateway and required support
+    files. Do not claim prebuilt coverage for Intel macOS, Linux ARM64, or
+    GNU Octave.
 
 ## Failure Rules
 

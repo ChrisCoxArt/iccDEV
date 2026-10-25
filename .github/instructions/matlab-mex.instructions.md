@@ -218,6 +218,14 @@ precision. The native CTest calls `CIccInfo::CheckLuminance` and pins its
 warning status, message, nominal `0.99`/`1.01` endpoints, adjacent float
 values, and physical Y values 5, 300, and 500.
 
+The rolling release bundles ship platform-native MATLAB MEX gateways for
+Windows x64 (`mexw64`), Linux x86_64 (`mexa64`), and Apple Silicon macOS
+(`mexmaca64`). These prebuilt gateways are built and staged-tested with MATLAB
+R2023b, the oldest supported MATLAB release that provides native Apple Silicon
+MEX support; document R2023b as the prebuilt compatibility floor. This does
+not change the source-build MATLAB/Octave requirements. Do not imply that
+Intel macOS, Linux ARM64, or GNU Octave have prebuilt gateways.
+
 For issue #1475 and TN-06 tristimulus QA, run both the independent MATLAB model
 and the native reduction-method contract:
 
@@ -256,6 +264,11 @@ MATLAB use `setenv('ICCDEV_BUILD_DIR', build_dir)`; in Windows PowerShell use
 - `build_mex.m` expects the iccDEV CMake build to be completed first. Use the
   platform-specific argument-array workflow in `docs/matlab-bindings.md`;
   avoid Bash operators such as `&&` and `$(nproc)` in PowerShell instructions.
+- A minimum-target Windows build must explicitly run
+  `Build/Cmake/StageWindowsRuntime.cmake` as documented before launching native
+  tools. The default unified runtime disables per-target vcpkg DLL copying;
+  only `ALL_BUILD` includes runtime staging automatically. Missing third-party
+  DLLs can produce `0xC0000135` even when the executable exists.
 - `iccdev.plot` also requires the `iccProfilePlot` executable. Build that CMake
   target and keep its build root in `ICCDEV_BUILD_DIR`, or pass `BuildDir` or
   `PlotTool` explicitly. Plotting requires MATLAB R2016b+ or GNU Octave 7.1+
@@ -283,6 +296,11 @@ MATLAB use `setenv('ICCDEV_BUILD_DIR', build_dir)`; in Windows PowerShell use
   `Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc`. Staged QA must put
   the bundle root on
   MATLAB's `PATH` before `run_local_qa()` so the flat packaged tool is found.
+- Linux and macOS release artifacts must retain their expected MEX extension,
+  the complete `matlab/` package and QA tree, the native tools used by MATLAB
+  tests, and the repository-relative gamma, HEIF, and colorimetry fixtures.
+  Run the staged MATLAB QA on the native platform before artifact upload, then
+  verify the downloaded payloads again in the release packaging job.
 - MATLAB Desktop can start in the repository root or `matlab/`. Derive the root
   by checking for `Build/Cmake`; do not blindly append another `matlab` segment
   to `pwd`.
@@ -304,6 +322,18 @@ MATLAB use `setenv('ICCDEV_BUILD_DIR', build_dir)`; in Windows PowerShell use
   Always close profiles explicitly before clearing MEX state.
 - MATLAB's MEX compiler may differ from the system compiler.
   Use `mex -setup C++` to configure if build fails.
+- MATLAB loads its bundled `MSVCP140.dll`, which can be older than the MSVC
+  toolset that builds the MEX. Keep `/D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR`
+  in the Windows `build_mex.m` flags and do not add C++ synchronization
+  primitives to the gateway; MATLAB serializes MEX entry-point calls.
+- Linux MATLAB preloads its bundled `libstdc++.so.6` and prepends it to
+  `LD_LIBRARY_PATH`. MATLAB's stock Linux `LINKLIBS` names `-lstdc++`, which
+  overrides `-static-libstdc++`; keep the Linux `build_mex.m` `LINKLIBS`
+  override and its `readelf` check that the gateway has no shared
+  `libstdc++` dependency. Launch native tools through
+  `iccdev.qa.native_library_path` so
+  they use staged libraries and the host C++ runtime (covered by
+  `test_native_library_path`).
 - Canonical workflow and troubleshooting: `docs/matlab-bindings.md`.
 - Repeatable agent workflow: `.github/skills/matlab-bindings-test/SKILL.md`.
 - Keep `matlab.prj`, `matlab/resources/`, and MATLAB-generated project control
