@@ -36,6 +36,8 @@ class RebasePolicyTests(unittest.TestCase):
                     if step.get("name") == "Publish manual validation status")
         self.assertIn("always()", step["if"])
         self.assertIn("github.event_name == 'workflow_dispatch'", step["if"])
+        self.assertIn("inputs.pr_number == ''", step["if"])
+        self.assertIn("needs.detect-src.outputs.target_sha != ''", step["if"])
         self.assertEqual(step["env"]["TARGET_SHA"],
                          "${{ needs.detect-src.outputs.target_sha || github.sha }}")
         mock = 'gh() { printf "%s\\n" "$@"; }; '
@@ -119,7 +121,7 @@ gh() {
                     PR_DATA=json.dumps({
                         "isCrossRepository": False, "headRefOid": "head",
                         "isDraft": False, "mergeStateStatus": "CLEAN",
-                        "reviewDecision": "APPROVED",
+                        "reviewDecision": "",
                         "labels": [{"name": label} for label in labels],
                     }),
                 )
@@ -158,6 +160,8 @@ gh() {
         )[0]
         self.assertIn("--paginate --slurp", run)
         self.assertIn("commits/$head/check-runs", run)
+        self.assertNotIn("reviewDecision", run)
+        self.assertNotIn("APPROVED", run)
         for conclusion, expected in (
             (None, "pending"),
             ("skipped", "pending"),
