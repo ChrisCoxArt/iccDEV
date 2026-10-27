@@ -62,6 +62,29 @@ def test_release_publication_is_not_cancelled():
     assert workflow["concurrency"]["cancel-in-progress"] is False
 
 
+def test_release_windows_build_uses_manifest_dependencies():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ci-latest-release.yml").read_text(encoding="ascii")
+    )
+    windows_steps = {
+        step["name"]: step for step in workflow["jobs"]["windows"]["steps"]
+    }
+    build = windows_steps["Install manifest dependencies and build"]["run"]
+    assert "vcpkg integrate install" in build
+    assert "vcpkg install" in build
+    assert "(Get-Command vcpkg -CommandType Application -ErrorAction Stop).Source" in build
+    assert "$env:VCPKG_ROOT = Split-Path -Parent $vcpkgExecutable" in build
+    assert "Join-Path $env:VCPKG_ROOT 'scripts\\buildsystems\\vcpkg.cmake'" in build
+    assert "vcpkg toolchain file not found: $vcpkgToolchain" in build
+    assert "cmake --preset vs2022-x64 -B msvc -S Build/Cmake" in build
+    assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in build
+    assert "cmake --build msvc --config Release --parallel" in build
+    assert "vcpkg-win-2324-libheif-deps" not in build
+    assert "VCPKG_MANIFEST_MODE=OFF" not in build
+    assert 'fullfile(pwd, \'msvc\')' in windows_steps["Build MATLAB MEX gateway"]["with"]["command"]
+    assert '"msvc/bin/Release"' in windows_steps["Stage bundle into Testing directory"]["run"]
+
+
 def test_wasm_workflow_regression_runs_in_shared_wheel_gate():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/_build-python-wheels.yml").read_text(
@@ -113,6 +136,7 @@ def test_release_uses_opt_in_npm_trusted_publishing():
 
     release = workflow["jobs"]["release"]
     assert release["permissions"]["id-token"] == "write"
+    release_step_names = [step["name"] for step in release["steps"]]
     steps = {step["name"]: step for step in release["steps"]}
     setup_node = steps["Set up Node.js for npm publication"]
     assert setup_node["uses"] == "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38"
@@ -131,6 +155,9 @@ def test_release_uses_opt_in_npm_trusted_publishing():
     assert "NODE_AUTH_TOKEN" not in publish["env"]
 
     smoke = steps["Verify public iccdev npm package"]
+    assert smoke["continue-on-error"] is True
+    assert "!cancelled()" in smoke["if"]
+    assert "steps.npm_iccdev.outcome == 'success'" in smoke["if"]
     assert "for attempt in {1..30}" in smoke["run"]
     assert 'npm pack --pack-destination "$npm_environment"' in smoke["run"]
     assert "Published npm package tarball was not available after 450 seconds" in smoke["run"]
@@ -139,3 +166,20 @@ def test_release_uses_opt_in_npm_trusted_publishing():
 
     summary = steps["Summary Report"]
     assert summary["env"]["NPM_ICCDEV_OUTCOME"] == "${{ steps.npm_iccdev.outcome }}"
+    last_publication = max(
+        release_step_names.index(name)
+        for name in (
+            "Publish iccdev to PyPI",
+            "Publish iccdev-mcp to PyPI",
+            "Publish iccdev to npm",
+        )
+    )
+    first_verification = min(
+        release_step_names.index(name)
+        for name in (
+            "Verify public iccdev installation",
+            "Verify public iccdev-mcp installation",
+            "Verify public iccdev npm package",
+        )
+    )
+    assert last_publication < first_verification < release_step_names.index("Summary Report")

@@ -158,10 +158,18 @@ def test_release_uses_opt_in_trusted_pypi_publication_and_public_smoke():
     assert publish_mcp["with"]["packages-dir"] == "pypi-iccdev-mcp/"
     assert publish_mcp["with"]["attestations"] is True
 
-    iccdev_smoke = steps["Verify public iccdev installation"]["run"]
+    iccdev_smoke_step = steps["Verify public iccdev installation"]
+    assert iccdev_smoke_step["continue-on-error"] is True
+    assert "steps.pypi_iccdev.outcome == 'success'" in iccdev_smoke_step["if"]
+    iccdev_smoke = iccdev_smoke_step["run"]
     assert "https://pypi.org/simple" in iccdev_smoke
     assert "ICCDEV_REQUIRE_INSTALLED_PACKAGE=1" in iccdev_smoke
-    mcp_smoke = steps["Verify public iccdev-mcp installation"]["run"]
+    mcp_smoke_step = steps["Verify public iccdev-mcp installation"]
+    assert mcp_smoke_step["continue-on-error"] is True
+    assert "!cancelled()" in mcp_smoke_step["if"]
+    assert "steps.pypi_mcp.outcome == 'success'" in mcp_smoke_step["if"]
+    assert "steps.setup_public_iccdev_python.outcome == 'success'" in mcp_smoke_step["if"]
+    mcp_smoke = mcp_smoke_step["run"]
     assert "https://pypi.org/simple" in mcp_smoke
     assert "iccdev-mcp-package-smoke.py" in mcp_smoke
 
