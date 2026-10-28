@@ -50,6 +50,7 @@
 #include <cstring> /* C strings strcpy, memcpy ... */
 #include <cmath>
 #include <limits>
+#include "IccFileUtil.h"
 
 #ifdef WIN32
 #include <windows.h>
@@ -364,8 +365,13 @@ bool CIccFormulaCurveSegmentXml::ParseXml(xmlNode *pNode, std::string &parseStr)
 
   CIccFloatArray args;
 
-  if (!args.ParseArray(pNode->children))
+  // The array reader refuses a missing, malformed, non-finite or out-of-range
+  // value (#2884), so a parameter that reaches the checks below is finite;
+  // this refusal used to give no diagnostic at all.
+  if (!args.ParseArray(pNode->children)) {
+    parseStr += "Missing, non-finite or malformed parameter in FormulaSegment\n";
     return false;
+  }
 
   // The binary encoding has no parameter count: the function type fixes it
   // (ICC.2-2023 Table 111).  Extra values used to be dropped silently, so the
@@ -373,13 +379,6 @@ bool CIccFormulaCurveSegmentXml::ParseXml(xmlNode *pNode, std::string &parseStr)
   if (args.GetSize()!=m_nParameters) {
     parseStr += "FormulaSegment parameter count does not match its FunctionType\n";
     return false;
-  }
-
-  for (icUInt32Number i=0; i<m_nParameters; i++) {
-    if (!std::isfinite(args.GetBuf()[i])) {
-      parseStr += "Non-finite parameter in FormulaSegment\n";
-      return false;
-    }
   }
 
   free(m_params);
@@ -2005,8 +2004,12 @@ bool CIccMpeXmlTintArray::ParseXml(xmlNode *pNode, std::string &parseStr)
       xmlAttr *attr;
 
       if (pXmlTag->ParseXml(pNode->children, parseStr)) {
-        if ((attr=icXmlFindAttr(pNode, "reserved"))) {
-          sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
+        // sscanf("%u") kept the leading digits of "7x" (#2839).
+        if ((attr=icXmlFindAttr(pNode, "reserved")) &&
+            !icXmlParseU32(icXmlAttrValue(attr), pTag->m_nReserved)) {
+          parseStr += "Invalid tint array reserved\n";
+          delete pTag;
+          return false;
         }
         SetArray((CIccTagNumArray*)pTag);
       }
@@ -2130,27 +2133,17 @@ bool CIccXmlToneMapFunc::ParseXml(xmlNode* pNode, std::string& parseStr)
   // is what <ToneMapFunction FunctionType="0"/> gives: the most common
   // malformed spelling was the one left without a diagnostic when the short
   // list below was given one (#2609).
+  // The array reader also refuses a non-finite, malformed or out-of-range
+  // value (#2884), which is why no finiteness check follows: "nan" used to
+  // arrive here as a real NaN and needed one (#2619).
   if (!args.ParseArray(pNode->children)) {
-    parseStr += "Missing parameters in Tone Map Function\n";
+    parseStr += "Missing, non-finite or malformed parameter in Tone Map Function\n";
     return false;
   }
 
   if (args.GetSize() < m_nParameters) {
     parseStr += "Too few parameters in Tone Map Function\n";
     return false;
-  }
-
-  // icParseArrayValue() saturates an out-of-range magnitude to the float32
-  // limit, so "1e308" arrives finite here -- but it returns a real NaN for the
-  // literal "nan", which Validate() does not look at.  iccToJson then writes
-  // that parameter back as null, a document the JSON reader refuses.  The
-  // formula segment above has refused a non-finite parameter since #2547
-  // (#2619).
-  for (icUInt16Number i = 0; i < m_nParameters; i++) {
-    if (!std::isfinite(args.GetBuf()[i])) {
-      parseStr += "Non-finite parameter in Tone Map Function\n";
-      return false;
-    }
   }
 
   free(m_params);
@@ -2977,7 +2970,9 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
           if ((attr = icXmlFindAttr(pNext, "Name"))) {
             std::string name = icXmlAttrValue(attr);
             if (!validName(name.c_str())) {
-              parseStr += "Invalid calc element variable name '" + name + "'\n'";
+              // A name that fails validName() can hold anything, CR, LF and escape
+              // sequences included, and the report reaches a console or log (#2851, #2852).
+              parseStr += "Invalid calc element variable name '" + icSanitizeConsoleText(name) + "'\n";
               return false;
             }
 
@@ -3025,7 +3020,7 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
                 icUInt16Number extra = 0;
                 std::string member = parse.GetName();
                 if (!validName(member.c_str())) {
-                  parseStr += "Invalid member name '" + member + "' for calc element variable '" + name + "'\n";
+                  parseStr += "Invalid member name '" + icSanitizeConsoleText(member) + "' for calc element variable '" + name + "'\n";
                   return false;
                 }
                 size = 0; extra = 0;
@@ -3071,11 +3066,11 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
           if ((attr = icXmlFindAttr(pNext, "Name"))) {
             std::string name = icXmlAttrValue(attr);
             if (!validName(name.c_str())) {
-              parseStr += "Invalid Macro name '" + name + "'\n'";
+              parseStr += "Invalid Macro name '" + icSanitizeConsoleText(name) + "'\n";
               return false;
             }
             if (!pNext->children || !pNext->children->content || !pNext->children->content[0]) {
-              parseStr += "Missing content for macro '" + name + "'\n'";
+              parseStr += "Missing content for macro '" + name + "'\n";
               return false;
             }
             MacroMap::iterator m = m_macroMap.find(name);
@@ -3098,7 +3093,7 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
                 icUInt16Number extra = 0;
                 std::string member = parse.GetName();
                 if (!validName(member.c_str())) {
-                  parseStr += "Invalid local name '" + member + "' for calc element macro '" + name + "'\n";
+                  parseStr += "Invalid local name '" + icSanitizeConsoleText(member) + "' for calc element macro '" + name + "'\n";
                   return false;
                 }
                 size = 0; extra = 0;
@@ -3146,7 +3141,7 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
         if ((attr = icXmlFindAttr(pNext, "Name"))) {
           name = icXmlAttrValue(attr);
           if (!validName(name.c_str())) {
-            parseStr += "Invalid SubElement name '" + name + "'\n'";
+            parseStr += "Invalid SubElement name '" + icSanitizeConsoleText(name) + "'\n";
             return false;
           }
         }
@@ -3186,8 +3181,13 @@ bool CIccMpeXmlCalculator::ParseImport(xmlNode *pNode, std::string importPath, s
               // The sub-element's own node, not the enclosing CalculatorElement:
               // reading pNode lost every sub-element's Reserved and copied the
               // calculator's onto each of them.
-              if ((attr = icXmlFindAttr(pNext, "Reserved"))) {
-                sscanf(icXmlAttrValue(attr), "%u", &pMpe->m_nReserved);
+              // sscanf("%u") kept the leading digits of "0x" (#2840).
+              if ((attr = icXmlFindAttr(pNext, "Reserved")) &&
+                  !icXmlParseU32(icXmlAttrValue(attr), pMpe->m_nReserved)) {
+                parseStr += std::string("Invalid Reserved on calculator sub-element of type ") +
+                            pMpe->GetClassName() + "\n";
+                delete pMpe;
+                return false;
               }
 
               if (name.empty()) {

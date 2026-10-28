@@ -47,13 +47,17 @@
 #include "IccStructFactory.h"
 #include "IccArrayFactory.h"
 #include "IccConvertUTF.h"
+#include "IccFileUtil.h"
 #include <new>     /* std::nothrow */
 #include <cstring> /* C strings strcpy, memcpy ... */
 #include <set>
+#include <cerrno>   // errno, ERANGE for the dataType flag
+#include <cstdlib>  // strtoul
 #include <map>
 #include <sstream>  // Make sure to include this header
 #include <iomanip>  // Include this header for setw and setfill
 #include <cmath>    // std::isfinite for NaN/Inf-safe float->int casts
+#include <cctype>   // isspace
 
 #ifdef USEICCDEVNAMESPACE
 namespace iccDEV {
@@ -1058,6 +1062,72 @@ bool CIccTagXmlNamedColor2::ToXml(std::string &xml, std::string blanks/* = ""*/)
 }
 
 
+// One named colour's device coordinates: exactly nCoords values, each within
+// its encoding's range -- 0..255 for int8, 0..65535 for int16, 0.0..1.0 for
+// float.  CIccUInt16Array::ParseArray() clamped what it read, so -1 65536 loaded
+// as 0 65535, turned a token it could not read into 0, and the loop that
+// copied the values padded a short list with zeros and dropped the end of a
+// long one -- all without a word (#2832).  The binary form is a uInt16Number
+// per coordinate (ICC.1:2022 10.17), so a value outside the range has no
+// encoding; refuse it rather than change it.
+static bool icXmlParseNamedDeviceCoords(const char *szCoords, icUInt32Number nCoords,
+                                        const char *szEncoding, icFloatNumber *pCoords,
+                                        std::string &parseStr)
+{
+  const bool bInt8 = !strcmp(szEncoding, "int8");
+  const bool bInt16 = !strcmp(szEncoding, "int16");
+  const bool bFloat = !strcmp(szEncoding, "float");
+  if (!bInt8 && !bInt16 && !bFloat)
+    return false;
+
+  icUInt32Number n = 0;
+  const char *p = szCoords;
+  for (;;) {
+    while (*p && isspace((unsigned char)*p))
+      p++;
+    if (!*p)
+      break;
+    const char *tokStart = p;
+    while (*p && !isspace((unsigned char)*p))
+      p++;
+    std::string tok(tokStart, p - tokStart);
+
+    if (n >= nCoords) {
+      parseStr += "More device coordinates than CountOfDeviceCoords in a named colour\n";
+      return false;
+    }
+
+    bool ok;
+    if (bInt8) {
+      icUInt8Number v = 0;
+      ok = icXmlParseU8(tok.c_str(), v);
+      pCoords[n] = (icFloatNumber)v / 255.0f;
+    }
+    else if (bInt16) {
+      icUInt16Number v = 0;
+      ok = icXmlParseU16(tok.c_str(), v);
+      pCoords[n] = (icFloatNumber)v / 65535.0f;
+    }
+    else {
+      icFloatNumber v = 0;
+      ok = icXmlParseFloat(tok.c_str(), v) && v >= 0.0f && v <= 1.0f;
+      pCoords[n] = v;
+    }
+    if (!ok) {
+      parseStr += "Invalid or out-of-range named colour device coordinate '" +
+                  icSanitizeConsoleText(tok) + "'\n";
+      return false;
+    }
+    n++;
+  }
+
+  if (n != nCoords) {
+    parseStr += "Fewer device coordinates than CountOfDeviceCoords in a named colour\n";
+    return false;
+  }
+  return true;
+}
+
 bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
   pNode = icXmlFindNode(pNode, "NamedColors");
@@ -1075,7 +1145,10 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string &parseStr)
       szPrefix && szSufix) {
         std::string str;
 
-        sscanf(szVendorFlags, "%x", &m_nVendorFlags);
+        if (!icXmlParseHex32(szVendorFlags, m_nVendorFlags)) {
+          parseStr += "Invalid NamedColors VendorFlag\n";
+          return false;
+        }
 
         icXmlCopyFixedString(m_szPrefix, sizeof(m_szPrefix), icUtf8ToAnsi(str, szPrefix));
 
@@ -1200,66 +1273,25 @@ bool CIccTagXmlNamedColor2::ParseXml(xmlNode *pNode, std::string &parseStr)
           if (szName) {
             icXmlCopyFixedString(pNamedColor->rootName, sizeof(pNamedColor->rootName), icUtf8ToAnsi(str, szName));
 
-            if (m_nDeviceCoords && pNode->children) {
-              if (!strcmp(szDeviceEncoding, "int8")) {
-                CIccUInt8Array coords;
-
-                coords.ParseArray(pNode->children);
-                icUInt8Number *pBuf = coords.GetBuf();
-
-                // CWE-400/CWE-834: clamp the field to the same load-time bound as
-                // the float branch below (deviceCoords[] is sized to it) so a
-                // corrupted count can't drive an out-of-range copy.  All three
-                // encoding branches share the single kMaxNamedColorDeviceCoords
-                // declared at the top of this parse block -- the same bound
-                // CountOfDeviceCoords was accepted against above -- rather than
-                // each redeclaring its own, which would shadow it (-Wshadow is
-                // -Werror in the strict build profiles).
-                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
-                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
-                icUInt32Number j;
-                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
-                  pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j] / 255.0f;
-                }
+            if (m_nDeviceCoords) {
+              // CWE-400/CWE-834: deviceCoords[] is sized to kMaxNamedColorDeviceCoords,
+              // the bound CountOfDeviceCoords was accepted against above.
+              icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
+                                            ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
+              // The values may be split over several text or CDATA nodes with
+              // comments between them, as CIccXmlArrayType::ParseArray() allows;
+              // join them the same way.
+              std::string coords;
+              for (xmlNode *pText = pNode->children; pText; pText = pText->next) {
+                if (pText->type == XML_COMMENT_NODE)
+                  continue;
+                if ((pText->type != XML_TEXT_NODE && pText->type != XML_CDATA_SECTION_NODE) ||
+                    !pText->content)
+                  break;
+                coords += (const char*)pText->content;
               }
-              else if (!strcmp(szDeviceEncoding, "int16")) {
-                CIccUInt16Array coords;
-
-                coords.ParseArray(pNode->children);
-                icUInt16Number *pBuf = coords.GetBuf();
-
-                // CWE-400/CWE-834: clamp the field to the same load-time bound as
-                // the float branch below (deviceCoords[] is sized to it) so a
-                // corrupted count can't drive an out-of-range copy.  Shares the
-                // single kMaxNamedColorDeviceCoords declared at the top of this
-                // parse block, as the int8 branch above does.
-                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
-                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
-                icUInt32Number j;
-                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
-                  pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j] / 65535.0f;
-                }
-              }
-              else if (!strcmp(szDeviceEncoding, "float")) {
-                CIccFloatArray coords;
-
-                coords.ParseArray(pNode->children);
-                icFloatNumber *pBuf = coords.GetBuf();
-
-                // CWE-400/CWE-834: m_nDeviceCoords is capped at
-                // kMaxNamedColorDeviceCoords on load and sizes deviceCoords[];
-                // clamp to that bound so a corrupted count can't drive an
-                // unbounded or out-of-range copy.  Shares the single
-                // kMaxNamedColorDeviceCoords declared at the top of this parse
-                // block, as the int8/int16 branches above do.
-                icUInt32Number nDevCoords = (m_nDeviceCoords > kMaxNamedColorDeviceCoords)
-                                              ? kMaxNamedColorDeviceCoords : m_nDeviceCoords;
-                icUInt32Number j;
-                for (j = 0; j < nDevCoords && j < coords.GetSize(); j++) {
-                  pNamedColor->deviceCoords[j] = (icFloatNumber)pBuf[j];
-                }
-              }
-              else
+              if (!icXmlParseNamedDeviceCoords(coords.c_str(), nDevCoords, szDeviceEncoding,
+                                               pNamedColor->deviceCoords, parseStr))
                 return false;
             }
 
@@ -1635,6 +1667,14 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
               icUInt32Number pos = 0;
               for (pRow=pChild->children; pRow; pRow=pRow->next) {
                 if (pRow->type == XML_ELEMENT_NODE && !icXmlStrCmp(pRow->name, "SparseRow")) {
+                  // Init() sized the row-start table for nRows+1 entries and the
+                  // column storage for nRows rows.  Each SparseRow writes
+                  // rowstart[iRow] and row iRow's columns, so one more SparseRow
+                  // than the matrix declares wrote past both (#2582).
+                  if (iRow >= nRows) {
+                    parseStr += "More SparseRow elements than SparseMatrix rows\n";
+                    return false;
+                  }
                   xmlNode *pIdx = icXmlFindNode(pRow->children, "ColIndices");
                   xmlNode *pData = icXmlFindNode(pRow->children, "ColData");
 
@@ -2364,11 +2404,16 @@ bool CIccTagXmlTagData::ToXml(std::string &xml, std::string blanks/* = ""*/)
 {
   const size_t bufSize = 60;
   char buf[bufSize];
-  std::string szFlag("ASCII");
-
-  if ( m_nDataFlag & icBinaryData )
-    szFlag = "binary";
-  snprintf (buf, bufSize, "<Data Flag=\"%s\">\n", szFlag.c_str());
+  // 0 and 1 have names.  Any other value -- reserved in ICC.1, or a flag a
+  // vendor wrote anyway -- is written as its hex value: the "binary unless
+  // bit 0 is clear" test used to write Apple's 0x01000000 as "ASCII", so an
+  // unedited tag changed on the way through XML (#2846).
+  if (m_nDataFlag == icAsciiData)
+    snprintf(buf, bufSize, "<Data Flag=\"ASCII\">\n");
+  else if (m_nDataFlag == icBinaryData)
+    snprintf(buf, bufSize, "<Data Flag=\"binary\">\n");
+  else
+    snprintf(buf, bufSize, "<Data Flag=\"0x%08x\">\n", (unsigned int)m_nDataFlag);
   xml += blanks + buf;
   icXmlDumpHexData(xml, blanks+" ", m_pData, m_nSize);
   xml += blanks + "</Data>\n";
@@ -2381,10 +2426,30 @@ bool CIccTagXmlTagData::ParseXml(xmlNode *pNode, std::string &parseStr)
 {
   pNode = icXmlFindNode(pNode, "Data");
   if (pNode && pNode->children && pNode->children->content) {
-    const icChar *szFlag = icXmlAttrValue(pNode, "Flag");    
-    m_nDataFlag = icAsciiData;
-    if (!strcmp(szFlag,"binary"))
+    // "ASCII" (or no Flag), "binary", or the 0x-prefixed hex value ToXml()
+    // writes for any other flag word.  Anything else used to read as ASCII
+    // (#2846).
+    const icChar *szFlag = icXmlAttrValue(pNode, "Flag");
+    if (!*szFlag || !strcmp(szFlag, "ASCII"))
+      m_nDataFlag = icAsciiData;
+    else if (!strcmp(szFlag, "binary"))
       m_nDataFlag = icBinaryData;
+    else {
+      char *end = NULL;
+      unsigned long v = 0;
+      bool ok = (szFlag[0] == '0' && (szFlag[1] == 'x' || szFlag[1] == 'X') &&
+                 szFlag[2] && strchr("0123456789abcdefABCDEF", szFlag[2]));
+      if (ok) {
+        errno = 0;
+        v = strtoul(szFlag + 2, &end, 16);
+        ok = (*end == '\0' && errno != ERANGE && v <= 0xFFFFFFFFul);
+      }
+      if (!ok) {
+        parseStr += std::string("Invalid dataType Data Flag \"") + icSanitizeConsoleText(szFlag) + "\"\n";
+        return false;
+      }
+      m_nDataFlag = (icDataBlockType)v;
+    }
 
     if (!icXmlValidHexData((const char *)pNode->children->content)) {
       parseStr += "Malformed hex in dataType Data\n";
@@ -4388,6 +4453,14 @@ bool icCurvesFromXml(LPIccCurve *pCurve, icUInt32Number nChannels, xmlNode *pNod
       else if (!icXmlStrCmp(pCurveNode->name, "ParametricCurve")) {
         pCurveTag = new (std::nothrow) CIccTagXmlParametricCurve();
       }
+      else {
+        // Anything else in a curve list was skipped without a word (#2838).
+        parseStr += std::string("Unexpected ") + (const char*)pCurveNode->name +
+                    " element in a curve list at line ";
+        snprintf(num, numSize, "%d\n", pCurveNode->line);
+        parseStr += num;
+        return false;
+      }
 
       if (pCurveTag) {
         IIccExtensionTag *pExt = pCurveTag->GetExtension();
@@ -4436,6 +4509,17 @@ bool icCurvesFromXml(LPIccCurve *pCurve, icUInt32Number nChannels, xmlNode *pNod
     }
   }
   
+  // The loop stops once nChannels curves are read; a curve beyond them was
+  // dropped and the profile still "parsed and saved correctly" (#2838).
+  for (; pCurveNode; pCurveNode = pCurveNode->next) {
+    if (pCurveNode->type == XML_ELEMENT_NODE) {
+      parseStr += "More curves than channels in a curve list at line ";
+      snprintf(num, numSize, "%d\n", pCurveNode->line);
+      parseStr += num;
+      return false;
+    }
+  }
+
   if (i != nChannels) {
     parseStr += "Channel number mismatch!\n";
   }
@@ -5046,6 +5130,17 @@ bool icMBBFromXml(CIccMBB *pMBB, xmlNode *pNode, icConvertType nType, std::strin
 
   for (; pNode; pNode = pNode->next) {
     if (pNode->type == XML_ELEMENT_NODE) {
+      // Each of these may appear once.  A second one was skipped by the
+      // !Get...() tests below and left out of the profile silently (#2838).
+      if ((!icXmlStrCmp(pNode->name, "ACurves") && pMBB->GetCurvesA()) ||
+          (!icXmlStrCmp(pNode->name, "BCurves") && pMBB->GetCurvesB()) ||
+          (!icXmlStrCmp(pNode->name, "MCurves") && pMBB->GetCurvesM()) ||
+          (!icXmlStrCmp(pNode->name, "Matrix") && pMBB->GetMatrix()) ||
+          (!icXmlStrCmp(pNode->name, "CLUT") && pMBB->GetCLUT())) {
+        parseStr += std::string("Error! - More than one ") + (const char*)pNode->name +
+                    " element in a LUT tag.\n";
+        return false;
+      }
       if (!icXmlStrCmp(pNode->name, "ACurves") && !pMBB->GetCurvesA()) {
         LPIccCurve *pCurves = pMBB->NewCurvesA();
         if (!icCurvesFromXml(pCurves, !pMBB->IsInputB() ? nIn : nOut, pNode->children, nType, parseStr)) {
@@ -5299,8 +5394,11 @@ bool CIccTagXmlMultiProcessElement::ParseElement(xmlNode *pNode, std::string &pa
       CIccMpeXml* pXmlMpe = (CIccMpeXml*)pExt;
 
       if (pXmlMpe->ParseXml(pNode, parseStr)) {
-        if ((attr=icXmlFindAttr(pNode, "Reserved"))) {
-          sscanf(icXmlAttrValue(attr), "%u", &pMpe->m_nReserved);
+        if ((attr=icXmlFindAttr(pNode, "Reserved")) &&
+            !icXmlParseU32(icXmlAttrValue(attr), pMpe->m_nReserved)) {
+          parseStr += std::string("Invalid Reserved on element of type ") + pMpe->GetClassName() + "\n";
+          delete pMpe;
+          return false;
         }
 
         ptr.ptr = pMpe;
@@ -5961,8 +6059,15 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
         CIccTagXml* pXmlTag = (CIccTagXml*)pExt;
 
         if (pXmlTag->ParseXml(pTypeNode->children, parseStr)) {
-          if ((attr = icXmlFindAttr(pTypeNode, "reserved"))) {
-            sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
+          if ((attr = icXmlFindAttr(pTypeNode, "reserved")) &&
+              !icXmlParseU32(icXmlAttrValue(attr), pTag->m_nReserved)) {
+            parseStr += "Invalid reserved on \"";
+            parseStr += (const char*)pTypeNode->name;
+            parseStr += "\" (";
+            parseStr += nodeName;
+            parseStr += ") Tag\n";
+            delete pTag;
+            return false;
           }
           if (!AttachElem(sigTag, pTag)) {
             parseStr += "Unable to Attach \"";
@@ -6022,8 +6127,13 @@ bool CIccTagXmlStruct::ParseTag(xmlNode *pNode, std::string &parseStr)
       CIccTagXml* pXmlTag = (CIccTagXml*)pExt;
 
       if (pXmlTag->ParseXml(pNode->children, parseStr)) {
-        if ((attr = icXmlFindAttr(pNode, "reserved"))) {
-          sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
+        if ((attr = icXmlFindAttr(pNode, "reserved")) &&
+            !icXmlParseU32(icXmlAttrValue(attr), pTag->m_nReserved)) {
+          parseStr += "Invalid reserved on \"";
+          parseStr += info.GetTagTypeSigName(sigType);
+          parseStr += "\" Tag\n";
+          delete pTag;
+          return false;
         }
 
         bool bAttached = false;
@@ -6300,8 +6410,13 @@ bool CIccTagXmlArray::ParseXml(xmlNode *pNode, std::string &parseStr)
         CIccTagXml* pXmlTag = (CIccTagXml*)pExt;
 
         if (pXmlTag->ParseXml(tagNode->children, parseStr)) {
-          if ((attr=icXmlFindAttr(tagNode, "reserved"))) {
-            sscanf(icXmlAttrValue(attr), "%u", &pTag->m_nReserved);
+          if ((attr=icXmlFindAttr(tagNode, "reserved")) &&
+              !icXmlParseU32(icXmlAttrValue(attr), pTag->m_nReserved)) {
+            parseStr += "Invalid reserved on xml node named  \"";
+            parseStr += (icChar*)tagNode->name;
+            parseStr += "\"\n";
+            delete pTag;
+            return false;
           }
 
           if (!m_TagVals[n].ptr)

@@ -29,13 +29,17 @@ on:
       - master
     types:
       - opened
-      - synchronize
       - reopened
       - ready_for_review
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'Optional open PR number for same-repository fast-lane validation'
+        description: 'Optional open same-repository PR number to validate its exact head'
+        required: false
+        default: ''
+        type: string
+      expected_head_sha:
+        description: 'Optional exact PR head SHA required by a trusted dispatcher'
         required: false
         default: ''
         type: string
@@ -126,7 +130,7 @@ jobs:
       pr_number: ${{ steps.diffcheck.outputs.pr_number }}
 
     steps:
-      - uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 50  # Increased from 2 to allow merge-base detection
           # Disable unsafe fetch options
@@ -134,11 +138,12 @@ jobs:
 
       - name: Resolve workflow-dispatch PR
         id: dispatch-pr
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
           DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -158,7 +163,11 @@ jobs:
           sanitize_line() { escape_html "$1"; }
 
           if [[ ! "$DISPATCH_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
-            echo "workflow_dispatch fast lane requires numeric pr_number" >&2
+            echo "workflow_dispatch requires numeric pr_number" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_HEAD_SHA" && ! "$EXPECTED_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "workflow_dispatch expected_head_sha must be an exact commit SHA" >&2
             exit 1
           fi
 
@@ -182,7 +191,7 @@ jobs:
           head_sha="$(jq -r '.head.sha' <<< "$pr_json")"
           target_repository="$(jq -r '.head.repo.full_name' <<< "$pr_json")"
           if [ "$target_repository" != "$GH_REPOSITORY" ]; then
-            echo "workflow_dispatch fast lane requires a same-repository PR" >&2
+            echo "workflow_dispatch requires a same-repository PR" >&2
             exit 1
           fi
           for sha in "$base_sha" "$head_sha"; do
@@ -191,6 +200,10 @@ jobs:
               exit 1
             fi
           done
+          if [[ -n "$EXPECTED_HEAD_SHA" && "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+            echo "PR head changed after dispatch request" >&2
+            exit 1
+          fi
 
           {
             printf 'base_ref=%s\n' "$(sanitize_line "$base_ref")"
@@ -200,7 +213,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"  # elements-sanitized
 
       - name: Checkout workflow-dispatch PR head
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -215,7 +228,7 @@ jobs:
       # Checkout the trusted base commit into a separate path so we do not
       # source code from the PR workspace (untrusted).
       - name: Checkout base commit (trusted sanitizers)
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Use the base commit SHA to ensure we fetch the exact trusted version.
           ref: ${{ github.event.pull_request.base.sha || 'master' }}
@@ -225,7 +238,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout resolved workflow-dispatch base
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -445,6 +458,10 @@ jobs:
             pr_number="$number"
           }
 
+          if [ -n "$DISPATCH_PR_NUMBER" ]; then
+            resolve_dispatch_pr "$DISPATCH_PR_NUMBER"
+          fi
+
           case "$ci_scope" in
             full|source)
               include_windows=true
@@ -455,9 +472,6 @@ jobs:
             fast-lane)
               if ! validate_fast_lane_actor "$GH_ACTOR"; then
                 exit 1
-              fi
-              if [ -n "$DISPATCH_PR_NUMBER" ]; then
-                resolve_dispatch_pr "$DISPATCH_PR_NUMBER"
               fi
               if ! require_same_repository_pr; then
                 exit 1
@@ -775,13 +789,13 @@ jobs:
       pull-requests: read  # Required to render trusted PR summary details.
     steps:
       - name: Checkout repository (for shared sanitize helpers)
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
 
       - name: Checkout base commit (trusted sanitizers)
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || 'master' }}
           path: base
@@ -789,7 +803,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout resolved workflow-dispatch base
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -970,7 +984,7 @@ jobs:
 
     steps:
       - name: Check out trusted sanitizer helper
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # preflight: allow-codeql-actions reason=trusted-base-sanitizer-checkout
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
@@ -980,7 +994,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout resolved workflow-dispatch base
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -1107,14 +1121,14 @@ jobs:
     steps:
       - name: Checkout consumer source
         # preflight: allow-codeql-actions reason=readonly-build-target-checkout
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.detect-src.outputs.target_sha }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Checkout trusted sanitizer helper
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || 'master' }}
           path: trusted-base
@@ -1123,7 +1137,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout resolved workflow-dispatch base
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -1195,6 +1209,9 @@ jobs:
   finalize:
     name: PR Summary
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write  # Publish actual manual validation to branch protection.
     needs:
       - detect-src
       - setup
@@ -1210,13 +1227,13 @@ jobs:
       - example-project
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
-      - uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 2
           persist-credentials: false
 
       - name: Checkout base commit (trusted sanitizers)
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || 'master' }}
           path: base
@@ -1224,7 +1241,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout resolved workflow-dispatch base
-        if: github.event_name == 'workflow_dispatch' && inputs.ci_scope == 'fast-lane' && inputs.pr_number != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -1418,3 +1435,29 @@ jobs:
           if [ "$job_res" != "success" ]; then
             exit 1
           fi
+
+      # preflight: allow-token-exposure reason=publish-validated-manual-commit-status
+      - name: Publish manual validation status
+        if: >-
+          ${{ always() && github.event_name == 'workflow_dispatch' &&
+              (inputs.pr_number == '' || needs.detect-src.outputs.target_sha != '') }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ needs.detect-src.outputs.target_sha || github.sha }}
+          VALIDATION_RESULT: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          state=failure
+          if [[ "$VALIDATION_RESULT" == "success" ]]; then
+            state=success
+          fi
+          gh api --method POST "repos/$GH_REPO/statuses/$TARGET_SHA" \
+            -f context="PR Summary" -f state="$state" \
+            -f description="Manual validation: $VALIDATION_RESULT" \
+            -f target_url="$RUN_URL"

@@ -46,6 +46,24 @@ permissions:
           - iccdev
           - iccdev-mcp
           - both
+      npm_packages:
+        description: Validated npm distributions to publish with OIDC
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - iccdev
+      npm_version:
+        description: SemVer version for the selected npm distribution
+        required: false
+        default: ""
+        type: string
+      npm_dist_tag:
+        description: npm dist-tag for the selected distribution
+        required: true
+        default: latest
+        type: string
 
 concurrency:
   group: "latest-release-${{ github.workflow }}-${{ github.ref }}"
@@ -62,7 +80,7 @@ jobs:
         shell: bash --noprofile --norc {0}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -87,7 +105,7 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - name: Checkout master
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -107,7 +125,7 @@ jobs:
             -o Dpkg::Use-Pty=0 \
             install -y --no-install-recommends \
             build-essential cmake gcc g++ clang clang-tools \
-            libheif-dev libpng-dev libxml2 libxml2-dev libtiff-dev \
+            libheif-dev libpng-dev libxml2-dev libtiff-dev \
             nlohmann-json3-dev libwxgtk3.2-dev wx-common \
             python3 python3-pip curl git llvm
       - name: Set Compiler
@@ -381,7 +399,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout master
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -690,7 +708,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout PR source
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
@@ -790,7 +808,7 @@ jobs:
           Write-Host "Head branch:   $env:GITHUB_HEAD_REF"
           Write-Host "Commit SHA:    $env:PR_HEAD_SHA"
           Write-Host "OS:            $env:RUNNER_OS"
-      - name: Install dependencies and build
+      - name: Install manifest dependencies and build
         shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
         run: |
           Set-StrictMode -Version Latest
@@ -805,24 +823,20 @@ jobs:
           Write-Host "Copyright (c) 2025 International Color Consortium. All rights reserved." -ForegroundColor Green
           git branch
           git status
-          Write-Host "========= Fetching Deps... ================`n"
-          Start-BitsTransfer -Source "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip" -Destination "deps.zip"
-          $actualDigest = (Get-FileHash -LiteralPath 'deps.zip' -Algorithm SHA256).Hash
-          if ($actualDigest -ne '89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e') {
-            throw "vcpkg export digest mismatch: $actualDigest"
+          Write-Host "========= Installing manifest dependencies... ================`n"
+          $vcpkgExecutable = (Get-Command vcpkg -CommandType Application -ErrorAction Stop).Source
+          $env:VCPKG_ROOT = Split-Path -Parent $vcpkgExecutable
+          $vcpkgToolchain = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
+          if (-not (Test-Path -LiteralPath $vcpkgToolchain -PathType Leaf)) {
+            throw "vcpkg toolchain file not found: $vcpkgToolchain"
           }
-          Write-Host "========= Extracting Deps... ================`n"
-          tar -xf deps.zip
-          cd Build/Cmake
+          vcpkg integrate install
+          vcpkg install
           Write-Host "========= Building... ================`n"
-          cmake -B build -S . `
-            -DCMAKE_TOOLCHAIN_FILE="..\..\scripts\buildsystems\vcpkg.cmake" `
-            -DVCPKG_MANIFEST_MODE=OFF `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DICCDEV_WINDOWS_UNIFIED_RUNTIME=ON `
-            -Wno-dev
-          cmake --build build --config Release -- /m /maxcpucount
-          $runtimeDir = Resolve-Path ".\build\bin\Release"
+          cmake --preset vs2022-x64 -B msvc -S Build/Cmake `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build msvc --config Release --parallel
+          $runtimeDir = Resolve-Path ".\msvc\bin\Release"
           Get-ChildItem -File -Path $runtimeDir |
             Where-Object { $_.Extension -in '.exe','.dll' } |
             Sort-Object Name |
@@ -834,7 +848,7 @@ jobs:
         with:
           command: >-
             addpath('matlab');
-            build_mex('BuildDir', fullfile(pwd, 'Build', 'Cmake', 'build'))
+            build_mex('BuildDir', fullfile(pwd, 'msvc'))
           generate-summary: false
 
       - name: Stage bundle into Testing directory
@@ -854,7 +868,7 @@ jobs:
           # 2. Copy the unified Windows runtime directory. CMake stages iccDEV
           #    tools, iccDEV DLLs, and vcpkg runtime DLLs together here so
           #    release binaries run directly from the bundle root.
-          $runtimeDir = "Build/Cmake/build/bin/Release"
+          $runtimeDir = "msvc/bin/Release"
           if (-not (Test-Path $runtimeDir)) {
             throw "Windows runtime directory not found: $runtimeDir"
           }
@@ -1164,7 +1178,7 @@ jobs:
         shell: bash --noprofile --norc {0}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -1519,6 +1533,9 @@ jobs:
       - name: "Stage npm-shaped WASM bundle (issue #830)"
         env:
           BASH_ENV: /dev/null
+          NPM_PACKAGES: ${{ inputs.npm_packages }}
+          NPM_VERSION: ${{ inputs.npm_version }}
+          NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -1538,12 +1555,26 @@ jobs:
             sanitize_line() { escape_html "$1"; }
           fi
 
-          # Resolve a version string for package.json:
-          #   - tag push   : strip leading 'v' from refs/tags/vX.Y.Z
-          #   - other      : 0.0.0-dev+<short-sha>
-          REF_NAME="${GITHUB_REF_NAME:-}"
-          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-            VERSION="${REF_NAME#v}"
+          # A selected npm publication must use the dispatch version. Other
+          # staging remains an unpublished development bundle.
+          if [[ "$NPM_PACKAGES" == "iccdev" && "${GITHUB_REF:-}" == "refs/heads/master" ]]; then
+            VERSION="$NPM_VERSION"
+            if [[ -z "$VERSION" ]]; then
+              echo "::error::npm_version is required when publishing iccdev"
+              exit 1
+            fi
+            if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo "::error::npm_version must be a SemVer version without build metadata"
+              exit 1
+            fi
+            if [[ ! "$NPM_DIST_TAG" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::npm_dist_tag must begin with a letter and contain only letters, digits, periods, underscores, or hyphens"
+              exit 1
+            fi
+            if [[ "$VERSION" == *-* && "$NPM_DIST_TAG" == "latest" ]]; then
+              echo "::error::Prerelease npm_version values require a non-latest npm_dist_tag"
+              exit 1
+            fi
           else
             VERSION="0.0.0-dev+${GITHUB_SHA:0:7}"
           fi
@@ -1693,7 +1724,7 @@ jobs:
       BASH_ENV: /dev/null
     steps:
       - name: Checkout repository
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -1844,7 +1875,7 @@ jobs:
         shell: bash --noprofile --norc {0}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -1986,12 +2017,12 @@ jobs:
       BASH_ENV: /dev/null
     steps:
       - name: Checkout MCP source
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up MCP package driver
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
 
@@ -2045,14 +2076,15 @@ jobs:
       name: >-
         ${{ github.ref == 'refs/heads/ci-publish-colourbill-ctrl' &&
             'ci-publishing-colourbill-ctrl' || 'release' }}
-    timeout-minutes: 15
+    # Covers the 450 s npm registry visibility wait (#2916) plus publishing.
+    timeout-minutes: 25
     permissions:
       contents: write  # Required to publish the latest release.
       id-token: write  # Required for artifact attestation identity.
       attestations: write  # Required to publish release archive provenance.
     steps:
       - name: Checkout
-        uses: actions/checkout@c2d88d3ecc89a9ef08eebf45d9637801dcee7eb5  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -2412,7 +2444,7 @@ jobs:
 
       - name: Attest release archive provenance
         id: attest
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v3.2.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-checksums: release-assets/SHA256SUMS
 
@@ -2544,17 +2576,124 @@ jobs:
         if: >-
           ${{ github.ref == 'refs/heads/master' &&
               (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           packages-dir: pypi-iccdev/
           attestations: true
           verbose: true
 
-      # preflight: allow-package-install reason=post-publication-pypi-smoke
-      - name: Verify public iccdev installation
+      - name: Publish iccdev-mcp to PyPI
+        id: pypi_mcp
         if: >-
           ${{ github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+        with:
+          packages-dir: pypi-iccdev-mcp/
+          attestations: true
+          verbose: true
+
+      - name: Set up Node.js for npm publication
+        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Stage validated npm distribution
+        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          NPM_VERSION: ${{ inputs.npm_version }}
+          NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          if [[ -z "$NPM_VERSION" ]]; then
+            echo "::error::npm_version is required when publishing iccdev"
+            exit 1
+          fi
+          if [[ -z "$NPM_DIST_TAG" ]]; then
+            echo "::error::npm_dist_tag is required when publishing iccdev"
+            exit 1
+          fi
+          if [[ ! -f artifacts/iccdev-wasm-release/package.json ]]; then
+            echo "::error::Missing staged npm package metadata"
+            exit 1
+          fi
+
+          cd artifacts/iccdev-wasm-release
+          if [[ "$(npm pkg get name)" != '"iccdev"' ]]; then
+            echo "::error::Unexpected npm package name"
+            exit 1
+          fi
+          if [[ "$(npm pkg get version)" != "\"$NPM_VERSION\"" ]]; then
+            echo "::error::Staged npm package version does not match npm_version"
+            exit 1
+          fi
+          npm pack --dry-run --json >/dev/null
+
+          mkdir -p "$GITHUB_WORKSPACE/npm-iccdev"
+          npm pack --pack-destination "$GITHUB_WORKSPACE/npm-iccdev" --json >/dev/null
+          tarball_count="$(find "$GITHUB_WORKSPACE/npm-iccdev" -maxdepth 1 -type f -name 'iccdev-*.tgz' | wc -l)"
+          if [[ "$tarball_count" -ne 1 ]]; then
+            echo "::error::Expected one npm package tarball, found $tarball_count"
+            exit 1
+          fi
+          tarball="$(find "$GITHUB_WORKSPACE/npm-iccdev" -maxdepth 1 -type f -name 'iccdev-*.tgz' -print -quit)"
+          archive_entries="$(tar -tzf "$tarball")"
+          if ! grep -Fqx "package/package.json" <<< "$archive_entries"; then
+            echo "::error::npm package tarball does not contain package.json"
+            exit 1
+          fi
+
+      # preflight: allow-token-exposure reason=npm-oidc-trusted-publishing
+      # preflight: allow-package-install reason=npm-oidc-validated-tarball-publish
+      - name: Publish iccdev to npm
+        id: npm_iccdev
+        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          NPM_VERSION: ${{ inputs.npm_version }}
+          NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          unset NODE_AUTH_TOKEN || true
+
+          tarball="$(find npm-iccdev -maxdepth 1 -type f -name 'iccdev-*.tgz' -print -quit)"
+          if [[ -z "$tarball" ]]; then
+            echo "::error::Validated npm package tarball is missing"
+            exit 1
+          fi
+          npm publish "./$tarball" --provenance --tag "$NPM_DIST_TAG"
+
+      - name: Set up Python for public iccdev verification
+        id: setup_public_iccdev_python
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              (steps.pypi_iccdev.outcome == 'success' ||
+               steps.pypi_mcp.outcome == 'success') }}
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13"
+
+      # preflight: allow-package-install reason=post-publication-pypi-smoke
+      - name: Verify public iccdev installation
+        id: verify_public_iccdev
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              steps.pypi_iccdev.outcome == 'success' &&
+              steps.setup_public_iccdev_python.outcome == 'success' &&
               (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
+        continue-on-error: true
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2588,22 +2727,15 @@ jobs:
           ICCDEV_REQUIRE_INSTALLED_PACKAGE=1 "$iccdev_environment/bin/python" \
             -m pytest --rootdir . --import-mode=importlib python/tests -q -m "not parity"
 
-      - name: Publish iccdev-mcp to PyPI
-        id: pypi_mcp
-        if: >-
-          ${{ github.ref == 'refs/heads/master' &&
-              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
-        with:
-          packages-dir: pypi-iccdev-mcp/
-          attestations: true
-          verbose: true
-
       # preflight: allow-package-install reason=post-publication-pypi-smoke
       - name: Verify public iccdev-mcp installation
+        id: verify_public_iccdev_mcp
         if: >-
-          ${{ github.ref == 'refs/heads/master' &&
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              steps.pypi_mcp.outcome == 'success' &&
+              steps.setup_public_iccdev_python.outcome == 'success' &&
               (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+        continue-on-error: true
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2636,6 +2768,49 @@ jobs:
             "iccdev-mcp[rest]==$mcp_version" "httpx2>=2,<3"
           "$mcp_environment/bin/python" .github/scripts/iccdev-mcp-package-smoke.py
 
+      - name: Verify public iccdev npm package
+        id: verify_public_iccdev_npm
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              steps.npm_iccdev.outcome == 'success' && inputs.npm_packages == 'iccdev' }}
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          NPM_VERSION: ${{ inputs.npm_version }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          if [[ -z "$NPM_VERSION" ]]; then
+            echo "::error::npm_version is required when publishing iccdev"
+            exit 1
+          fi
+          npm_environment="$(mktemp -d)/iccdev-npm"
+          mkdir -p "$npm_environment"
+          tarball=""
+          for attempt in {1..30}; do
+            if npm pack --pack-destination "$npm_environment" --json \
+                --registry=https://registry.npmjs.org "iccdev@$NPM_VERSION" >/dev/null 2>&1; then
+              tarball="$(find "$npm_environment" -maxdepth 1 -type f -name 'iccdev-*.tgz' -print -quit)"
+              if [[ -n "$tarball" ]]; then
+                break
+              fi
+            fi
+            rm -f "$npm_environment"/iccdev-*.tgz
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "::error::Published npm package tarball was not available after 450 seconds"
+              exit 1
+            fi
+            sleep 15
+          done
+          mkdir "$npm_environment/package"
+          tar -xzf "$tarball" --strip-components=1 -C "$npm_environment/package"
+          PACKAGE_VERSION="$NPM_VERSION" node -e \
+            'const pkg = require(process.argv[1] + "/package.json"); if (pkg.version !== process.env.PACKAGE_VERSION) process.exit(1);' \
+            "$npm_environment/package"
+
       - name: Summary Report
         if: always()
         shell: bash --noprofile --norc {0}
@@ -2645,6 +2820,11 @@ jobs:
           ATTESTATION_OUTCOME: ${{ steps.attest.outcome }}
           PYPI_ICCDEV_OUTCOME: ${{ steps.pypi_iccdev.outcome }}
           PYPI_MCP_OUTCOME: ${{ steps.pypi_mcp.outcome }}
+          NPM_ICCDEV_OUTCOME: ${{ steps.npm_iccdev.outcome }}
+          PYTHON_SETUP_OUTCOME: ${{ steps.setup_public_iccdev_python.outcome }}
+          PYPI_ICCDEV_VERIFY_OUTCOME: ${{ steps.verify_public_iccdev.outcome }}
+          PYPI_MCP_VERIFY_OUTCOME: ${{ steps.verify_public_iccdev_mcp.outcome }}
+          NPM_ICCDEV_VERIFY_OUTCOME: ${{ steps.verify_public_iccdev_npm.outcome }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -2672,6 +2852,11 @@ jobs:
             echo "- Artifact attestation: ${ATTESTATION_OUTCOME:-skipped}"
             echo "- PyPI iccdev publication: ${PYPI_ICCDEV_OUTCOME:-skipped}"
             echo "- PyPI iccdev-mcp publication: ${PYPI_MCP_OUTCOME:-skipped}"
+            echo "- npm iccdev publication: ${NPM_ICCDEV_OUTCOME:-skipped}"
+            echo "- PyPI iccdev verification Python setup: ${PYTHON_SETUP_OUTCOME:-skipped}"
+            echo "- PyPI iccdev verification: ${PYPI_ICCDEV_VERIFY_OUTCOME:-skipped}"
+            echo "- PyPI iccdev-mcp verification: ${PYPI_MCP_VERIFY_OUTCOME:-skipped}"
+            echo "- npm iccdev verification: ${NPM_ICCDEV_VERIFY_OUTCOME:-skipped}"
             echo "- Assets staged: ${asset_count} package files"
             echo ""
             for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl release-assets/*.tar.gz; do

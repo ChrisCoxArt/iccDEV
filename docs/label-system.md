@@ -28,6 +28,7 @@ readiness.
 | Issue triage | `needs-triage`, `needs-repro`, `requires:more-information` | Maintainers |
 | Issue kind | `bug`, `feature`, `question`, `security` | Maintainers |
 | PR status | `passed`, `failed`, `pending`, `Merge Ready`, `codeql-ready` | CI and maintainers |
+| PR CI control | `ci:run-auto` | Maintainers |
 | Dependency maintenance | `bump-sha-pins` | Maintainers |
 | Scope | `Source`, `Documentation`, `Configuration`, `CI`, `Build`, `Testing`, `Tools`, `JSON`, `Python`, `WASM`, `vcpkg`, and related area labels | Path labeler and maintainers |
 | Governance | `Governance`, `Labels`, `security`, `SAST`, `CodeQL`, `Sanitizers`, `Release` | Maintainers |
@@ -133,19 +134,35 @@ process.
 ### PR CI Status Labels
 
 `update-labels.yml` evaluates open PRs on schedule, PR events, and manual
-dispatch. It keeps `passed`, `failed`, and `pending` mutually exclusive. It adds
-`Merge Ready` only when CI is successful, the PR is not draft, the merge state is
-clean, and the review decision is approved. It does not synchronize the label
-manifest; the dedicated taxonomy-sync workflow provisions managed labels.
+dispatch. It keeps `passed`, `failed`, and `pending` mutually exclusive.
+Successful lightweight checks or legacy statuses cannot substitute for a
+completed successful `PR Summary` on the current head. Missing, skipped, or
+neutral validation remains `pending`; failed validation remains `failed`.
+The labeler reads all check-run pages without launching validation workflows,
+fetches PR metadata once per evaluation, skips unchanged status-label writes,
+and rechecks the head before mutation. Failed writes fail the run rather than
+being reported as successful updates.
+It adds `Merge Ready` only when CI is successful, the PR is not draft, and the
+merge state is clean. A review or approval is not required. It does not
+synchronize the label manifest; the dedicated taxonomy-sync workflow
+provisions managed labels.
 
 Do not use these status labels as the only merge gate. Branch protection and
 required checks remain authoritative.
 
 ### PR CI Scope
 
-`ci-pr-action.yml` does not trigger on label changes. This prevents path and
-status label automation from starting another full CI run. Use labels for
-classification and review routing, not as CI controls.
+`ci:run-auto` is a maintainer-only, one-shot control label for an open
+same-repository PR targeting `master`. Its trusted metadata-only dispatcher
+requires the label actor to have current write, maintain, or admin permission,
+rechecks the event head, dispatches `ci-pr-action.yml` with `ci_scope=auto`,
+and passes the event SHA as an exact downstream requirement. It dispatches the
+trusted `master` workflow definition, which resolves and validates the PR head
+itself, so the control remains compatible with older PR branches. It removes
+the label only after dispatch succeeds. Reapply the label after a head update.
+Path and status labels never dispatch CI. A stale dispatch fails before
+publishing any `PR Summary` status, so it cannot overwrite the current head's
+result.
 
 Pull requests and manual dispatches default to `ci_scope=auto`. In auto scope,
 the native matrix runs only for owned library/tool source and resources,
@@ -170,9 +187,16 @@ and `warning_policy` on that dispatch. Fast lane defaults to the latest
 registered CTest and strict warning failure. Windows is opt-in. The PR
 orchestrator does not run a Docker verification job.
 
-Manual dispatches use an event-qualified concurrency group. A dispatch on an
-open PR therefore does not cancel that PR's `pull_request` run; inspect the
-dispatched run by its run ID rather than treating `gh pr checks` as its status.
+Manual validation publishes a `PR Summary` commit status on the validated SHA
+using the actual final job result, so branch protection can consume it even
+when the dispatch check run is absent from the PR check rollup. Failed or
+cancelled validation never publishes success; API publication failures fail
+the job.
+
+Manual and label-triggered dispatches use an event-qualified concurrency group.
+A dispatch on an open PR therefore does not cancel that PR's `pull_request`
+run; inspect the dispatched run by its run ID rather than treating `gh pr
+checks` as its status.
 For an owner-visible long-cycle build inventory, dispatch either
 `CI Comprehensive Build and Test` (including Windows) or `CI Build Test (No
 Fuzzers)` (without Windows). Both callers use `_build-matrix.yml`, which
@@ -192,16 +216,16 @@ fail-closed policy:
 
 | Required context | Purpose |
 |------------------|---------|
-| `PR Summary` | Aggregates orchestration prerequisites and every selected build/test lane. |
-| `Risk Analysis Gate / Workflow Security Audit` | Standalone Linux workflow and container security canary. |
-| `Risk Analysis Gate / Windows Security Audit (PowerShell)` | Standalone PowerShell and Windows workflow security canary. |
-| `WASM Release Build + Parity` | Required separately on `master` because it is outside `ci-pr-action`. |
+| `PR Summary` | Aggregates selected validation lanes; after a synchronize event, obtain it through explicit validation of the current PR head. |
 
 Do not require individual Unix, GCC 15.2, tool-test, Windows, or Docker job
 names in branch rules. Those jobs are conditional by selected mode and are
-covered by `PR Summary`. The summary must treat failed or cancelled detection,
-setup, and input-validation prerequisites as failures; only intentionally
-skipped mode-specific jobs are acceptable.
+covered by `PR Summary` for initial PR validation. A synchronize event publishes
+only the separate `Rebase Safety` context and does not restart those lanes or
+satisfy `PR Summary`. A maintainer dispatches the applicable final lanes and
+records their evidence for the rebased head before merge. The summary must treat
+failed or cancelled detection, setup, and input-validation prerequisites as
+failures; only intentionally skipped mode-specific jobs are acceptable.
 
 `ci-pr-action` runs automatically only for pull requests targeting `master`.
 Its PR-number workflow dispatch also accepts only open, same-repository pull

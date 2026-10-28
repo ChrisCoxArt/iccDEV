@@ -45,8 +45,10 @@
 #include "IccSolve.h"
 #include "IccCAM.h"
 #include "IccMpeFactory.h"
+#include "IccFileUtil.h"
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -841,8 +843,13 @@ bool CIccMpeJsonTintArray::ParseJson(const IccJson &j, std::string &parseStr)
   icTagTypeSignature typeSig = arrayTypeName.empty()
     ? icSigFloat32ArrayType
     : CIccTagCreator::GetTagTypeNameSig(arrayTypeName.c_str());
-  if (typeSig == icSigUnknownType)
-    typeSig = icSigFloat32ArrayType;
+  // An absent arrayType means float32; a name that is not a type is an error.
+  // It used to fall back to float32 too, so a misspelt type loaded as if it
+  // had not been given (#2852).  The XML reader refuses an unknown type.
+  if (typeSig == icSigUnknownType) {
+    parseStr += "Unknown arrayType '" + icSanitizeConsoleText(arrayTypeName) + "' for TintArrayElement\n";
+    return false;
+  }
 
   // Create JSON-aware tag for the array data
   CIccTag *pTag = CIccTagCreator::CreateTag(typeSig);
@@ -2127,7 +2134,9 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
       std::string name;
       jGetString(jVar, "name", name);
       if (!validName(name.c_str())) {
-        parseStr += "Invalid variable name '" + name + "'\n";
+        // A name that fails validName() can hold anything, CR, LF and escape
+        // sequences included, and the report reaches a console or log (#2851, #2852).
+        parseStr += "Invalid variable name '" + icSanitizeConsoleText(name) + "'\n";
         return false;
       }
       if (m_declVarMap.find(name) != m_declVarMap.end()) {
@@ -2135,9 +2144,29 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
         return false;
       }
 
-      int offset = -1, size = 1;
-      jGetValue(jVar, "position", offset);
-      jGetValue(jVar, "size", size);
+      // Read as the XML reader does (icXmlParseU32/icXmlParseU16): a
+      // non-negative integer that fits, or the document is refused.  The
+      // results were ignored and size was narrowed to 16 bits on the way into
+      // CIccTempDeclVar, so size 65539 declared 3 elements, and "abc" or -7
+      // declared 1 (#2852).  Size 0 still declares 1 element, as in XML.
+      int offset = -1;
+      icUInt16Number size = 1;
+      if (jVar.contains("position")) {
+        icUInt32Number nPosition = 0;
+        if (!jVar["position"].is_number_integer() ||
+            !jsonToValue(jVar["position"], nPosition) ||
+            nPosition > (icUInt32Number)(std::numeric_limits<int>::max)()) {
+          parseStr += "Invalid position for variable '" + name + "'\n";
+          return false;
+        }
+        offset = (int)nPosition;
+      }
+      if (jVar.contains("size")) {
+        if (!jVar["size"].is_number_integer() || !jsonToValue(jVar["size"], size)) {
+          parseStr += "Invalid size for variable '" + name + "'\n";
+          return false;
+        }
+      }
       if (size < 1) size = 1;
 
       if (offset >= 0 && importPath != "*") {
@@ -2145,7 +2174,7 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
         return false;
       }
 
-      CIccTempDeclVar var(name, offset, (icUInt16Number)size);
+      CIccTempDeclVar var(name, offset, size);
 
       // Optional members string: "m1 m2[2] m3"
       std::string members;
@@ -2156,7 +2185,7 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
         while (parse.GetNext()) {
           std::string mname = parse.GetName();
           if (!validName(mname.c_str())) {
-            parseStr += "Invalid member name '" + mname + "' for variable '" + name + "'\n";
+            parseStr += "Invalid member name '" + icSanitizeConsoleText(mname) + "' for variable '" + name + "'\n";
             return false;
           }
           icUInt16Number msize = 0, extra = 0;
@@ -2188,7 +2217,7 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
       jGetString(jMacro, "body", body);
 
       if (!validName(name.c_str())) {
-        parseStr += "Invalid macro name '" + name + "'\n";
+        parseStr += "Invalid macro name '" + icSanitizeConsoleText(name) + "'\n";
         return false;
       }
       if (body.empty()) {
@@ -2214,7 +2243,7 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
         while (parse.GetNext()) {
           std::string lname = parse.GetName();
           if (!validName(lname.c_str())) {
-            parseStr += "Invalid local name '" + lname + "' for macro '" + name + "'\n";
+            parseStr += "Invalid local name '" + icSanitizeConsoleText(lname) + "' for macro '" + name + "'\n";
             return false;
           }
           icUInt16Number lsize = 0, extra = 0;
@@ -2246,7 +2275,7 @@ bool CIccMpeJsonCalculator::ParseImport(const IccJson &j, std::string importPath
 
       if (!name.empty()) {
         if (!validName(name.c_str())) {
-          parseStr += "Invalid SubElement name '" + name + "'\n";
+          parseStr += "Invalid SubElement name '" + icSanitizeConsoleText(name) + "'\n";
           return false;
         }
         if (m_mpeMap.find(name) != m_mpeMap.end()) {

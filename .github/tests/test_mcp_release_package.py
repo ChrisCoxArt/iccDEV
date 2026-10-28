@@ -148,7 +148,7 @@ def test_release_uses_opt_in_trusted_pypi_publication_and_public_smoke():
 
     publish_iccdev = steps["Publish iccdev to PyPI"]
     assert publish_iccdev["uses"] == \
-        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+        "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"
     assert publish_iccdev["with"]["packages-dir"] == "pypi-iccdev/"
     assert publish_iccdev["with"]["attestations"] is True
     assert "password" not in publish_iccdev["with"]
@@ -158,10 +158,18 @@ def test_release_uses_opt_in_trusted_pypi_publication_and_public_smoke():
     assert publish_mcp["with"]["packages-dir"] == "pypi-iccdev-mcp/"
     assert publish_mcp["with"]["attestations"] is True
 
-    iccdev_smoke = steps["Verify public iccdev installation"]["run"]
+    iccdev_smoke_step = steps["Verify public iccdev installation"]
+    assert iccdev_smoke_step["continue-on-error"] is True
+    assert "steps.pypi_iccdev.outcome == 'success'" in iccdev_smoke_step["if"]
+    iccdev_smoke = iccdev_smoke_step["run"]
     assert "https://pypi.org/simple" in iccdev_smoke
     assert "ICCDEV_REQUIRE_INSTALLED_PACKAGE=1" in iccdev_smoke
-    mcp_smoke = steps["Verify public iccdev-mcp installation"]["run"]
+    mcp_smoke_step = steps["Verify public iccdev-mcp installation"]
+    assert mcp_smoke_step["continue-on-error"] is True
+    assert "!cancelled()" in mcp_smoke_step["if"]
+    assert "steps.pypi_mcp.outcome == 'success'" in mcp_smoke_step["if"]
+    assert "steps.setup_public_iccdev_python.outcome == 'success'" in mcp_smoke_step["if"]
+    mcp_smoke = mcp_smoke_step["run"]
     assert "https://pypi.org/simple" in mcp_smoke
     assert "iccdev-mcp-package-smoke.py" in mcp_smoke
 

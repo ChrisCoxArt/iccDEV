@@ -14,23 +14,6 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches:
-      - master
-    paths:
-      - ".github/workflows/ci-matlab.yml"
-      - "matlab/**"
-      - "IccProfLib/**"
-      - "IccJSON/**"
-      - "Build/Cmake/**"
-      - "Tools/CmdLine/IccToJson/**"
-      - "Tools/CmdLine/IccFromJson/**"
-      - "Tools/CmdLine/IccHeifDump/**"
-      - "Tools/CmdLine/IccProfilePlot/**"
-      - "Tools/CmdLine/IccPawgReport/**"
-      - "Testing/**"
-      - ".github/ci/regression/gamma-2.20703125.icc"
-      - ".github/ci/tooling/heif/img/**"
   workflow_dispatch:
 
 concurrency:
@@ -39,7 +22,6 @@ concurrency:
 
 jobs:
   windows:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows MATLAB MEX
     runs-on: windows-2022
     timeout-minutes: 45
@@ -54,13 +36,13 @@ jobs:
     steps:
       - name: Checkout repository
         # actions/checkout v5.0.0 (node24)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Checkout trusted workflow helpers
         # actions/checkout v5.0.0 (node24)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           sparse-checkout: .github/scripts
@@ -245,7 +227,6 @@ jobs:
           generate-summary: false
 
   unix:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Native MATLAB (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -271,12 +252,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Checkout trusted workflow helpers
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           sparse-checkout: .github/scripts
@@ -357,7 +338,6 @@ jobs:
           generate-summary: false
 
   docker-interop:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: MATLAB Docker interoperability
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -368,13 +348,13 @@ jobs:
     steps:
       - name: Checkout repository
         # actions/checkout v5.0.0 (node24)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Checkout trusted workflow helpers
         # actions/checkout v5.0.0 (node24)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           sparse-checkout: .github/scripts

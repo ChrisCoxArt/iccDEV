@@ -58,7 +58,9 @@ shares one source of truth. Update rules here, not in the mirrors.
   PyPI publication uses explicit `pypi_packages` selection on the manual
   `ci-latest-release.yml` workflow. Keep `iccdev` and `iccdev-mcp` staging,
   trusted-publisher identities, outcomes, and post-publication smoke tests
-  separate. Require complete package inventories, dual checksums, release
+  separate. Run public-package smoke tests after every selected publication and
+  report their diagnostic outcomes without blocking later package publications.
+  Require complete package inventories, dual checksums, release
   attestations, the protected `release` environment, and OIDC publishing.
   Validate downloaded release wheels with `--release` to require all 45
   targets without CI identifier files. Require RECORD file coverage, secure
@@ -88,6 +90,7 @@ shares one source of truth. Update rules here, not in the mirrors.
 | iOS CLUT editor POC | `examples/ios-clut-editor/README.md`, `.github/skills/ios-clut-editor/SKILL.md` |
 | AVX2 CLUT diagnostics and optimization handoff | `docs/avx2-clut-diagnostics.md` |
 | Pull request preparation and handoff | `docs/pre-pr-security-cycle.md` |
+| Release version bump | `.github/skills/version-bump/SKILL.md`, `.github/prompts/version-bump.prompt.md` |
 | Maintainer local Git/devenv defaults | `docs/linear-stack-workflow.md` |
 | ClusterFuzzLite integration | `.github/ci/cfl/README.md`, `.github/skills/clusterfuzzlite/SKILL.md` |
 | Pre-PR security skill | `.github/skills/pre-pr-security-cycle/SKILL.md` |

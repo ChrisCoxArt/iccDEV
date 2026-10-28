@@ -2255,8 +2255,12 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
     if (pFromProfile->m_Header.flags&icMCSNeedsSubsetTrue) {
       for (i=0; i<m_nSrcSamples; i++) {
         const icUChar *szSrcChan = ((CIccTagUtf8Text*)pFromChannels->GetIndex(i))->GetText();
+        // Every source channel must appear somewhere in the destination's list
+        // (ICC.2:2023 Annex I.2), so the search walks the destination with j.
+        // Indexing it with i compared position against position, refused
+        // legal reorderings, and read past a shorter destination list (#2878).
         for (j=0; j<m_nDstSamples; j++) {
-          const icUChar *szDstChan = ((CIccTagUtf8Text*)pToChannels->GetIndex(i))->GetText();
+          const icUChar *szDstChan = ((CIccTagUtf8Text*)pToChannels->GetIndex(j))->GetText();
           if (!icUtf8StrCmp(szSrcChan, szDstChan))
             break;
         }
@@ -2268,8 +2272,9 @@ icStatusCMM CIccPcsXform::Connect(CIccXform *pFromXform, CIccXform *pToXform)
     if (pToProfile->m_Header.flags&icMCSNeedsSubsetTrue) {
       for (i=0; i<m_nDstSamples; i++) {
         const icUChar *szDstChan = ((CIccTagUtf8Text*)pToChannels->GetIndex(i))->GetText();
+        // The mirror of the search above: walk the source with j (#2871).
         for (j=0; j<m_nSrcSamples; j++) {
-          const icUChar *szSrcChan = ((CIccTagUtf8Text*)pFromChannels->GetIndex(i))->GetText();
+          const icUChar *szSrcChan = ((CIccTagUtf8Text*)pFromChannels->GetIndex(j))->GetText();
           if (!icUtf8StrCmp(szSrcChan, szDstChan))
             break;
         }
@@ -3115,6 +3120,10 @@ icStatusCMM CIccPcsXform::Optimize()
  */
 CIccApplyXform *CIccPcsXform::GetNewApply(icStatusCMM &status)
 {
+  // The step loop below used to test the caller's status before anything had
+  // written it, and CIccApplyThreadedCmm passed an uninitialised one (#2849).
+  status = icCmmStatOk;
+
   CIccApplyPcsXform *pNew = new (std::nothrow) CIccApplyPcsXform(this);
 
   if (pNew) {
@@ -3134,8 +3143,9 @@ CIccApplyXform *CIccPcsXform::GetNewApply(icStatusCMM &status)
 
   for (i=m_list->begin(); i!=m_list->end(); i++) {
     pStep = i->ptr->GetNewApply();
-    if (!pStep || status != icCmmStatOk) {
+    if (!pStep) {
       delete pNew;
+      status = icCmmStatAllocErr;
       return NULL;
     }
     pNew->AppendApplyStep(pStep);
@@ -5535,7 +5545,15 @@ CIccPcsStepMpe::~CIccPcsStepMpe()
 */
 CIccApplyPcsStep* CIccPcsStepMpe::GetNewApply()
 {
-  CIccApplyPcsStepMpe *rv = new (std::nothrow) CIccApplyPcsStepMpe(this, m_pMpe->GetNewApply());
+  // CIccTagMultiProcessElement::GetNewApply() returns NULL rather than a
+  // partial element chain (#2870); Apply() has no use for a NULL one.
+  CIccApplyTagMpe *pMpeApply = m_pMpe->GetNewApply();
+  if (!pMpeApply)
+    return NULL;
+
+  CIccApplyPcsStepMpe *rv = new (std::nothrow) CIccApplyPcsStepMpe(this, pMpeApply);
+  if (!rv)
+    delete pMpeApply;
 
   return rv;
 }
@@ -7996,6 +8014,17 @@ icStatusCMM CIccXformNamedColor::Begin()
     }
   }
 
+  // NamedColor2 stores its own device coordinate count. The device side of
+  // Apply() reads or writes that many floats, while callers size their pixel
+  // buffers from the profile header's color space. Reject a disagreement
+  // before a namedDevice lookup can copy past the caller's destination
+  // (#2830, #2873).
+  if (m_pTag &&
+      ((m_nSrcSpace != icSigNamedData && !IsSrcPCS()) ||
+       (m_nDestSpace != icSigNamedData && !IsDestPCS())) &&
+      m_pTag->GetDeviceCoords() != icGetSpaceSamples(m_pTag->GetDeviceSpace()))
+    return icCmmStatBadSpaceLink;
+
   if (m_pTag && !m_pTag->InitFindCachedPCSColor())
     return icCmmStatAllocErr;
   else if (m_pArray && !m_pArray->Begin())
@@ -8042,12 +8071,12 @@ icStatusCMM CIccXformNamedColor::Apply(CIccApplyXform*  /* pApply */, icChar *Ds
         icFloatNumber pix[3];
         memcpy(pix, SrcPixel, 3*sizeof(icFloatNumber));
 
+        // FindPcsColor() takes a value in the array's PCS and converts XYZ
+        // to Lab itself, so converting here as well applied it twice (#2879).
         if (m_nSrcSpace == icSigLabPcsData)
           icLabFromPcs(pix);
-        else {
+        else
           icXyzFromPcs(pix);
-          icXYZtoLab(pix, pix);
-        }
 
         pColor = pArray->FindPcsColor(pix);
         if (pColor) 
