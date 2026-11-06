@@ -52,6 +52,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <memory>
 #include <new>
 #include "IccMpeBasic.h"
 #include "IccMpeSpectral.h"
@@ -420,6 +421,9 @@ bool CIccMpeSpectralMatrix::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read16(&range.steps))
     return false;
 
+  if (range.steps < 2)
+    return false;
+
   if (!pIO->Read16(&m_nReserved2))
     return false;
 
@@ -530,13 +534,13 @@ icValidateStatus CIccMpeSpectralMatrix::Validate(std::string sigPath, std::strin
   std::string mpeSigPath = sigPath + icGetSigPath(GetType());
   icValidateStatus rv = CIccMultiProcessElement::Validate(sigPath, sReport, pMPE, pProfile);
   
-  if (!m_Range.steps) {
+  if (m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 
     sReport += icMsgValidateCriticalError;
     sReport += sSigPathName;
-    sReport += " - Cannot have zero spectral range steps!\n";
+    sReport += " - Cannot have fewer than two spectral range steps!\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
@@ -590,7 +594,7 @@ icValidateStatus CIccMpeSpectralMatrix::Validate(std::string sigPath, std::strin
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
-  if (m_Range.start>= m_Range.end || !m_Range.steps) {
+  if (m_Range.start>= m_Range.end || m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 
@@ -1073,6 +1077,9 @@ bool CIccMpeSpectralCLUT::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read16(&m_Range.steps))
     return false;
 
+  if (m_Range.steps < 2)
+    return false;
+
   if (!pIO->Read16(&m_nStorageType))
     return false;
 
@@ -1411,17 +1418,17 @@ icValidateStatus CIccMpeSpectralCLUT::Validate(std::string sigPath, std::string 
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
-  if (!m_Range.steps) {
+  if (m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 
     sReport += icMsgValidateCriticalError;
     sReport += sSigPathName;
-    sReport += " - Cannot have zero spectral range steps!\n";
+    sReport += " - Cannot have fewer than two spectral range steps!\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
-  if (m_Range.start>= m_Range.end || !m_Range.steps) {
+  if (m_Range.start>= m_Range.end || m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 
@@ -1568,11 +1575,8 @@ bool CIccMpeEmissionCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElement
     observer.VectorMult(pDst, pSrc);
     if (bLab) {
       icXYZtoLab(pDst, pDst, xyzW);
-//      icLabToPcs(pDst);
     }
-    else {
-//      icXyzToPcs(pDst);
-    }
+
     pSrc += m_Range.steps;
     pDst += m_nOutputChannels;
   }
@@ -1676,8 +1680,9 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
 
   //concatenate reflectance range mapping to observer+illuminant
   bool mapFailed = false;
-  CIccMatrixMath *rangeRef = CIccMatrixMath::rangeMap(m_Range, illumRange, &mapFailed);
-  CIccMatrixMath *pApplyMtx;
+  std::unique_ptr<CIccMatrixMath> rangeRef(CIccMatrixMath::rangeMap(m_Range, illumRange, &mapFailed));
+  std::unique_ptr<CIccMatrixMath> mappedApplyMtx;
+  const CIccMatrixMath *pApplyMtx = &observer;
 
   // Falling through to the unmapped observer treats a 3 x illumRange.steps
   // matrix as though it were m_Range.steps wide, and the VectorMult() calls
@@ -1687,51 +1692,39 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
   if (mapFailed)
     return false;
 
-  if (!rangeRef)
-    pApplyMtx = &observer;
-  else {
+  if (rangeRef) {
     // Mult() allocates a new product and leaves both operands untouched, so
-    // rangeRef is this function's to release either way -- it was previously
-    // dropped here, leaking a matrix and its coefficient array on every profile
-    // whose reflectance range differed from the illuminant range. Mult() also
-    // returns NULL when the operand shapes disagree, which the old code passed
-    // straight to VectorMult() below.
-    pApplyMtx = rangeRef->Mult(&observer);
-    delete rangeRef;
+    // scoped owners release both matrices on every return. Mult() also returns
+    // NULL when the operand shapes disagree, which the old code passed straight
+    // to VectorMult() below.
+    mappedApplyMtx.reset(rangeRef->Mult(&observer));
+    rangeRef.reset();
 
-    if (!pApplyMtx)
+    if (!mappedApplyMtx)
       return false;
+
+    pApplyMtx = mappedApplyMtx.get();
   }
 
   delete m_pApplyCLUT;
 
   m_pApplyCLUT = new (std::nothrow) CIccCLUT((icUInt8Number)m_nInputChannels, (icUInt16Number)m_nOutputChannels, 4);
 
-  if (!m_pApplyCLUT) {
-    if (pApplyMtx!=&observer)
-      delete pApplyMtx;
+  if (!m_pApplyCLUT)
     return false;
-  }
 
   m_pApplyCLUT->SetClipFunc(NoClip);
 
   // As in CIccMpeEmissionCLUT::Begin above: pDst is written through without a
-  // NULL test, so Init()'s refusal has to stop us here. pApplyMtx is this
-  // function's to release on every exit once it is not the stack observer.
-  if (!m_pApplyCLUT->Init(m_pCLUT->GridPointArray())) {
-    if (pApplyMtx!=&observer)
-      delete pApplyMtx;
+  // NULL test, so Init()'s refusal has to stop us here.
+  if (!m_pApplyCLUT->Init(m_pCLUT->GridPointArray()))
     return false;
-  }
 
   icFloatNumber *pSrc = m_pCLUT->GetData(0);
   icFloatNumber *pDst = m_pApplyCLUT->GetData(0);
 
-  if (!pSrc || !pDst) {
-    if (pApplyMtx!=&observer)
-      delete pApplyMtx;
+  if (!pSrc || !pDst)
     return false;
-  }
 
   icFloatNumber xyzW[3];
 
@@ -1771,17 +1764,11 @@ bool CIccMpeReflectanceCLUT::Begin(icElemInterp nInterp, CIccTagMultiProcessElem
 
     if (bLab) {
       icXYZtoLab(pDst, pDst, xyzi);
-      //      icLabToPcs(pDst);
     }
-    else {
-      //      icXyzToPcs(pDst);
-    }
+
     pSrc += m_Range.steps;
     pDst += m_nOutputChannels;
   }
-
-  if (pApplyMtx!=&observer)
-    delete pApplyMtx;
 
   if (!m_pApplyCLUT->Begin())
     return false;
@@ -2047,6 +2034,9 @@ bool CIccMpeSpectralObserver::Read(icUInt32Number size, CIccIO *pIO)
   if (!pIO->Read16(&range.steps))
     return false;
 
+  if (range.steps < 2)
+    return false;
+
   if (!pIO->Read16(&m_flags))
     return false;
 
@@ -2141,11 +2131,9 @@ void CIccMpeSpectralObserver::Apply(CIccApplyMpe * /* pApply */, icFloatNumber *
 
     if (bLab) {
       icXYZtoLab(dstPixel, xyz, m_xyzw);
-      //      icLabToPcs(dstPixel);
     }
     else {
       memcpy(dstPixel, xyz, 3*sizeof(icFloatNumber));
-      //      icXyzToPcs(dstPixel);
     }
   }
 }
@@ -2165,13 +2153,13 @@ icValidateStatus CIccMpeSpectralObserver::Validate(std::string sigPath, std::str
   std::string mpeSigPath = sigPath + icGetSigPath(GetType());
   icValidateStatus rv = CIccMultiProcessElement::Validate(sigPath, sReport, pMPE, pProfile);
   
-  if (!m_Range.steps) {
+  if (m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 
     sReport += icMsgValidateCriticalError;
     sReport += sSigPathName;
-    sReport += " - Cannot have zero spectral range steps!\n";
+    sReport += " - Cannot have fewer than two spectral range steps!\n";
     rv = icMaxStatus(rv, icValidateCriticalError);
   }
 
@@ -2206,7 +2194,7 @@ icValidateStatus CIccMpeSpectralObserver::Validate(std::string sigPath, std::str
   }
 
 
-  if (m_Range.start>= m_Range.end || !m_Range.steps) {
+  if (m_Range.start>= m_Range.end || m_Range.steps < 2) {
     CIccInfo Info;
     std::string sSigPathName = Info.GetSigPathName(mpeSigPath);
 

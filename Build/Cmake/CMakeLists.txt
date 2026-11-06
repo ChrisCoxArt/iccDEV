@@ -907,16 +907,6 @@ if(ENABLE_TOOLS AND ENABLE_IMAGE_TOOLS)
     message(STATUS "PNG Version            : ${PNG_VERSION}")
   endif()
 
-  # --- JPEG ---
-  if(VERBOSE_CONFIG)
-    message(STATUS "Checking for JPEG...")
-  endif()
-  find_package(JPEG REQUIRED)
-
-  if(VERBOSE_CONFIG)
-    message(STATUS "JPEG Library           : ${JPEG_LIBRARIES}")
-    message(STATUS "JPEG Include Directory : ${JPEG_INCLUDE_DIR}")
-  endif()
 endif()
 
 # ----------------------------------------------------------------------
@@ -2285,6 +2275,11 @@ CONFIGURE_FILE(
 
 ADD_CUSTOM_TARGET( uninstall
   "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Uninstall.cmake")
+
+ADD_CUSTOM_TARGET( uninstall-runtime
+  "${CMAKE_COMMAND}"
+  "-DICCDEV_UNINSTALL_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/install_manifest_${ICCDEV_RUNTIME_COMPONENT}.txt"
+  -P "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Uninstall.cmake")
 
 IF( CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "64" )
   SET( ARCH 64 )

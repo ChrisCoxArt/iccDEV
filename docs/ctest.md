@@ -9,6 +9,10 @@ CTest registers tests only for tools enabled by the selected CMake options.
 With `ENABLE_ICCJSON=OFF`, JSON conversion, `IccConnect`, and JSON
 runtime-configuration tool regressions are omitted; the legacy script test runs
 with JSON round-trip enforcement disabled.
+The `iccdev.applytolink-nan-sixchan-debug` NaN range regression registers only
+for Debug, including when CTest selects a configuration from a multi-config
+generator. It reports a skip when the tool or AddressSanitizer is unavailable;
+Release discovery omits it.
 
 CTest registration is maintainer-owned infrastructure because it affects CI
 coverage, workflow pass/fail behavior, and cross-platform release confidence.
@@ -160,72 +164,21 @@ product build. Build `build-test-binaries` before a direct filtered CTest run,
 or use `check`/`check-fast`; both targets build their tool and test dependencies
 before running the suite.
 
-## External HEIF carrier CTest
+## Native HEIF extraction safety
 
-`iccdev.heif-carrier-qa` and `iccdev.heif-carrier-ab-qa` are registered by the standalone
-`.github/ci/tooling/heif/qa` wrapper, not by the main `Build/Cmake` project, so
-it does not change the standard iccDEV CTest count. The wrapper builds
-Nokia `heifIccDump` and the libheif and IccProfLib-backed release `iccHeifDump`
-using the Nokia HEIF revision recorded in `.github/ci/tooling/heif/Readme.md`.
-The tests run the 16-carrier corpus,
-property/CLI controls, sanitizer checks, ICC extraction hash assertion, and
-byte-for-byte A/B extraction comparison.
-Hosted coverage is the manually dispatched `Nokia HEIF ICC carrier smoke`
-workflow. It is deliberately isolated from `ci-pr-action` and the reusable
-iccDEV tool-test gate because it builds a separately pinned upstream project.
-
-Always run discovery and the focused test:
+`iccdev.heif-output-safety` is registered by `Build/Cmake` when the native
+`iccHeifDump` target and Python 3 are available. It runs on Windows and Unix,
+using `.github/ci/test-data/heif/valid-prof.heic` and its pinned ICC digest.
+It checks exclusive output creation, path collisions, and concurrent writers;
+Windows symlink cases may skip when the account lacks symlink privileges.
 
 ```bash
-ctest --test-dir /tmp/iccdev-heif-qa -N --no-tests=error
-ctest --test-dir /tmp/iccdev-heif-qa \
-  -R '^iccdev\.heif-(carrier-qa|carrier-ab-qa)$' \
-  --output-on-failure \
-  --no-tests=error
+ctest --test-dir build -R '^iccdev\.heif-output-safety$' \
+  --output-on-failure --no-tests=error
 ```
 
-## External libpng iCCP CTest
-
-`iccdev.libpng-iccp-qa` is registered by the standalone
-`.github/ci/tooling/libpng/qa` wrapper, not by the main `Build/Cmake` project.
-The wrapper builds `pngtest` from the exact libpng revision in
-`.github/ci/tooling/libpng/Readme.md`. Its manually dispatched workflow first
-requires the unpatched pin to reproduce four invalid-profile retention faults,
-then applies the tracked patch and requires those profiles to be discarded.
-Valid and explicitly relaxed CRC-policy controls must remain byte-identical.
-
-Always run discovery and the focused patched test:
-
-```bash
-ctest --test-dir /tmp/iccdev-libpng-build -N --no-tests=error
-ctest --test-dir /tmp/iccdev-libpng-build \
-  -R '^iccdev\.libpng-iccp-qa$' \
-  --output-on-failure \
-  --no-tests=error
-```
-
-## External OpenImageIO ICC and EXIF CTest (#2657)
-
-`iccdev.openimageio-icc-qa` is registered by the standalone
-`.github/ci/tooling/openimageio/qa` wrapper, not by the main `Build/Cmake`
-project. The manually dispatched workflow pins OpenImageIO commit
-`8004015ace460bf7e9019514f6d8c6c677e6e7ae`, proves the unpatched fault
-contract, applies the tracked patch, and rebuilds with ASan+UBSan.
-
-The fixed CTest covers alignment-safe big-endian EXIF output, Canon MakerNote
-element sizing and endian propagation, strict JPEG ICC error propagation,
-declared `mluc` tag boundaries, JPEG2000 encoder failure propagation, all five
-progression orders, and a byte-identical JP2 ICC round-trip control.
-
-Always run discovery and the focused patched test:
-
-```bash
-ctest --test-dir /tmp/iccdev-openimageio-qa -N --no-tests=error
-ctest --test-dir /tmp/iccdev-openimageio-qa \
-  -R '^iccdev\.openimageio-icc-qa$' \
-  --output-on-failure \
-  --no-tests=error
-```
+For direct execution and the shared Python, MATLAB, and release fixtures, see
+the [native tool guide](../Tools/CmdLine/IccHeifDump/Readme.md).
 
 ## Registered Suites
 
@@ -286,7 +239,8 @@ ctest --test-dir /tmp/iccdev-openimageio-qa \
 | `iccdev.legacy-run-tests` | `Testing/RunTests.sh` |
 | `iccdev.profile-write-failure` | `.github/ci/regression/profile-write-failure.cpp` |
 | `iccdev.tool-coverage` | `.github/scripts/iccdev-tool-coverage-baseline.sh --asan --skip-hybrid` |
-| `iccdev.hybrid-pipeline` | `.github/scripts/iccdev-hybrid-pipeline-tests.sh` |
+| `iccdev.hybrid-pipeline` | `.github/scripts/iccdev-hybrid-pipeline-tests.sh`; all six phases with four representative overprint cases under sanitizers |
+| `iccdev.apply-throughput` | `Build/Cmake/Testing/RunBenchApplySuite.cmake`; all built-in transform cases with checked CSV results and a bounded pixel budget |
 | `iccdev.searchvec-uio-regression` | `.github/scripts/iccdev-searchvec-uio-regression.sh` |
 | `iccdev.specsep-tiff-geometry-regression` | `.github/scripts/iccdev-specsep-tiff-geometry-regression-tests.sh` |
 | `iccdev.tiff-resolution-unit-regression` | `.github/scripts/iccdev-tiff-resolution-unit-regression-tests.sh` |
@@ -294,7 +248,7 @@ ctest --test-dir /tmp/iccdev-openimageio-qa \
 | `iccdev.tiff-tiles` | Native libtiff-authored fixtures; 8/16/float, grayscale/RGB/extra/spectral samples, both planes/codecs/byte orders/containers, edge padding, short tiles, memory bounds and config round trips; registered on Windows and Unix |
 | `iccdev.tiff-tiles-cli` | Python standard-library runner; dump IFD inventory/extraction, unavailable-codec metadata, apply scalar/thread parity and spectral separator strip/tile parity; registered on Windows and Unix when Python and all four tools are available |
 | `iccdev.tiff-tile-budget-cli` | Python standard-library runner; mixed tiled/stripped spectral inputs retain pixel parity and an aggregate tiled-input band over 256 MiB is rejected before output creation |
-| `iccdev.tiff-directory-listing-cli` | Python standard-library runner; plain and JSON inventory of 4,096 main IFDs and rejection of a 4,097-IFD chain |
+| `iccdev.tiff-directory-listing-cli` | Python standard-library runner; plain and JSON inventory, including raw photometric metadata, of 4,096 main IFDs and rejection of a 4,097-IFD chain |
 | `iccdev.tiff-telemetry-cli` | Python standard-library runner; default-off option rejection and enabled JSONL lifecycle, exact geometry/counters, tiled/stripped pixel parity, metadata-only reporting, sidecar refusal, late-read cleanup and forensic extraction. Run separate `ICCDEV_ENABLE_TELEMETRY=OFF` and `ON` builds; enabled coverage needs the durable spectral inputs and native TIFF fixture target. |
 | `iccdev.specsep-usage-exit-code-regression` | `.github/scripts/iccdev-issue-1514-specsep-usage-exit-code-regression-tests.sh` |
 | `iccdev.specsep-cli-args-regression` | `.github/scripts/iccdev-specsep-cli-args-regression-tests.sh` |
@@ -319,6 +273,8 @@ ctest --test-dir /tmp/iccdev-openimageio-qa \
 | `iccdev.lut16-zero-curve-regressions` | `.github/scripts/iccdev-lut16-zero-curve-regression-tests.sh` |
 | `iccdev.applynamedcmm-cli-args` | `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh` |
 | `iccdev.applysearch-cli-args` | `.github/scripts/iccdev-applysearch-cli-args-regression.sh` |
+| `iccdev.applysearch-cli-args-exhaustive` | Same script with `--exhaustive-thread-matrix`; comprehensive pre-PR thread matrix |
+| `iccdev.applyprofiles-cli-args` | `.github/scripts/iccdev-applyprofiles-cli-args-regression.sh`; checks telemetry-enabled `--debug` with `-threads`/`-exportcfg`, `--verbose` with `-cfg`, and disabled-build rejection |
 | `iccdev.iccApply*-build-toggle` | Four apply-tool checks run with telemetry both enabled and disabled; help exposes telemetry only when built, and disabled builds reject telemetry options. Configure separate build trees with `ICCDEV_ENABLE_TELEMETRY=ON` and `OFF` to cover both cases. |
 | `iccdev.applyprofiles-headless-receipts` | Unix quick check and Windows Python smoke; verify JSONL lifecycle receipts, post-close JSON evidence, sidecar path rejection, and byte-identical TIFF output with telemetry enabled |
 | `iccdev.apply-telemetry-failure-paths` | `.github/ci/quality-assurance/scripts/test_apply_telemetry_failures.py`; `iccdev;cmm;image;qa;evidence;regression`; checks failed writes, terminal JSONL events, and equivalent output paths for all four Apply tools |
@@ -355,12 +311,15 @@ The JSON round-trip uses a temporary directory for generated `.json` and
 round-trip `.icc` files so a passing Unix run does not remove or modify tracked
 files in `Testing/`.
 
-`iccdev.applysearch-cli-args` derives a batch of more than 1,024 rows from the
-tracked RGB input and requires byte-identical output for the default path and
-`-threads 0`, `1`, `2`, `4`, and `8`. It also covers configuration mode,
-malformed thread counts, and the single-thread requirement for `-debugcalc`.
-Because those cases exercise up to eight internal threads, the aggregate
-reserves the runner's CTest budget, capped at four processor slots.
+`iccdev.applysearch-cli-args` derives exactly 257 rows from the tracked RGB
+input, enough to activate two workers, and requires byte-identical output for
+the default path and `-threads 0`, `1`, and `2`. It also covers configuration
+mode, malformed thread counts, and the single-thread requirement for
+`-debugcalc`. `iccdev.applysearch-cli-args-exhaustive` reruns that contract
+with exactly 1,025 rows and `-threads 0`, `1`, `2`, `4`, and `8`, activating the
+bulk path and all eight workers. It carries `slow;pr-extended` for the
+comprehensive pre-PR matrix; the routine PR CTest checks the smaller boundary.
+Both modes count transformed rows and compare output bytes across thread modes.
 
 `iccdev.tool-coverage` may add focused command-line regressions inside the
 existing script without changing the CTest suite count. When a bug is tied to an
@@ -390,9 +349,10 @@ assertions, individual open-issue MSan patch inventory, non-blocking patch
 continuation behavior, and shell syntax for the adapter and shared CFL builder.
 Runtime sanitizer validation remains in
 `.github/workflows/ci-clusterfuzzlite.yml` and the local OSS-Fuzz helper flow
-documented in `.github/ci/cfl/README.md`. Core PR and path-scoped sanitizer
-lanes exclude `ci-infrastructure`; run these two CTests directly when their
-workflow, adapter, target, patch, or corpus contract changes.
+documented in `.github/ci/cfl/README.md`. Normal Unix, Windows, tool, PR,
+and sanitizer CTest lanes exclude `clusterfuzzlite`; the tool workflow also excludes
+`ci-infrastructure` and has no option to include it. Run these two CTests
+directly when their workflow, adapter, target, patch, or corpus contract changes.
 
 `iccdev.pawg-report-regressions` builds the standalone `iccPawgReport` tool,
 checks the 32-item PAWG report structure, verifies summary counts against the
@@ -415,21 +375,54 @@ runtime under sanitizer and coverage builds.
 and inverse conversions. It guards against divide-by-zero and non-finite
 appearance state regressions without committing generated profiles.
 
-`iccdev.hybrid-pipeline` preserves the full six-phase hybrid spectral/colorimetric
-integration test as a separate `slow` CTest label. The maintainer `check` target
-runs the full suite, including `slow`. Routine CI tool sweeps use the fast lane
+`iccdev.hybrid-pipeline` runs all six hybrid spectral/colorimetric phases, using
+four representative T-shirt overprint cases in CTest. The complete colour and
+background matrix remains in the default `Testing/hybrid/BuildAndTest.sh`, which
+the comprehensive Unix profile workflow runs separately and now treats a script
+failure as a failed job. The CTest remains a
+`slow` gate. The maintainer `check` target runs it; routine CI tool sweeps use the fast lane
 with `--label-exclude slow --label-exclude calculator`, and the `check-fast`
 target excludes `slow` and `known-red` with one label regular expression. Run
 full CTest or the hybrid gate explicitly when the slow and calculator suites
 are in scope. The hybrid aggregate reserves up to four CTest processor slots:
 `ctest --test-dir build -R '^iccdev\.hybrid-pipeline$' --output-on-failure`.
 
-The normal `ci-pr-action` full lane excludes the `pr-extended` and
-`ci-infrastructure` labels to keep core PR results deterministic. Label
-membership defines the deferred tests; all other slow tests remain in the PR
-lane. The separate sanitizer workflow also excludes infrastructure by default.
-Manual `ci-regression-checks` dispatch can include infrastructure tests
-explicitly. Run any deferred test directly when the change affects it.
+The `ci-pr-action` tool gate excludes `pr-extended` and `ci-infrastructure`
+CTests. All broad normal CI and PR CTest sweeps exclude `clusterfuzzlite`;
+other slow tests remain in the full mode. The manual `ci-regression-checks`
+workflow uses the same tool gate and has no infrastructure opt-in. Run any
+deferred test directly when the change affects it.
+
+### Elapsed-time review (2026-10-30)
+
+The GCC strict ASAN+UBSAN Debug tool gate in
+<a href="https://github.com/InternationalColorConsortium/iccDEV/actions/runs/40980169467/job/123817966230">ci-qa-pr run 40980169467</a>
+spent 953 seconds in its CTest step. Individual durations below identify work
+to inspect, but CTest runs tests concurrently; adding durations does not
+predict job wall time. Keep the checks with unique parser, corpus, or security
+assertions even when they are slow.
+
+| CTest | Observed | Decision |
+| --- | ---: | --- |
+| `iccdev.applyprofiles-observer-hbo-regression` | 28.58 s | Keep its unique ASAN replay; non-ASAN builds report an explicit skip. |
+| `iccdev.qa-profile-manifest` | 26.32 s | Keep the generated-profile verdict inventory. |
+| `iccdev.json-cli-exercise` | 18.99 s | Keep broad CLI coverage; tighten permissive assertions before narrowing it. |
+| `iccdev.pawg-report-regressions` | 71.00 s | Keep PAWG structure and hostile-input checks; consider splitting independent subcases after critical-path measurement. |
+| `iccdev.apply-throughput` | 121.80 s | Replace the large measurement with a bounded all-case correctness smoke; run large throughput measurements manually. |
+| `iccdev.xml-parser-regressions` | 47.86 s | Keep XML depth, size, and large CLUT checks; split the large case only if the fast checks retain a current-head gate. |
+| `iccdev.json-parser-regressions` | 142.81 s | Keep the large round trip and parser guards under `pr-extended`. |
+| `iccdev.json-sort-regression` | 174.68 s | Keep sorting, determinism, and round-trip assertions under `pr-extended`. |
+| `iccdev.hybrid-pipeline` | 344.30 s | Keep a representative blocking sanitizer CTest; the direct script retains the complete overprint matrix in comprehensive Unix validation. |
+| `iccdev.applysearch-cli-args` | 105.02 s | Keep a fast two-worker boundary in the PR gate; put the eight-worker bulk matrix in `pr-extended`. |
+| `iccdev.issue-1781-applytolink-qa-matrix` | 96.80 s | Keep its grid-255 capacity control under `pr-extended`; review prerequisite skips before making it a universal gate. |
+
+On the same cached container image, the original throughput CTest took 66.29
+seconds and the bounded version took 4.06 seconds. The original hybrid CTest
+took 78.26 seconds and the four-case version took 39.94 seconds. These are
+local, isolated comparisons; hosted savings require a new run on the same
+runner class and a CTest timeline. The full direct hybrid script also passed
+locally through all six phases and now fails the comprehensive Unix job if it
+exits nonzero.
 
 Use a standalone CTest row for focused crash regressions that need clear
 maintainer visibility in CTest output. For example,
@@ -445,9 +438,14 @@ arithmetic.
 
 `iccdev.xml-spec-qa` converts canonical ICC.2 spectral, bi-spectral, and MCS
 XML fixtures and pins exact header signatures, ranges, channel relationships,
-XML fidelity, malformed-input rejection, PAWG JSON generation, and the current
-`iccRoundTrip` class boundary. It is a Unix-like bash-backed full-tool test;
-see `docs/xml-spec-qa.md` for the specification matrix and interpretation.
+XML fidelity, required spectral CLUT, matrix, and observer payloads,
+malformed-input rejection,
+PAWG JSON generation, and the current `iccRoundTrip` class boundary. It is a
+Unix-like bash-backed full-tool test; see `docs/xml-spec-qa.md` for the
+specification matrix and interpretation. The cross-platform
+`iccdev.spectral-clut-xml-channel-mismatch` executable independently drives
+the spectral CLUT, matrix, and observer reader siblings and pins their omitted
+required-data contracts at the library boundary.
 
 `iccdev.xml-json-roundtrip-qa` runs the Python 3.9+ corpus runner against one
 tracked valid display profile. It asserts clean validation, byte identity,
@@ -469,6 +467,8 @@ Windows full tool builds register these tests when all targets are available:
 | `iccdev.fileio-seek-tell` | `.github/ci/regression/fileio-seek-tell.cpp` |
 | `iccdev.iccconnect-threaded-cmm` | `.github/ci/regression/iccconnect-threaded-cmm.cpp` |
 | `iccdev.windows-iccdevcmm-smoke` | `Tools/Winnt/IccDEVCmm/tests/IccDEVCmmSmoke.cpp` |
+| `iccdev.windows-iccdevcmm-runtime-install` | `Build/Cmake/Testing/RunWindowsCmmPackageInstallTest.cmake` |
+| `iccdev.windows-iccdevcmm-iis-runtime-manifest` | `Build/Cmake/Testing/RunWindowsCmmIisRuntimeManifestTest.cmake` |
 | `iccdev.parser-restore-calls` | `.github/ci/regression/parser-restore-calls.cpp` |
 | `iccdev.profile-write-failure` | `.github/ci/regression/profile-write-failure.cpp` |
 | `iccdev.windows-create-profiles` | `Testing/CreateAllProfiles.bat` |
@@ -559,9 +559,13 @@ settings so the executable and instrumented DLL share one runtime contract.
 Windows ICM CMM DLL directly, verifies the required `CM*` exports and `ICCD`
 CMM identity, validates `sRGB_v4_ICC_preference.icc`, then creates, translates
 through, and deletes a two-profile RGB transform without registering the CMM
-globally. `iccdev.issue-1009-iccjson-profilejson-export` checks that
-`IccJSON2.dll` exports `CIccProfileJson::~CIccProfileJson` for MSVC ABI
-consumers.
+globally. The CMM runtime-install test loads the DLL from an isolated install
+with its vcpkg zlib dependency, even when IIS is enabled. The IIS manifest
+test checks that the combined installers record the zlib DLL once and uninstall
+without missing-file reports. Both package tests require a shared-zlib Windows
+vcpkg Release build; the combined test also requires IIS.
+`iccdev.issue-1009-iccjson-profilejson-export` checks that `IccJSON2.dll`
+exports `CIccProfileJson::~CIccProfileJson` for MSVC ABI consumers.
 
 `iccdev.installed-package-consumer` runs on every platform and covers the
 *installed* package rather than the build tree. It stages an install into a
@@ -660,7 +664,11 @@ The `ci-json-python` orchestrator calls the reusable Unix and Windows build
 workflows. The Windows reusable workflow serially builds its CTest helper
 binaries, runs CTest discovery, and executes CTest with JUnit output. The Unix
 reusable workflow runs the Linux CTest gate for full-test jobs and verifies its
-discovered suite set before execution. `ci-pr-win` uses a non-cancelling, Windows-specific
+discovered suite set before execution. `ci-pr-win` reports helper compilation
+and CTest execution separately for MSVC, ClangCL, and MinGW, with JUnit results
+in each lane. MSVC and ClangCL helper builds remain serial because vcpkg stages
+shared runtime DLLs; MinGW's MSYS2 static lane uses bounded two-way compilation.
+`ci-pr-win` uses a non-cancelling, Windows-specific
 concurrency group so a direct Windows dispatch cannot interrupt an active
 reusable Windows gate. `ci-pr-unix` supports direct `workflow_dispatch` with
 the same safe matrix defaults as its reusable invocation. `CI Comprehensive

@@ -27,8 +27,8 @@ jobs:
     timeout-minutes: 45
     env:
       ICCDEV_VCPKG_EXPORT_URL: >-
-        https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip
-      ICCDEV_VCPKG_EXPORT_SHA256: 89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e
+        https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-23241-libheif-deps/iccdev-windows-vcpkg-classic-libheif-3087493.zip
+      ICCDEV_VCPKG_EXPORT_SHA256: 9b051a50f152f616986e735d618a2f5ade2cf5443c680216894f2897dbbf5eca
     defaults:
       run:
         shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
@@ -229,19 +229,21 @@ jobs:
   unix:
     name: Native MATLAB (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: Linux x86_64
-            runner: ubuntu-24.04
+            runner: ubuntu-latest
             architecture: x86_64
             mex-extension: mexa64
+            timeout_minutes: 45
           - platform: macOS Apple Silicon
             runner: macos-15
             architecture: arm64
             mex-extension: mexmaca64
+            timeout_minutes: 60
     defaults:
       run:
         shell: bash --noprofile --norc {0}
@@ -339,7 +341,7 @@ jobs:
 
   docker-interop:
     name: MATLAB Docker interoperability
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       ICCDEV_IMAGE_REPOSITORY: ghcr.io/internationalcolorconsortium/iccdev

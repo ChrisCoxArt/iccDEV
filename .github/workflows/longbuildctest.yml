@@ -4,11 +4,12 @@
 #                 All rights reserved.
 #                 https://color.org
 #
-# Manual caller for the governed comprehensive build matrix.
+# Manual pre-PR caller for the governed comprehensive build and CTest matrix.
+# Use full CTest with a zero recent limit for exhaustive branch screening.
 #
 ###############################################################
 
-name: "CI Comprehensive Build and Test"
+name: "ci-qa-pr"
 
 permissions:
   contents: read

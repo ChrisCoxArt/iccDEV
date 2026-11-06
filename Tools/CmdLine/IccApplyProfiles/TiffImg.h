@@ -50,6 +50,7 @@
 #include "tiffio.h"                  // need tiff library
 #include "IccProfLibConf.h"
 #include "icProfileHeader.h"
+#include <string>
 
 #define PHOTO_MINISBLACK  0
 #define PHOTO_MINISWHITE  1
@@ -76,6 +77,10 @@
 namespace iccDEV {
 #endif
 
+// TIFFGetVersion() also contains copyright lines. Keep CLI and telemetry
+// version reports to its first line while reading the linked runtime library.
+std::string icTiffRuntimeVersion();
+
 class CTiffImg
 {
 public:
@@ -94,15 +99,27 @@ public:
               float fXRes, float fYRes, bool bCompress=true, bool bSep=false,
               unsigned int nResolutionUnit=RESUNIT_INCH,
               unsigned int nTileWidth=0, unsigned int nTileHeight=0,
-              bool bBigTiff=false);
+              bool bBigTiff=false, unsigned int nMaxDecodeBufferBytes=0);
+  // nMaxDecodeBufferBytes bounds one internal strip or tile-band allocation.
+  // Zero selects the safe 256 MiB default, which can be raised for trusted large
+  // images with ICCDEV_TIFF_MAX_DECODE_MIB. A nonzero API argument takes
+  // precedence over the environment. Metadata-only opens allocate neither
+  // buffer and are unaffected.
+  /** Open one zero-based main-chain IFD. nDirectory does not select SubIFDs.
+      Metadata-only mode does not allocate a pixel decode buffer. */
   bool Open(const char *szFname, bool bMetadataOnly=false, unsigned int nDirectory=0,
-            unsigned int nMaxTileBandBytes=256u * 1024u * 1024u);
+            unsigned int nMaxDecodeBufferBytes=0);
+  // Resolve the command-line default, including its strict environment opt-in.
+  static bool GetDefaultDecodeBufferLimit(unsigned int &nBytes);
   bool IsTiled() const { return m_bTiled; }
   unsigned int GetTileBandSize() const { return m_bTiled ? m_nTileBandSize : 0; }
   bool IsBigTiff() const { return m_hTif && TIFFIsBigTIFF(m_hTif); }
   unsigned int GetTileWidth() const { return m_nTileWidth; }
   unsigned int GetTileHeight() const { return m_nTileHeight; }
   unsigned int GetDirectory() const { return m_hTif ? TIFFCurrentDirectory(m_hTif) : 0; }
+  /** Count at most 4096 main-chain IFDs on an open read handle, excluding
+      SubIFDs. Return zero on failure or an overlong chain; restore the selected
+      directory before returning when possible. */
   unsigned int GetDirectoryCount();
   TIFF *GetTiffHandle() const { return m_hTif; }
   // True once this object's Create() got past TIFFOpen(..., "w") -- i.e. the
@@ -129,6 +146,10 @@ public:
   double GetWidthIn() { return InchesFromPixels(m_nWidth, m_fXRes); }
   double GetHeightIn() { return InchesFromPixels(m_nHeight, m_fYRes); }
   unsigned int GetBitsPerSample() { return m_nBitsPerSample;}
+  // The raw libtiff PHOTOMETRIC_* value read for the open image.  GetPhoto()
+  // returns CTiffImg's processing-oriented PHOTO_* classification instead and
+  // intentionally folds some TIFF values together.
+  icUInt16Number GetTiffPhotometric() const { return m_nPhoto; }
   unsigned int GetPhoto();
   unsigned int GetSamples() { return m_nSamples;}
   // libtiff's ExtraSamples count for the open image, and 0 when tag 338 is absent.
@@ -145,7 +166,7 @@ public:
   // when you need the count the file actually carries.
   //
   // That matters because colour management keys off this value:
-  // iccApplyProfiles.cpp:541-547 lets a profile match sn-sen instead of sn, so on
+  // iccApplyProfiles can match a profile against sn-sen instead of sn, so on
   // such a file a profile is matched against the repaired channel split rather than
   // the file's own.  The behaviour predates #2386 and is unchanged by it -- which
   // split is correct is the carrier-contract question open on #2379/#2385, so it is
@@ -198,8 +219,8 @@ public:
   bool SetIccProfile(unsigned char *pProfile, unsigned int  nLen);
 
 protected:
-  bool CalcTileLayout(unsigned int nMaxTileBandBytes=256u * 1024u * 1024u);
-  bool SetupTiles(unsigned int nMaxTileBandBytes=256u * 1024u * 1024u);
+  bool CalcTileLayout(unsigned int nMaxTileBandBytes=0);
+  bool SetupTiles(unsigned int nMaxTileBandBytes=0);
   bool ReadTileLine(unsigned char *pBuf);
   bool WriteTileLine(const unsigned char *pBuf);
   // Shared by GetWidthIn()/GetHeightIn(); see the comment on those.  Guards fRes as

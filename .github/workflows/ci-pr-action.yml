@@ -5,7 +5,8 @@
 #                 https://color.org
 #
 #
-## Intent: iccDEV ci-pr-action
+## Intent: final PR-head cross-platform builds, profile generation, and
+##         representative CTest after local and comprehensive pre-PR screening.
 #
 # Main Entry Point for all PR. No Forks, Thank You
 #
@@ -56,7 +57,7 @@ on:
           - governance
           - docs
       ctest_recent_limit:
-        description: 'Fast lane: run only the last N registered CTests; 0 means all'
+        description: 'Fast lane: core smoke plus last N registered CTests; 0 means all'
         required: false
         default: '1'
         type: choice
@@ -109,11 +110,9 @@ jobs:
       build_config_changed: ${{ steps.diffcheck.outputs.build_config_changed }}
       testing_changed: ${{ steps.diffcheck.outputs.testing_changed }}
       ci_changed: ${{ steps.diffcheck.outputs.ci_changed }}
-      external_tooling_changed: ${{ steps.diffcheck.outputs.external_tooling_changed }}
-      openimageio_tooling_changed: ${{ steps.diffcheck.outputs.openimageio_tooling_changed }}
-      heif_tooling_changed: ${{ steps.diffcheck.outputs.heif_tooling_changed }}
-      libpng_tooling_changed: ${{ steps.diffcheck.outputs.libpng_tooling_changed }}
       container_changed: ${{ steps.diffcheck.outputs.container_changed }}
+      mcp_changed: ${{ steps.diffcheck.outputs.mcp_changed }}
+      apple_xcode_changed: ${{ steps.diffcheck.outputs.apple_xcode_changed }}
       image_definition_changed: ${{ steps.diffcheck.outputs.image_definition_changed }}
       container_toolchain_required: ${{ steps.diffcheck.outputs.container_toolchain_required }}
       trusted_base_image_available: ${{ steps.diffcheck.outputs.trusted_base_image_available }}
@@ -302,12 +301,10 @@ jobs:
           ctest_recent_limit=0
           warning_policy=fail
           image_definition_changed=false
+          mcp_changed=false
+          apple_xcode_changed=false
           container_toolchain_required=false
           trusted_base_image_available=false
-          external_tooling_changed=false
-          openimageio_tooling_changed=false
-          heif_tooling_changed=false
-          libpng_tooling_changed=false
           # Default to the full PR CTest surface. The pr-extended tests
           # are deferred only by the PR caller and remain in regression runs.
           ctest_mode=full
@@ -349,11 +346,9 @@ jobs:
             write_github_output build_config_changed "$build_config_changed"
             write_github_output testing_changed "$testing_changed"
             write_github_output ci_changed "$ci_changed"
-            write_github_output external_tooling_changed "$external_tooling_changed"
-            write_github_output openimageio_tooling_changed "$openimageio_tooling_changed"
-            write_github_output heif_tooling_changed "$heif_tooling_changed"
-            write_github_output libpng_tooling_changed "$libpng_tooling_changed"
             write_github_output container_changed "$container_changed"
+            write_github_output mcp_changed "$mcp_changed"
+            write_github_output apple_xcode_changed "$apple_xcode_changed"
             write_github_output image_definition_changed "$image_definition_changed"
             write_github_output container_toolchain_required "$container_toolchain_required"
             write_github_output trusted_base_image_available "$trusted_base_image_available"
@@ -509,6 +504,7 @@ jobs:
           if ! validate_sha "$head_sha" || ! validate_sha "$base_sha"; then
             echo "Warning: invalid or missing PR commit SHA; assuming source changed for safety" >&2
             image_definition_changed=true
+            mcp_changed=true
             container_toolchain_required=true
             write_scope_outputs true true true true false true false true true true
             exit 0
@@ -540,6 +536,7 @@ jobs:
           if ! git merge-base "origin/${base_ref}" HEAD >/dev/null 2>&1; then
             echo "Warning: no merge base found; assuming source changed for safety" >&2
             image_definition_changed=true
+            mcp_changed=true
             container_toolchain_required=true
             write_scope_outputs true true true true false true false true true true
             exit 0
@@ -560,6 +557,8 @@ jobs:
           testing_changed=false
           ci_changed=false
           container_changed=false
+          mcp_changed=false
+          apple_xcode_changed=false
           docs_only=false
           example_consumer_changed=false
 
@@ -603,18 +602,26 @@ jobs:
             exit 1
           fi
           while IFS='=' read -r classifier_key classifier_value; do
+            if [[ ! "$classifier_key" =~ ^[a-z][a-z0-9_]*$ ]]; then
+              echo "Invalid classifier key" >&2
+              exit 1
+            fi
             if [[ "$classifier_value" != "true" && "$classifier_value" != "false" ]]; then
               echo "Invalid classifier value for $classifier_key" >&2
               exit 1
             fi
+            if [[ -v "classifier_keys_seen[$classifier_key]" ]]; then
+              echo "Duplicate classifier output: $classifier_key" >&2
+              exit 1
+            fi
+            classifier_keys_seen["$classifier_key"]=1
             case "$classifier_key" in
-              source_changed|build_config_changed|testing_changed|external_tooling_changed|openimageio_tooling_changed|heif_tooling_changed|libpng_tooling_changed)
-                if [[ -v "classifier_keys_seen[$classifier_key]" ]]; then
-                  echo "Duplicate classifier output: $classifier_key" >&2
-                  exit 1
-                fi
-                classifier_keys_seen["$classifier_key"]=1
+              source_changed|build_config_changed|testing_changed)
                 printf -v "$classifier_key" '%s' "$classifier_value"
+                ;;
+              *_tooling_changed)
+                # Older trusted bases still emit retired informational flags.
+                echo "Ignoring legacy classifier output: $classifier_key"
                 ;;
               *)
                 echo "Unexpected classifier output: $classifier_key" >&2
@@ -623,9 +630,7 @@ jobs:
             esac
           done <<< "$classifier_output"
           for classifier_key in \
-            source_changed build_config_changed testing_changed \
-            external_tooling_changed openimageio_tooling_changed \
-            heif_tooling_changed libpng_tooling_changed; do
+            source_changed build_config_changed testing_changed; do
             if [[ ! -v "classifier_keys_seen[$classifier_key]" ]]; then
               echo "Missing classifier output: $classifier_key" >&2
               exit 1
@@ -638,6 +643,14 @@ jobs:
 
           if has_changed_file '^(Dockerfile|\.dockerignore|\.trivyignore(\.yaml)?$|\.github/ci/(docker|requirements)/|iccdev-mcp/|\.github/workflows/ci-docker-pr\.yml|\.github/scripts/(check-workflow-cache-policy|sanitize-sed)\.sh)'; then
             image_definition_changed=true
+          fi
+
+          if has_changed_file '^(Dockerfile|\.dockerignore|iccdev-mcp/|\.github/ci/requirements/docker-|\.github/workflows/(ci-mcp-server|ci-pr-action)\.yml$|\.github/scripts/(iccdev-mcp-package-smoke|validate-mcp-release-package)\.py$)'; then
+            mcp_changed=true
+          fi
+
+          if has_changed_file '^\.github/workflows/(ci-apple-platform-smoke|ci-apple-mobile-core|ci-pr-action)\.yml$|^\.github/scripts/iccdev-xcode-ctest-smoke\.sh$'; then
+            apple_xcode_changed=true
           fi
 
           if [[ "$source_changed" == "true" || "$build_config_changed" == "true" || "$testing_changed" == "true" ]]; then
@@ -706,8 +719,8 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ steps.diffcheck.outputs.build_config_changed }}
           TESTING_CHANGED: ${{ steps.diffcheck.outputs.testing_changed }}
           CI_CHANGED: ${{ steps.diffcheck.outputs.ci_changed }}
-          EXTERNAL_TOOLING_CHANGED: ${{ steps.diffcheck.outputs.external_tooling_changed }}
           CONTAINER_CHANGED: ${{ steps.diffcheck.outputs.container_changed }}
+          MCP_CHANGED: ${{ steps.diffcheck.outputs.mcp_changed }}
           DOCS_ONLY: ${{ steps.diffcheck.outputs.docs_only }}
         run: |
           set -euo pipefail
@@ -759,8 +772,8 @@ jobs:
             echo "- **Build config changed:** \`$(sanitize_line "${BUILD_CONFIG_CHANGED:-false}")\`"
             echo "- **Testing/regression changed:** \`$(sanitize_line "${TESTING_CHANGED:-false}")\`"
             echo "- **CI/governance changed:** \`$(sanitize_line "${CI_CHANGED:-false}")\`"
-            echo "- **External research tooling changed:** \`$(sanitize_line "${EXTERNAL_TOOLING_CHANGED:-false}")\`"
             echo "- **Container surface changed:** \`$(sanitize_line "${CONTAINER_CHANGED:-false}")\`"
+            echo "- **MCP surface changed:** \`$(sanitize_line "${MCP_CHANGED:-false}")\`"
             echo "- **Docs only:** \`$(sanitize_line "${DOCS_ONLY:-false}")\`"
             echo ""
             echo "If you have questions, contact a listed [Maintainer](https://github.com/InternationalColorConsortium/iccDEV/blob/master/.github/CODEOWNERS)."
@@ -831,7 +844,6 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ needs.detect-src.outputs.build_config_changed }}
           TESTING_CHANGED: ${{ needs.detect-src.outputs.testing_changed }}
           CI_CHANGED: ${{ needs.detect-src.outputs.ci_changed }}
-          EXTERNAL_TOOLING_CHANGED: ${{ needs.detect-src.outputs.external_tooling_changed }}
           CONTAINER_CHANGED: ${{ needs.detect-src.outputs.container_changed }}
           DOCS_ONLY: ${{ needs.detect-src.outputs.docs_only }}
         run: |
@@ -878,7 +890,6 @@ jobs:
           echo "Build config changed: $(sanitize_print "$BUILD_CONFIG_CHANGED")"
           echo "Testing/regression changed: $(sanitize_print "$TESTING_CHANGED")"
           echo "CI/governance changed: $(sanitize_print "$CI_CHANGED")"
-          echo "External research tooling changed: $(sanitize_print "$EXTERNAL_TOOLING_CHANGED")"
           echo "Container surface changed: $(sanitize_print "$CONTAINER_CHANGED")"
           echo "Docs only: $(sanitize_print "$DOCS_ONLY")"
 
@@ -898,7 +909,6 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ needs.detect-src.outputs.build_config_changed || 'false' }}
           TESTING_CHANGED: ${{ needs.detect-src.outputs.testing_changed || 'false' }}
           CI_CHANGED: ${{ needs.detect-src.outputs.ci_changed || 'false' }}
-          EXTERNAL_TOOLING_CHANGED: ${{ needs.detect-src.outputs.external_tooling_changed || 'false' }}
           CONTAINER_CHANGED: ${{ needs.detect-src.outputs.container_changed || 'false' }}
           DOCS_ONLY: ${{ needs.detect-src.outputs.docs_only || 'false' }}
         run: |
@@ -939,7 +949,6 @@ jobs:
           : "${BUILD_CONFIG_CHANGED:=false}"
           : "${TESTING_CHANGED:=false}"
           : "${CI_CHANGED:=false}"
-          : "${EXTERNAL_TOOLING_CHANGED:=false}"
           : "${CONTAINER_CHANGED:=false}"
           : "${DOCS_ONLY:=false}"
 
@@ -960,7 +969,6 @@ jobs:
             echo "- **Build config changed:** \`$(sanitize_line "${BUILD_CONFIG_CHANGED}")\`"
             echo "- **Testing/regression changed:** \`$(sanitize_line "${TESTING_CHANGED}")\`"
             echo "- **CI/governance changed:** \`$(sanitize_line "${CI_CHANGED}")\`"
-            echo "- **External research tooling changed:** \`$(sanitize_line "${EXTERNAL_TOOLING_CHANGED}")\`"
             echo "- **Container surface changed:** \`$(sanitize_line "${CONTAINER_CHANGED}")\`"
             echo "- **Docs only:** \`$(sanitize_line "${DOCS_ONLY}")\`"
             echo ""
@@ -1071,9 +1079,16 @@ jobs:
       ctest_mode: ${{ needs.validate-inputs.outputs.ctest-mode }}
       ctest_recent_limit: ${{ needs.validate-inputs.outputs.ctest-recent-limit }}
       exclude_extended_pr_tests: true
-      include_infrastructure_tests: false
       instrumentation: core
       warning_policy: ${{ needs.validate-inputs.outputs.warning-policy }}
+      target_sha: ${{ needs.detect-src.outputs.target_sha }}
+
+  mcp-server:
+    if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' || needs.detect-src.outputs.mcp_changed == 'true' }}
+    name: MCP server package and Docker checks
+    needs: [detect-src]
+    uses: ./.github/workflows/ci-mcp-server.yml
+    with:
       target_sha: ${{ needs.detect-src.outputs.target_sha }}
 
   win-ci:
@@ -1111,6 +1126,16 @@ jobs:
       warning-policy: ${{ needs.validate-inputs.outputs.warning-policy }}
       profile-test-mode: smoke
       target-sha: ${{ needs.detect-src.outputs.target_sha }}
+
+  apple-xcode-ctest:
+    if: ${{ (needs.detect-src.outputs.run_native_matrix == 'true' || needs.detect-src.outputs.apple_xcode_changed == 'true') && needs.detect-src.outputs.ci_scope != 'fast-lane' }}
+    name: Apple Xcode CTest runtime layouts
+    needs: [detect-src, validate-inputs]
+    uses: ./.github/workflows/ci-apple-platform-smoke.yml
+    with:
+      scope: xcode
+      target-sha: ${{ needs.detect-src.outputs.target_sha }}
+      base-sha: ${{ needs.detect-src.outputs.base_sha }}
 
   example-project:
     if: ${{ needs.detect-src.outputs.example_consumer_changed == 'true' }}
@@ -1221,9 +1246,11 @@ jobs:
       # - lint
       # - scan-build
       - tool-tests
+      - mcp-server
       - win-ci
       - macos-release-lto
       - macos-debug
+      - apple-xcode-ctest
       - example-project
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
@@ -1278,9 +1305,11 @@ jobs:
           LINT_RESULT: skipped
           SCAN_RESULT: skipped
           TOOL_RESULT: ${{ needs['tool-tests'].result }}
+          MCP_RESULT: ${{ needs['mcp-server'].result }}
           WIN_RESULT: ${{ needs['win-ci'].result }}
           MACOS_RELEASE_LTO_RESULT: ${{ needs['macos-release-lto'].result }}
           MACOS_DEBUG_RESULT: ${{ needs['macos-debug'].result }}
+          APPLE_XCODE_RESULT: ${{ needs['apple-xcode-ctest'].result }}
           EXAMPLE_RESULT: ${{ needs['example-project'].result }}
         run: |
           set -euo pipefail
@@ -1317,9 +1346,11 @@ jobs:
           LINT_RESULT="${LINT_RESULT:-success}"
           SCAN_RESULT="${SCAN_RESULT:-success}"
           TOOL_RESULT="${TOOL_RESULT:-success}"
+          MCP_RESULT="${MCP_RESULT:-success}"
           WIN_RESULT="${WIN_RESULT:-success}"
           MACOS_RELEASE_LTO_RESULT="${MACOS_RELEASE_LTO_RESULT:-success}"
           MACOS_DEBUG_RESULT="${MACOS_DEBUG_RESULT:-success}"
+          APPLE_XCODE_RESULT="${APPLE_XCODE_RESULT:-success}"
           EXAMPLE_RESULT="${EXAMPLE_RESULT:-success}"
           GCC15_LTO_RESULT="${GCC15_LTO_RESULT:-success}"
 
@@ -1344,15 +1375,17 @@ jobs:
           LINT_RESULT="$(trim_and_norm "$LINT_RESULT")"
           SCAN_RESULT="$(trim_and_norm "$SCAN_RESULT")"
           TOOL_RESULT="$(trim_and_norm "$TOOL_RESULT")"
+          MCP_RESULT="$(trim_and_norm "$MCP_RESULT")"
           WIN_RESULT="$(trim_and_norm "$WIN_RESULT")"
           MACOS_RELEASE_LTO_RESULT="$(trim_and_norm "$MACOS_RELEASE_LTO_RESULT")"
           MACOS_DEBUG_RESULT="$(trim_and_norm "$MACOS_DEBUG_RESULT")"
+          APPLE_XCODE_RESULT="$(trim_and_norm "$APPLE_XCODE_RESULT")"
           EXAMPLE_RESULT="$(trim_and_norm "$EXAMPLE_RESULT")"
           GCC15_LTO_RESULT="$(trim_and_norm "$GCC15_LTO_RESULT")"
 
           # --- compute overall result from upstream jobs ----------------------
           job_res=success
-          required_results=("$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$WIN_RESULT" "$MACOS_RELEASE_LTO_RESULT" "$MACOS_DEBUG_RESULT" "$EXAMPLE_RESULT")
+          required_results=("$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$MCP_RESULT" "$WIN_RESULT" "$MACOS_RELEASE_LTO_RESULT" "$MACOS_DEBUG_RESULT" "$APPLE_XCODE_RESULT" "$EXAMPLE_RESULT")
           for s in "${required_results[@]}"; do
             # 'skipped' is acceptable when run_native_matrix is false.
             # only 'failure' or 'cancelled' should cause overall failure
@@ -1423,9 +1456,11 @@ jobs:
             printf "| lint               | %s |\n" "$(sanitize_line "$LINT_RESULT")"
             printf "| scan-build         | %s |\n" "$(sanitize_line "$SCAN_RESULT")"
             printf "| tool-tests         | %s |\n" "$(sanitize_line "$TOOL_RESULT")"
+            printf "| mcp-server         | %s |\n" "$(sanitize_line "$MCP_RESULT")"
             printf "| win-ci             | %s |\n" "$(sanitize_line "$WIN_RESULT")"
             printf "| macos-release-lto  | %s |\n" "$(sanitize_line "$MACOS_RELEASE_LTO_RESULT")"
             printf "| macos-debug        | %s |\n" "$(sanitize_line "$MACOS_DEBUG_RESULT")"
+            printf "| apple-xcode-ctest  | %s |\n" "$(sanitize_line "$APPLE_XCODE_RESULT")"
             printf "| example-project    | %s |\n" "$(sanitize_line "$EXAMPLE_RESULT")"
             echo ""
             echo "**Overall Result:** \`$(sanitize_line "$job_res")\`"

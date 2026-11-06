@@ -37,12 +37,16 @@ on:
         description: "Run legacy native wheel smoke when no shared wheel matrix is used"
         type: boolean
         default: true
+      timeout-minutes:
+        description: "Maximum execution time after a runner is assigned"
+        type: number
+        default: 45
 
 jobs:
   build-test:
     name: "Build + Test (${{ inputs.os }}, Python ${{ inputs.python-version }})"
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.timeout-minutes }}
 
     defaults:
       run:
@@ -251,10 +255,7 @@ jobs:
           echo ""
           echo "=== hybrid/BuildAndTest.sh ==="
           cd "${WORKSPACE_DIR}/Testing/hybrid"
-          sh BuildAndTest.sh 2>&1 | tee "$LOGDIR/hybrid-BuildAndTest.log" || {
-            rc=$?
-            echo "WARN: hybrid/BuildAndTest.sh exited $rc"
-          }
+          sh BuildAndTest.sh 2>&1 | tee "$LOGDIR/hybrid-BuildAndTest.log"
           HYBRID_COUNT=$(find . -name '*.icc' | wc -l)
           echo "Generated $HYBRID_COUNT hybrid profiles"
 
@@ -301,17 +302,19 @@ jobs:
             --parallel "$NPROC" 2>&1 | tee "$LOGDIR/build-test-binaries.log"
 
           echo "=== CTest discovery ==="
-          ctest --test-dir "${WORKSPACE_DIR}/Build" -N --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list.txt"
-
-          echo "=== Routine CTest discovery (excluding slow) ==="
           ctest --test-dir "${WORKSPACE_DIR}/Build" -N \
-            --label-exclude slow \
+            --label-exclude clusterfuzzlite \
+            --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list.txt"
+
+          echo "=== Routine CTest discovery (excluding slow and ClusterFuzzLite) ==="
+          ctest --test-dir "${WORKSPACE_DIR}/Build" -N \
+            --label-exclude 'slow|clusterfuzzlite' \
             --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list-routine.txt"
 
           echo "=== CTest execution ==="
           ctest --test-dir "${WORKSPACE_DIR}/Build" \
             --parallel "$NPROC" \
-            --label-exclude slow \
+            --label-exclude 'slow|clusterfuzzlite' \
             --output-on-failure \
             --no-tests=error \
             --output-junit "$LOGDIR/ctest-results.xml" 2>&1 | tee "$LOGDIR/ctest-run.log"
@@ -746,8 +749,7 @@ jobs:
             "build>=1.2,<1.4" \
             "cython>=3.0,<3.2" \
             "numpy>=1.23,<3" \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "setuptools>=77,<85" \
             "twine>=5.0,<7" \
             "wheel>=0.46.2,<0.47" \
@@ -788,8 +790,7 @@ jobs:
           python -m pip install \
             "build>=1.2,<1.4" \
             "cython>=3.0,<3.2" \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "setuptools>=77,<85" \
             "twine>=5.0,<7" \
             "wheel>=0.46.2,<0.47" \
@@ -836,8 +837,7 @@ jobs:
           )
           /tmp/iccdev-sdist-venv/bin/python -m pip show -f iccdev
           /tmp/iccdev-sdist-venv/bin/python -m pip install \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "numpy>=1.23,<3" \
             --quiet
           (
@@ -864,11 +864,11 @@ jobs:
           source .github/scripts/sanitize-sed.sh
 
           cd "${WORKSPACE_DIR}/python"
-          if [[ ! "$PYTHON_VERSION" =~ ^3\.(9|12|13)$ ]]; then
+          if [[ ! "$PYTHON_VERSION" =~ ^3\.(11|12|13|14)$ ]]; then
             echo "Unsupported Python version for cibuildwheel smoke: $PYTHON_VERSION" >&2
             exit 1
           fi
-          python -m pip install "cibuildwheel>=2.23,<3" "twine>=5.0,<7" --quiet
+          python -m pip install "cibuildwheel==3.4.0" "twine>=5.0,<7" --quiet
 
           echo "=== cibuildwheel configured identifiers ==="
           python -m cibuildwheel --print-build-identifiers --platform windows
@@ -899,11 +899,6 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-
-          if [[ "$PYTHON_VERSION" == "3.9" ]]; then
-            echo "[SKIP] iccdev-mcp requires Python >=3.10; skipping MCP verification on Python $PYTHON_VERSION"
-            exit 0
-          fi
 
           cd "${WORKSPACE_DIR}"
           pip install "./iccdev-mcp/" 2>&1 | tail -10

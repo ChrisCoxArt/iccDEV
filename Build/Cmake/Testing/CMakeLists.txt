@@ -82,8 +82,7 @@ function(iccdev_add_regression_executable TARGET_NAME)
   add_dependencies(build-test-binaries "${TARGET_NAME}")
 endfunction()
 
-# Native extraction safety must run on Windows as well as Unix, without the
-# optional Nokia reader or the bash-backed carrier suite.
+# Native extraction safety must run on Windows as well as Unix.
 if(TARGET iccHeifDump)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
@@ -91,7 +90,7 @@ if(TARGET iccHeifDump)
       COMMAND "${Python3_EXECUTABLE}"
         "${ICCDEV_REPO_ROOT}/.github/scripts/test_heif_output_safety.py"
         --tool "$<TARGET_FILE:iccHeifDump>"
-        --corpus "${ICCDEV_REPO_ROOT}/.github/ci/tooling/heif/img")
+        --corpus "${ICCDEV_REPO_ROOT}/.github/ci/test-data/heif")
     set_tests_properties(iccdev.heif-output-safety PROPERTIES
       TIMEOUT 120
       LABELS "iccdev;heif;image;regression;issue-2831")
@@ -11803,12 +11802,15 @@ function(iccdev_add_windows_iccdevcmm_smoke_test)
 
   add_dependencies(check iccDEVCmmSmokeTest RefIccMAX)
 
+  # Generated from Testing/Named/NamedColorV4.xml; a checked-in ICC keeps this
+  # DLL smoke independent of the XML converter and its optional dependencies.
   add_test(
     NAME iccdev.windows-iccdevcmm-smoke
     COMMAND
       "$<TARGET_FILE:iccDEVCmmSmokeTest>"
       "$<TARGET_FILE:RefIccMAX>"
       "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+      "${ICCDEV_REPO_ROOT}/.github/ci/test-data/cmm-namedcolor-v4.icc"
   )
   set_tests_properties(iccdev.windows-iccdevcmm-smoke PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
@@ -11828,6 +11830,59 @@ function(iccdev_add_windows_iccdevcmm_smoke_test)
   set_tests_properties(iccdev.windows-iccdevcmm-smoke PROPERTIES
     ENVIRONMENT_MODIFICATION "${_iccdevcmm_windows_env_mods}"
   )
+
+  # Install only the CMM and its core library into an isolated prefix. This
+  # catches a missing vcpkg zlib DLL even when the optional IIS target would
+  # otherwise copy every vcpkg DLL into a full runtime package.
+  if(ENABLE_INSTALL_RIM AND ENABLE_SHARED_LIBS AND ICC_USE_ZLIB
+     AND VCPKG_TARGET_TRIPLET AND ZLIB_LIBRARY_RELEASE
+     AND NOT IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}"
+     AND NOT IS_ABSOLUTE "${CMAKE_INSTALL_DOCDIR}")
+    set(_iccdevcmm_vcpkg_installed "${VCPKG_INSTALLED_DIR}")
+    if(NOT _iccdevcmm_vcpkg_installed)
+      set(_iccdevcmm_vcpkg_installed "${_VCPKG_INSTALLED_DIR}")
+    endif()
+    get_filename_component(_iccdevcmm_zlib_name
+      "${ZLIB_LIBRARY_RELEASE}" NAME_WE)
+    set(_iccdevcmm_zlib_dll
+      "${_iccdevcmm_vcpkg_installed}/${VCPKG_TARGET_TRIPLET}/bin/${_iccdevcmm_zlib_name}.dll")
+    if(_iccdevcmm_vcpkg_installed AND EXISTS "${_iccdevcmm_zlib_dll}")
+      add_test(
+        NAME iccdev.windows-iccdevcmm-runtime-install
+        CONFIGURATIONS Release
+        COMMAND "${CMAKE_COMMAND}"
+          "-DICCDEV_CMM_PACKAGE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+          "-DICCDEV_CMM_PACKAGE_SMOKE=$<TARGET_FILE:iccDEVCmmSmokeTest>"
+          "-DICCDEV_CMM_PACKAGE_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          "-DICCDEV_CMM_PACKAGE_BINDIR=${CMAKE_INSTALL_BINDIR}"
+          "-DICCDEV_CMM_PACKAGE_DOCDIR=${CMAKE_INSTALL_DOCDIR}"
+          "-DICCDEV_CMM_PACKAGE_COMPONENT=${ICCDEV_RUNTIME_COMPONENT}"
+          "-DICCDEV_CMM_PACKAGE_ZLIB_DLL=${_iccdevcmm_zlib_name}.dll"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunWindowsCmmPackageInstallTest.cmake"
+      )
+      set_tests_properties(iccdev.windows-iccdevcmm-runtime-install PROPERTIES
+        WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+        TIMEOUT 60
+        LABELS "iccdev;windows;cmm;runtime-package;vcpkg;regression"
+      )
+      if(TARGET iccIisIsapi)
+        add_test(
+          NAME iccdev.windows-iccdevcmm-iis-runtime-manifest
+          CONFIGURATIONS Release
+          COMMAND "${CMAKE_COMMAND}"
+            "-DICCDEV_CMM_IIS_BUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-DICCDEV_CMM_IIS_BINDIR=${CMAKE_INSTALL_BINDIR}"
+            "-DICCDEV_CMM_IIS_ZLIB_DLL=${_iccdevcmm_zlib_name}.dll"
+            -P "${CMAKE_CURRENT_LIST_DIR}/RunWindowsCmmIisRuntimeManifestTest.cmake"
+        )
+        set_tests_properties(iccdev.windows-iccdevcmm-iis-runtime-manifest PROPERTIES
+          WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+          TIMEOUT 60
+          LABELS "iccdev;windows;cmm;iis;runtime-package;vcpkg;regression"
+        )
+      endif()
+    endif()
+  endif()
 endfunction()
 
 
@@ -11955,11 +12010,11 @@ endforeach()
 # registers the Windows test set and then return()s, so anything placed after it
 # never runs on Windows. This block handles WIN32 itself.
 #
-# Records; never asserts a timing threshold. Shared CI runners vary 20-30%
-# between runs on the same commit, so a threshold would flake without catching
-# anything a local run would not. The test fails on a real defect: a checksum
-# that moved between thread counts, a second Begin() that changed the output,
-# or -- since #2254 -- a run in which no case was measured at all.
+# Exercises every built-in chain with a small workload and checks every CSV row;
+# never asserts a timing threshold. Shared CI runners vary 20-30% between runs
+# on the same commit. The test fails on a real defect: a missing/skipped case,
+# a checksum that moved between thread counts, a second Begin() that changed
+# the output, or -- since #2254 -- a run in which no case was measured at all.
 #
 # That last clause is the anti-vacuity guard, and it is not theoretical. Before
 # #2254 the tool exited 0 after printing "0 case(s) measured, 9 skipped", so
@@ -11969,9 +12024,8 @@ endforeach()
 # failure, so a regression that restores the old exit status turns that test
 # red rather than quietly re-hollowing this one.
 #
-# The 'slow' label puts it on the existing opt-out path rather than inventing
-# one: check-fast excludes 'slow' while check excludes only 'known-red', so the
-# full suite runs it and the fast loop does not.
+# The 8192-pixel, one-repeat CTest is a correctness smoke. Longer throughput
+# measurements remain available through iccBenchApply -suite outside CTest.
 #
 # ENVIRONMENT hands the tool both profile roots. iccdev.create-profiles writes
 # generated profiles into the source tree while iccdev.windows-create-profiles
@@ -12045,7 +12099,10 @@ if(TARGET iccBenchApply)
     if(WIN32)
       add_test(
         NAME iccdev.apply-throughput
-        COMMAND "$<TARGET_FILE:iccBenchApply>" -suite -csv -pixels 65536 -repeats 3
+        COMMAND "${CMAKE_COMMAND}"
+          "-DICCDEV_BENCH_APPLY=$<TARGET_FILE:iccBenchApply>"
+          "-DICCDEV_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplySuite.cmake"
       )
     else()
       add_test(
@@ -12053,14 +12110,17 @@ if(TARGET iccBenchApply)
         COMMAND
           "${CMAKE_COMMAND}" -E env
           ${ICCDEV_TEST_ENV}
-          "$<TARGET_FILE:iccBenchApply>" -suite -csv -pixels 65536 -repeats 3
+          "${CMAKE_COMMAND}"
+          "-DICCDEV_BENCH_APPLY=$<TARGET_FILE:iccBenchApply>"
+          "-DICCDEV_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplySuite.cmake"
       )
     endif()
 
     set_tests_properties(iccdev.apply-throughput PROPERTIES
       WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
-      TIMEOUT 300
-      LABELS "iccdev;iccprofLib;benchmark;throughput;slow"
+      TIMEOUT 120
+      LABELS "iccdev;iccprofLib;benchmark;throughput;regression"
       FIXTURES_REQUIRED iccdev_profiles
       ENVIRONMENT "ICCDEV_BENCH_SOURCE_ROOT=${ICCDEV_REPO_ROOT};ICCDEV_BENCH_BUILD_ROOT=${ICCDEV_TEST_OUTDIR}/windows-testing"
     )
@@ -13651,6 +13711,13 @@ if(NOT WIN32)
   endif()
 endif()
 
+set(ICCDEV_TEST_PROFILE_ENV "LLVM_PROFILE_FILE=/dev/null")
+if(ENABLE_COVERAGE)
+  # Coverage callers own the bounded profile pool destination. Leaving this
+  # unset here preserves LLVM_PROFILE_FILE through cmake -E env at test time.
+  set(ICCDEV_TEST_PROFILE_ENV)
+endif()
+
 set(ICCDEV_TEST_ENV
   "PATH=${ICCDEV_TOOL_PATH}:$ENV{PATH}"
   "LD_LIBRARY_PATH=${ICCDEV_SHARED_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}"
@@ -13675,7 +13742,7 @@ set(ICCDEV_TEST_ENV
   # carry their own -g DWARF, and debuginfod only ever supplied *system*
   # library debug info - while removing the network dependency from every test.
   "DEBUGINFOD_URLS="
-  "LLVM_PROFILE_FILE=/dev/null"
+  ${ICCDEV_TEST_PROFILE_ENV}
   "ICCDEV_TOOLS_DIR=${ICCDEV_TOOLS_DIR}"
   "ICCDEV_TESTING_DIR=${ICCDEV_TESTING_DIR}"
   "ICCDEV_BUILD_DIR=${ICCDEV_SCRIPT_BUILD_DIR}"
@@ -13905,6 +13972,14 @@ function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
     return()
   endif()
 
+  # Optional CONFIGURATIONS restricts a script at CTest registration time,
+  # including single-config Release trees and multi-config Release invocations.
+  cmake_parse_arguments(PARSE_ARGV 5 _script "" "" "CONFIGURATIONS")
+  set(_script_config_args)
+  if(_script_CONFIGURATIONS)
+    list(APPEND _script_config_args CONFIGURATIONS ${_script_CONFIGURATIONS})
+  endif()
+
   string(REPLACE "." "-" _out_name "${NAME}")
   add_test(
     NAME "${NAME}"
@@ -13912,7 +13987,8 @@ function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
       "${CMAKE_COMMAND}" -E env
       ${ICCDEV_TEST_ENV}
       "ICCDEV_TEST_OUTDIR=${ICCDEV_TEST_OUTDIR}/${_out_name}"
-      "${BASH_EXECUTABLE}" "${SCRIPT}" ${ARGN}
+      "${BASH_EXECUTABLE}" "${SCRIPT}" ${_script_UNPARSED_ARGUMENTS}
+    ${_script_config_args}
   )
   set_tests_properties("${NAME}" PROPERTIES
     WORKING_DIRECTORY "${WORKING_DIRECTORY}"
@@ -14651,16 +14727,29 @@ set_tests_properties(iccdev.issue-1982-dual-pcs-selection-regression PROPERTIES
   SKIP_RETURN_CODE 77
 )
 
-# CI debug helper for the NaN/SixChanInputRef iccApplyToLink PoC.  It preserves
-# the original master heap-buffer-overflow replay with extra signature/register
-# logging and now expects the NaN range to fail closed before CMM/LUT generation.
-iccdev_add_script_test(
-  iccdev.applytolink-nan-sixchan-debug
-  120
-  "iccdev;tools;cmm;applytolink;debug;asan;ubsan"
-  "${ICCDEV_REPO_ROOT}"
-  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applytolink-nan-sixchan-debug.sh"
-)
+# The NaN range regression rejects invalid input before iccApplyToLink loads
+# the SixChanInputRef profile or enters CMM/LUT generation.
+# Keep it out of Release CTest discovery, including the comprehensive gate.
+# Single-config CTest does not pass -C, so configure it unconditionally only
+# in Debug trees; multi-config generators use add_test(CONFIGURATIONS Debug).
+if(ICCDEV_IS_MULTI_CONFIG OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_iccdev_debug_script_config_args)
+  if(ICCDEV_IS_MULTI_CONFIG)
+    list(APPEND _iccdev_debug_script_config_args CONFIGURATIONS Debug)
+  endif()
+  iccdev_add_script_test(
+    iccdev.applytolink-nan-sixchan-debug
+    120
+    "iccdev;tools;cmm;applytolink;debug;asan;ubsan"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applytolink-nan-sixchan-debug.sh"
+    ${_iccdev_debug_script_config_args}
+  )
+  # Report unavailable tools and non-ASan Debug builds as skips, not passes.
+  set_tests_properties(iccdev.applytolink-nan-sixchan-debug PROPERTIES
+    SKIP_RETURN_CODE 77
+  )
+endif()
 
 if(ICC_USE_ZLIB)
   set(_hextext_compression_mode "ON")
@@ -14844,6 +14933,20 @@ if(TARGET iccFromXml AND TARGET iccToXml AND TARGET iccApplyToLink)
   )
   set_tests_properties(iccdev.xml-parser-regressions PROPERTIES
     FIXTURES_REQUIRED iccdev_profiles
+  )
+endif()
+
+# Issue #2964: the file-backed SampledSegment and SingleSampledCurve readers must stop when
+# their sample table cannot be sized. The deterministic SingleSampledCurve cap
+# runs under every Unix tool build; a validated Linux LD_PRELOAD allocator DSO
+# also reaches the otherwise impractical SampledSegment allocation-failure path.
+if(TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.xml-sampled-curve-setsize
+    120
+    "iccdev;xml;curve;setsize;allocation;issue-2964;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-xml-sampled-curve-setsize-tests.sh"
   )
 endif()
 
@@ -15665,8 +15768,18 @@ if(TARGET iccApplySearch)
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applysearch-cli-args-regression.sh"
    )
   set_tests_properties(iccdev.applysearch-cli-args PROPERTIES
-    # The regression compares results from internal thread counts through 8.
-    # Keep that bounded workload from competing with another aggregate test.
+    # The routine regression activates at most two workers in one tool process.
+    PROCESSORS 2
+  )
+  iccdev_add_script_test(
+    iccdev.applysearch-cli-args-exhaustive
+    180
+    "iccdev;cmm;config;cli;security;issue-1674;issue-1853;issue-2190;regression;slow;pr-extended"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applysearch-cli-args-regression.sh"
+    --exhaustive-thread-matrix
+  )
+  set_tests_properties(iccdev.applysearch-cli-args-exhaustive PROPERTIES
     PROCESSORS "${_iccdev_aggregate_ctest_processors}"
   )
 endif()

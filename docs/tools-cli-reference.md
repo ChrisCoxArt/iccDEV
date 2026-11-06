@@ -27,7 +27,7 @@ single index for common command shapes and shared option tables.
 | `iccApplyToLink` | Build DeviceLink profiles or `.cube` LUTs | `iccApplyToLink output.icc 0 33 1 "Link" 0.0 1.0 1 1 src.icc 1 dst.icc 1` |
 | `iccRoundTrip` | Evaluate round-trip behavior | `iccRoundTrip profile.icc` |
 
-`iccApplySearch` accepts an optional leading `--threads N`. `N=0` uses hardware
+`iccApplySearch` accepts an optional `--threads N` in any argument order. `N=0` uses hardware
 concurrency, `N=1` is scalar, and larger values select workers up to
 `CIccThreadedCmm::GetMaxThreads()`; `-debugcalc` requires `N=1`. Legacy
 single-dash forms remain accepted.
@@ -123,9 +123,9 @@ node throughput.
 | Tool | Purpose | Example |
 |------|---------|---------|
 | `iccTiffDump` | Inspect TIFF metadata and embedded ICC | `iccTiffDump image.tif` |
-| `iccPngDump` | Inspect PNG metadata and embedded ICC | `iccPngDump image.png` |
-| `iccJpegDump` | Inspect JPEG size and embedded ICC APP2 information without writing files | `iccJpegDump image.jpg` |
-| `iccHeifDump` | Locally compare HEIF carrier ICC blobs with IccProfLib parsing | See [the tool Readme](../Tools/CmdLine/IccHeifDump/Readme.md) |
+| `iccPngDump` | Inspect or extract embedded ICC; inject ICC into a separate PNG | `iccPngDump image.png` |
+| `iccJpegDump` | Inspect or extract ICC APP2; replace ICC in a separate JPEG | `iccJpegDump image.jpg` |
+| `iccHeifDump` | Inspect HEIF ICC properties and optionally extract raw blobs | See [the tool Readme](../Tools/CmdLine/IccHeifDump/Readme.md) |
 | `iccPawgReport` | Emit an ICC PAWG profile assessment checklist report for security, conformance, and quality review | `iccPawgReport Testing/sRGB_v4_ICC_preference.icc` |
 | `iccPawgReport` | Emit machine-readable assessment results; Q1 includes structured, unrounded round-trip metrics | `iccPawgReport --json Testing/sRGB_v4_ICC_preference.icc` |
 | `iccPawgReport` | Emit gated QA evidence flags | `iccPawgReport --qa-flags --evidence-json Testing/sRGB_v4_ICC_preference.icc` |
@@ -137,17 +137,39 @@ node throughput.
 `iccTiffDump` inspects classic/BigTIFF metadata without decoding pixel data.
 Use `--ifd N` to select a zero-based main-chain directory for inspection or ICC
 extraction, and `--list-directories` to inventory directories and SubIFD offsets.
-Inventory JSON uses `--evidence-json --list-directories`; SubIFDs are not followed.
+The report and inventory expose libtiff's TIFF photometric interpretation rather
+than `CTiffImg`'s normalized processing value. Inventory JSON uses
+`--evidence-json --list-directories`; SubIFDs are not followed.
+An unrecognized photometric code appears as `Unknown (N)` in the plain report,
+while inventory JSON retains `N` in `photometric`.
+Values are libtiff's interpretation, including defaults and repairs, not a raw
+IFD dump. TIFF warnings/errors remain on stderr and are counted in plain and
+JSON reports (`tiffDiagnostics`). A `StripByteCounts` recovery warning means
+libtiff substituted estimates, not that the file is valid. Exit 0 means the
+requested inspection/extraction succeeded, not that TIFF structure or pixels
+were validated; JSON explicitly reports `tiffValidation: "not-performed"`.
+Only inventory walks the full main-directory chain.
 
 `iccApplyProfiles` accepts tiled input and enables tiled output with paired
 `imageFiles.dstTileWidth`/`dstTileHeight` (positive multiples of 16); set
 `dstBigTiff: true` for BigTIFF output. `iccSpecSepToTiff` accepts tiled grayscale
 inputs and offers `--tiles WIDTH HEIGHT` and `--bigtiff` for output. Defaults
 remain classic stripped TIFF with the existing NONE/LZW compression controls.
-Tiles support 8/16-bit unsigned and 32-bit float samples; tile-band buffers are
-capped at 256 MiB per image. `iccSpecSepToTiff` also caps the combined decoded
-tile bands of its concurrently open inputs at 256 MiB and rejects an input
-before allocating a band that would exceed the remaining budget. These options
+Both processors default to main IFD 0; `--ifd N` selects a zero-based main
+directory, and ApplyProfiles also accepts `imageFiles.srcIfd` in its JSON
+configuration. Other main IFDs and SubIFDs are not copied. A warning and
+structured provenance make that omission visible when present.
+Tiles support 8/16-bit unsigned and 32-bit float samples; decoded strip and
+tile-band buffers default to a 256 MiB limit. Trusted runs can raise the
+per-buffer budget with `ICCDEV_TIFF_MAX_DECODE_MIB`; this does not limit TIFF
+file size, total pixels, IFD metadata, or embedded ICC profile size, and it is
+not a total-process RSS guarantee. Leave headroom for row buffers, profile/CMM
+state, worker threads, libtiff, and other allocations when raising it.
+`iccSpecSepToTiff` also applies that value as the combined decoded tile-band
+budget for its concurrently open inputs. With stable input paths, it rejects
+a band that would exceed the remaining budget before allocation; a path swap
+between metadata and pixel opens can cause transient allocation before its
+post-open check rejects the input. These options
 do not imply SVS-specific decoding, ROI, SubIFD processing, or pyramid rewriting.
 
 `iccSpecSepToTiff` treats the input argument as a filename prefix and appends
@@ -264,7 +286,7 @@ NamedColor profile. JSON callers prefer the `transform` field values,
 which combine an output-side stem (`named` / `namedColorimetric` /
 `namedSpectral` / `namedDevice`) with an overprint suffix
 (`OnBlack` / `OnGray`, only meaningful on the spectral path) - see
-[`docs/icc-connect-config.schema.json`](icc-connect-config.schema.json)
+<a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/docs/icc-connect-config.schema.json">docs/icc-connect-config.schema.json</a>
 and <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/Tools/CmdLine/IccApplyNamedCmm/Readme.md">Tools/CmdLine/IccApplyNamedCmm/Readme.md</a>.
 
 Tool-specific details remain in each `Tools/CmdLine/*/Readme.md` file.

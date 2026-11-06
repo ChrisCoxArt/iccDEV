@@ -9,6 +9,9 @@
 *.hxx text eol=lf
 *.patch text eol=lf whitespace=-blank-at-eol
 *.md text eol=lf
+*.dox text eol=lf
+.github/ci/doxygen/Doxyfile text eol=lf
+.github/scripts/check-doxygen-html.py text eol=lf
 *.cmake text eol=lf
 CMakeLists.txt text eol=lf
 *.yml text eol=lf
@@ -23,3 +26,7 @@ Dockerfile* text eol=lf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 .githooks/* text eol=lf
+.clusterfuzzlite/known-bug-patch-mode text eol=lf
+.clusterfuzzlite/target-group text eol=lf
+.github/ci/cfl/*.options text eol=lf
+.github/ci/cfl/*.dict text eol=lf
