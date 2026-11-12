@@ -20,6 +20,13 @@ listed below. Maintainer-level sanitizer, Docker, and CMake policy details live 
 | macOS | `libheif libpng jpeg-turbo libtiff libxml2 zlib wxwidgets nlohmann-json` |
 | Windows | MSVC 2022 or 2026 with vcpkg-managed `libheif`, `libpng`, `libjpeg-turbo`, `libtiff`, `libxml2`, `zlib`, `wxwidgets`, `nlohmann-json` |
 
+These are full development environments, not direct dependencies of every
+tool. `iccJpegDump` parses JPEG markers itself; native CMake no longer searches
+for or links libjpeg for that tool. JPEG libraries remain in these recipes and
+the vcpkg manifests for dependency builds, including JPEG-capable libtiff. The
+WebAssembly workflows build libjpeg for libtiff and supply its archive during
+linking; the staged WebAssembly package also includes `IccJpegDump`.
+
 Thread support is provided by the platform C/C++ runtime and CMake's
 `Threads::Threads` imported target; no separate Ubuntu package is required.
 Maintainer sanitizer/regression containers add pinned CI-only packages such as
@@ -210,14 +217,22 @@ capabilities those tools depend on.
 
 The `Apple mobile core libraries` workflow discovers installed Apple SDKs,
 builds every matching minimal and extended mobile-core preset, and runs the
-simulator and Xcode CTest smoke gates below. Manual runs upload the static
-libraries, generated version headers, and build manifest as
+simulator and Xcode CTest smoke gates below on standalone manual dispatches.
+Manual runs upload the static libraries, generated version headers, and build manifest as
 `iccdev-apple-mobile-core`. The workflow also remains callable by trusted
-workflow orchestration without uploading PR-controlled artifacts. Apple mobile
-and Apple smoke workflows are not push or pull-request triggers; dispatch
+workflow orchestration without uploading PR-controlled artifacts. Normal PR CI
+calls `Apple platform smoke` for the bounded Xcode CTest runtime-layout gate;
+it does not run the long simulator gate. Dispatch
 `.github/workflows/ci-apple-mobile-core.yml` or
 `.github/workflows/ci-apple-platform-smoke.yml` when a change needs this Apple
-gate before review.
+simulator gate before review. The platform workflow also offers a focused
+`xcode` scope for a standalone runtime-layout check.
+
+The manual `ci-latest-release` workflow builds the Apple mobile-core artifact
+without rerunning simulator or Xcode smoke tests. For an approved release, it
+validates the SDK manifest and each built archive
+and version header before publishing `iccdev-apple-mobile-core.zip`. SDKs absent
+from the hosted runner are recorded as skips in the archive manifest.
 
 ### Run the core smoke app on an iPhone, iPad, or Apple Watch
 
@@ -357,9 +372,9 @@ or Mac Catalyst launch behavior aligned as one surface.
 
 | Example | Purpose | Start here |
 | --- | --- | --- |
-| `ios-benchapply` | On-device `CIccCmm::Apply` timing POC using the desktop benchmark primitives. | <a href="../examples/ios-benchapply/README.md">examples/ios-benchapply/README.md</a> |
-| `ios-apply-preview` | Visual profile-apply preview with source, applied, and delta panels. | <a href="../examples/ios-apply-preview/README.md">examples/ios-apply-preview/README.md</a> |
-| `ios-clut-editor` | Live profile-chain plus editable 3D CLUT preview for a selected or default image. | <a href="../examples/ios-clut-editor/README.md">examples/ios-clut-editor/README.md</a> |
+| `ios-benchapply` | On-device `CIccCmm::Apply` timing POC using the desktop benchmark primitives. | [examples/ios-benchapply/README.md](../examples/ios-benchapply/README.md) |
+| `ios-apply-preview` | Visual profile-apply preview with source, applied, and delta panels. | [examples/ios-apply-preview/README.md](../examples/ios-apply-preview/README.md) |
+| `ios-clut-editor` | Live profile-chain plus editable 3D CLUT preview for a selected or default image. | [examples/ios-clut-editor/README.md](../examples/ios-clut-editor/README.md) |
 
 Use each example helper from the repository root:
 
@@ -812,6 +827,15 @@ and add DEB or RPM packages when the corresponding local CPack backend is
 available. The `ci-latest-release` workflow runs the Linux CPack runtime-package
 smoke and uploads the `reficcmax-runtime-packages-linux` artifact.
 
+Its Windows release bundle includes the tested `IccDEVCmm.dll` and usage guide
+under `IccDEVCmm/` as well as the DLL at the bundle root for runtime loading.
+The Windows job runs `iccdev.windows-iccdevcmm-smoke` before upload. The manual
+`windows_vcpkg_source` input defaults to manifest installation; the
+`pinned-release-bundle` choice uses the immutable
+<a href="https://github.com/InternationalColorConsortium/iccDEV/releases/tag/vcpkg-win-23241-libheif-deps">vcpkg-win-23241-libheif-deps release</a>
+in classic mode after checking its fixed SHA-256 digest. This option changes
+only the Windows release build's dependency source.
+
 ## Shared library exports
 
 `ENABLE_SHARED_LIBS` defaults to `ON`, so a default Windows build links against
@@ -1064,7 +1088,7 @@ The canonical `ci-docker` workflow is manual-dispatch only.
 
 | File | Maintainer purpose | Publish/validation path |
 |------|--------------------|-------------------------|
-| `Dockerfile` | Pinned Ubuntu unified image for runtime, MCP, and maintainer checks, with Clang/LLVM 22 defaults, a Clang 21 pair for the packaged AFL++ LLVM plugin, GCC 15.2+, sanitizer, debugger, fuzzing, git, curl, and GitHub CLI tooling. Published tags are native `linux/amd64` and `linux/arm64` manifests; Docker Desktop on Apple Silicon selects `linux/arm64`. | Follow the [container maintainer preflight](regression-container.md#maintainer-preflight-and-security-checks) before publishing; AFL wrapper changes also need the `docs/afl-fuzzing.md` container bootstrap probe. Consumer workflows select `latest`, `ci-qa-pr-docker-testing`, `ci-publish-colourbill-ctrl`, an immutable SHA, or a release tag. |
+| `Dockerfile` | Pinned Ubuntu unified image for runtime, MCP, and maintainer checks, with Clang/LLVM 22 defaults, a Clang 21 pair for the packaged AFL++ LLVM plugin, GCC 15.2+, sanitizer, debugger, fuzzing, git, curl, and GitHub CLI tooling. Published tags are native `linux/amd64` and `linux/arm64` manifests; Docker Desktop on Apple Silicon selects `linux/arm64`. | Follow the container maintainer preflight in \ref md_docs_2regression-container "the regression container guide" before publishing; AFL wrapper changes also need the `docs/afl-fuzzing.md` container bootstrap probe. Consumer workflows select `latest`, `ci-qa-pr-docker-testing`, `ci-publish-colourbill-ctrl`, an immutable SHA, or a release tag. |
 
 Local development builds may use Docker's build cache to shorten edit and test
 cycles. Run the final pre-push container preflight with `--no-cache` so the
@@ -1075,6 +1099,16 @@ For reproducible maintainer checks, pass the immutable SHA tag to
 baseline and a release tag for a released image.
 
 ## Python Wheel Validation
+
+The comprehensive `_build-matrix.yml` caller uses Python 3.14 for its standard
+Ubuntu/macOS builds and full Windows CTest build. This extends routine build
+and test coverage to the newest supported CPython, alongside the reflectance
+CLUT ownership and CI-analysis work tracked in issue #2941. Both reusable
+build workflows pass that explicit input to `actions/setup-python`; their
+standalone input defaults and explicit caller overrides remain unchanged.
+This is the interpreter used for build/test orchestration, not a change to the
+CPython 3.11-3.14 wheel support range or the separate Python 3.13 cibuildwheel
+driver described below.
 
 The `python/` package supports local editable installs, source distributions,
 platform wheels, and cibuildwheel matrix validation:
@@ -1097,10 +1131,10 @@ launching another `vcvarsall.bat`, which avoids failures from very long
 developer `PATH` values. Native-backed parity tests use the built iccDEV tools
 for ProfileLib, XML, and JSON parity. `ci-json-python` and `ci-latest-release`
 share `_build-python-wheels.yml`, using Python 3.13 to drive cibuildwheel 3.4.0
-for seven platform lanes and 45 CPython 3.9-3.13 wheels. Both callers run the
+for seven platform lanes and 36 CPython 3.11-3.14 wheels. Both callers run the
 installed-wheel `not parity` unit suite without native build artifacts.
-Windows ARM64 Python 3.9/3.10 test without optional NumPy; other wheel targets
-require binary NumPy wheels. Primary CI retains native parity and isolated
+Every wheel target
+requires binary NumPy wheels for those tests. Primary CI retains native parity and isolated
 sdist tests, fails on empty test collection, and disables wheel artifact
 upload for the shared matrix. Release CI enables explicitly named artifacts and validates every
 expected wheel before release upload. CMake/CTest and CPack still own

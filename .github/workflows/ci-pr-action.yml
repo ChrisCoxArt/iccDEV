@@ -5,17 +5,20 @@
 #                 https://color.org
 #
 #
-## Intent: iccDEV ci-pr-action
+## Intent: final PR-head cross-platform builds, profile generation, and
+##         representative CTest after local and comprehensive pre-PR screening.
 #
 # Main Entry Point for all PR. No Forks, Thank You
 #
 ###############################################################
 
-name: "ci-pr-action"
-
 # Existing contributor guidance and summary strings intentionally exceed the
 # default yamllint line length. Keep the disable local to this workflow.
 # yamllint disable rule:line-length
+
+name: "ci-pr-action"
+run-name: >-
+  ${{ inputs.pr_number != '' && format('PR #{0} @ {1}', inputs.pr_number, inputs.expected_head_sha) || format('ci-pr-action {0}', github.ref_name) }}
 
 permissions:
   contents: read
@@ -31,6 +34,7 @@ on:
       - opened
       - reopened
       - ready_for_review
+      - synchronize
   workflow_dispatch:
     inputs:
       pr_number:
@@ -39,7 +43,12 @@ on:
         default: ''
         type: string
       expected_head_sha:
-        description: 'Optional exact PR head SHA required by a trusted dispatcher'
+        description: 'Exact PR head SHA, required when pr_number is set'
+        required: false
+        default: ''
+        type: string
+      request_status_id:
+        description: 'Pending PR Summary status ID posted by the maintainer-label dispatcher'
         required: false
         default: ''
         type: string
@@ -56,7 +65,7 @@ on:
           - governance
           - docs
       ctest_recent_limit:
-        description: 'Fast lane: run only the last N registered CTests; 0 means all'
+        description: 'Fast lane: core smoke plus last N registered CTests; 0 means all'
         required: false
         default: '1'
         type: choice
@@ -87,7 +96,12 @@ on:
           - fail
 
 concurrency:
-  group: "ci-pr-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+  # Keep each label-owned request distinct: child runs can start out of order.
+  # Direct manual runs share only their own PR group and cannot cancel a label.
+  group: >-
+    ci-pr-${{ github.workflow }}-${{ github.event_name }}-${{
+    github.event.pull_request.number || inputs.pr_number || github.head_ref || github.ref_name
+    }}-${{ inputs.request_status_id || 'direct' }}
   cancel-in-progress: true
 
 env:
@@ -109,11 +123,9 @@ jobs:
       build_config_changed: ${{ steps.diffcheck.outputs.build_config_changed }}
       testing_changed: ${{ steps.diffcheck.outputs.testing_changed }}
       ci_changed: ${{ steps.diffcheck.outputs.ci_changed }}
-      external_tooling_changed: ${{ steps.diffcheck.outputs.external_tooling_changed }}
-      openimageio_tooling_changed: ${{ steps.diffcheck.outputs.openimageio_tooling_changed }}
-      heif_tooling_changed: ${{ steps.diffcheck.outputs.heif_tooling_changed }}
-      libpng_tooling_changed: ${{ steps.diffcheck.outputs.libpng_tooling_changed }}
       container_changed: ${{ steps.diffcheck.outputs.container_changed }}
+      mcp_changed: ${{ steps.diffcheck.outputs.mcp_changed }}
+      apple_xcode_changed: ${{ steps.diffcheck.outputs.apple_xcode_changed }}
       image_definition_changed: ${{ steps.diffcheck.outputs.image_definition_changed }}
       container_toolchain_required: ${{ steps.diffcheck.outputs.container_toolchain_required }}
       trusted_base_image_available: ${{ steps.diffcheck.outputs.trusted_base_image_available }}
@@ -166,7 +178,7 @@ jobs:
             echo "workflow_dispatch requires numeric pr_number" >&2
             exit 1
           fi
-          if [[ -n "$EXPECTED_HEAD_SHA" && ! "$EXPECTED_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if [[ ! "$EXPECTED_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "workflow_dispatch expected_head_sha must be an exact commit SHA" >&2
             exit 1
           fi
@@ -200,7 +212,7 @@ jobs:
               exit 1
             fi
           done
-          if [[ -n "$EXPECTED_HEAD_SHA" && "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+          if [[ "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
             echo "PR head changed after dispatch request" >&2
             exit 1
           fi
@@ -271,6 +283,7 @@ jobs:
           INCLUDE_WINDOWS_INPUT: ${{ inputs.include_windows && 'true' || 'false' }}
           WARNING_POLICY_INPUT: ${{ inputs.warning_policy || 'fail' }}
           DISPATCH_PR_NUMBER: ${{ inputs.pr_number || '' }}
+          EXPECTED_HEAD_SHA_INPUT: ${{ inputs.expected_head_sha || '' }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login || github.actor }}
@@ -281,7 +294,9 @@ jobs:
           DISPATCH_HEAD_SHA: ${{ steps.dispatch-pr.outputs.head_sha || '' }}
           DISPATCH_TARGET_REPOSITORY: ${{ steps.dispatch-pr.outputs.target_repository || '' }}
           GH_EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action || '' }}
           GH_ACTOR: ${{ github.actor }}
+          GH_REF_NAME: ${{ github.ref_name }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -302,12 +317,10 @@ jobs:
           ctest_recent_limit=0
           warning_policy=fail
           image_definition_changed=false
+          mcp_changed=false
+          apple_xcode_changed=false
           container_toolchain_required=false
           trusted_base_image_available=false
-          external_tooling_changed=false
-          openimageio_tooling_changed=false
-          heif_tooling_changed=false
-          libpng_tooling_changed=false
           # Default to the full PR CTest surface. The pr-extended tests
           # are deferred only by the PR caller and remain in regression runs.
           ctest_mode=full
@@ -349,11 +362,9 @@ jobs:
             write_github_output build_config_changed "$build_config_changed"
             write_github_output testing_changed "$testing_changed"
             write_github_output ci_changed "$ci_changed"
-            write_github_output external_tooling_changed "$external_tooling_changed"
-            write_github_output openimageio_tooling_changed "$openimageio_tooling_changed"
-            write_github_output heif_tooling_changed "$heif_tooling_changed"
-            write_github_output libpng_tooling_changed "$libpng_tooling_changed"
             write_github_output container_changed "$container_changed"
+            write_github_output mcp_changed "$mcp_changed"
+            write_github_output apple_xcode_changed "$apple_xcode_changed"
             write_github_output image_definition_changed "$image_definition_changed"
             write_github_output container_toolchain_required "$container_toolchain_required"
             write_github_output trusted_base_image_available "$trusted_base_image_available"
@@ -470,10 +481,21 @@ jobs:
               warning_policy=fail
               ;;
             fast-lane)
-              if ! validate_fast_lane_actor "$GH_ACTOR"; then
+              if ! require_same_repository_pr; then
                 exit 1
               fi
-              if ! require_same_repository_pr; then
+              # A trusted metadata-only label dispatcher runs this workflow
+              # from master as github-actions[bot]. Require its exact PR head;
+              # direct manual fast-lane dispatches keep the maintainer check.
+              if [[ "$GH_EVENT_NAME" == "workflow_dispatch" &&
+                    "$GH_ACTOR" == "github-actions[bot]" ]]; then
+                if [[ "$GH_REF_NAME" != "master" || -z "$DISPATCH_PR_NUMBER" ||
+                      ! "$EXPECTED_HEAD_SHA_INPUT" =~ ^[0-9a-fA-F]{40}$ ||
+                      "$EXPECTED_HEAD_SHA_INPUT" != "$DISPATCH_HEAD_SHA" ]]; then
+                  echo "Bot fast-lane dispatch requires master and an exact PR head" >&2
+                  exit 1
+                fi
+              elif ! validate_fast_lane_actor "$GH_ACTOR"; then
                 exit 1
               fi
               apply_fast_lane_defaults
@@ -493,6 +515,16 @@ jobs:
               ;;
           esac
 
+          # A same-repository PR push or rebase gets the bounded fast lane.
+          # Pull-request events have no dispatch inputs or maintainer override.
+          if [[ "$GH_EVENT_NAME" == "pull_request" &&
+                "$PR_ACTION" == "synchronize" && "$ci_scope" == "auto" ]]; then
+            if ! require_same_repository_pr; then
+              exit 1
+            fi
+            apply_fast_lane_defaults
+          fi
+
           # Validate that both SHAs look like exact Git commit OIDs (40 hex chars).
           validate_sha() {
             local sha="$1"
@@ -509,6 +541,7 @@ jobs:
           if ! validate_sha "$head_sha" || ! validate_sha "$base_sha"; then
             echo "Warning: invalid or missing PR commit SHA; assuming source changed for safety" >&2
             image_definition_changed=true
+            mcp_changed=true
             container_toolchain_required=true
             write_scope_outputs true true true true false true false true true true
             exit 0
@@ -540,6 +573,7 @@ jobs:
           if ! git merge-base "origin/${base_ref}" HEAD >/dev/null 2>&1; then
             echo "Warning: no merge base found; assuming source changed for safety" >&2
             image_definition_changed=true
+            mcp_changed=true
             container_toolchain_required=true
             write_scope_outputs true true true true false true false true true true
             exit 0
@@ -560,6 +594,8 @@ jobs:
           testing_changed=false
           ci_changed=false
           container_changed=false
+          mcp_changed=false
+          apple_xcode_changed=false
           docs_only=false
           example_consumer_changed=false
 
@@ -603,18 +639,26 @@ jobs:
             exit 1
           fi
           while IFS='=' read -r classifier_key classifier_value; do
+            if [[ ! "$classifier_key" =~ ^[a-z][a-z0-9_]*$ ]]; then
+              echo "Invalid classifier key" >&2
+              exit 1
+            fi
             if [[ "$classifier_value" != "true" && "$classifier_value" != "false" ]]; then
               echo "Invalid classifier value for $classifier_key" >&2
               exit 1
             fi
+            if [[ -v "classifier_keys_seen[$classifier_key]" ]]; then
+              echo "Duplicate classifier output: $classifier_key" >&2
+              exit 1
+            fi
+            classifier_keys_seen["$classifier_key"]=1
             case "$classifier_key" in
-              source_changed|build_config_changed|testing_changed|external_tooling_changed|openimageio_tooling_changed|heif_tooling_changed|libpng_tooling_changed)
-                if [[ -v "classifier_keys_seen[$classifier_key]" ]]; then
-                  echo "Duplicate classifier output: $classifier_key" >&2
-                  exit 1
-                fi
-                classifier_keys_seen["$classifier_key"]=1
+              source_changed|build_config_changed|testing_changed)
                 printf -v "$classifier_key" '%s' "$classifier_value"
+                ;;
+              *_tooling_changed)
+                # Older trusted bases still emit retired informational flags.
+                echo "Ignoring legacy classifier output: $classifier_key"
                 ;;
               *)
                 echo "Unexpected classifier output: $classifier_key" >&2
@@ -623,9 +667,7 @@ jobs:
             esac
           done <<< "$classifier_output"
           for classifier_key in \
-            source_changed build_config_changed testing_changed \
-            external_tooling_changed openimageio_tooling_changed \
-            heif_tooling_changed libpng_tooling_changed; do
+            source_changed build_config_changed testing_changed; do
             if [[ ! -v "classifier_keys_seen[$classifier_key]" ]]; then
               echo "Missing classifier output: $classifier_key" >&2
               exit 1
@@ -636,8 +678,16 @@ jobs:
             ci_changed=true
           fi
 
-          if has_changed_file '^(Dockerfile|\.dockerignore|\.trivyignore(\.yaml)?$|\.github/ci/(docker|requirements)/|iccdev-mcp/|\.github/workflows/ci-docker-pr\.yml|\.github/scripts/(check-workflow-cache-policy|sanitize-sed)\.sh)'; then
+          if has_changed_file '^(Dockerfile|\.dockerignore|\.trivyignore(\.yaml)?$|\.github/ci/(docker|requirements)/|iccdev-mcp/|\.github/workflows/ci-docker\.yml|\.github/scripts/(check-workflow-cache-policy|sanitize-sed)\.sh)'; then
             image_definition_changed=true
+          fi
+
+          if has_changed_file '^(Dockerfile|\.dockerignore|iccdev-mcp/|\.github/ci/requirements/docker-|\.github/workflows/(ci-mcp-server|ci-pr-action)\.yml$|\.github/scripts/(iccdev-mcp-package-smoke|validate-mcp-release-package)\.py$)'; then
+            mcp_changed=true
+          fi
+
+          if has_changed_file '^\.github/workflows/(ci-apple-platform-smoke|ci-apple-mobile-core|ci-pr-action)\.yml$|^\.github/scripts/iccdev-xcode-ctest-smoke\.sh$'; then
+            apple_xcode_changed=true
           fi
 
           if [[ "$source_changed" == "true" || "$build_config_changed" == "true" || "$testing_changed" == "true" ]]; then
@@ -706,8 +756,8 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ steps.diffcheck.outputs.build_config_changed }}
           TESTING_CHANGED: ${{ steps.diffcheck.outputs.testing_changed }}
           CI_CHANGED: ${{ steps.diffcheck.outputs.ci_changed }}
-          EXTERNAL_TOOLING_CHANGED: ${{ steps.diffcheck.outputs.external_tooling_changed }}
           CONTAINER_CHANGED: ${{ steps.diffcheck.outputs.container_changed }}
+          MCP_CHANGED: ${{ steps.diffcheck.outputs.mcp_changed }}
           DOCS_ONLY: ${{ steps.diffcheck.outputs.docs_only }}
         run: |
           set -euo pipefail
@@ -759,8 +809,8 @@ jobs:
             echo "- **Build config changed:** \`$(sanitize_line "${BUILD_CONFIG_CHANGED:-false}")\`"
             echo "- **Testing/regression changed:** \`$(sanitize_line "${TESTING_CHANGED:-false}")\`"
             echo "- **CI/governance changed:** \`$(sanitize_line "${CI_CHANGED:-false}")\`"
-            echo "- **External research tooling changed:** \`$(sanitize_line "${EXTERNAL_TOOLING_CHANGED:-false}")\`"
             echo "- **Container surface changed:** \`$(sanitize_line "${CONTAINER_CHANGED:-false}")\`"
+            echo "- **MCP surface changed:** \`$(sanitize_line "${MCP_CHANGED:-false}")\`"
             echo "- **Docs only:** \`$(sanitize_line "${DOCS_ONLY:-false}")\`"
             echo ""
             echo "If you have questions, contact a listed [Maintainer](https://github.com/InternationalColorConsortium/iccDEV/blob/master/.github/CODEOWNERS)."
@@ -831,7 +881,6 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ needs.detect-src.outputs.build_config_changed }}
           TESTING_CHANGED: ${{ needs.detect-src.outputs.testing_changed }}
           CI_CHANGED: ${{ needs.detect-src.outputs.ci_changed }}
-          EXTERNAL_TOOLING_CHANGED: ${{ needs.detect-src.outputs.external_tooling_changed }}
           CONTAINER_CHANGED: ${{ needs.detect-src.outputs.container_changed }}
           DOCS_ONLY: ${{ needs.detect-src.outputs.docs_only }}
         run: |
@@ -878,7 +927,6 @@ jobs:
           echo "Build config changed: $(sanitize_print "$BUILD_CONFIG_CHANGED")"
           echo "Testing/regression changed: $(sanitize_print "$TESTING_CHANGED")"
           echo "CI/governance changed: $(sanitize_print "$CI_CHANGED")"
-          echo "External research tooling changed: $(sanitize_print "$EXTERNAL_TOOLING_CHANGED")"
           echo "Container surface changed: $(sanitize_print "$CONTAINER_CHANGED")"
           echo "Docs only: $(sanitize_print "$DOCS_ONLY")"
 
@@ -898,7 +946,6 @@ jobs:
           BUILD_CONFIG_CHANGED: ${{ needs.detect-src.outputs.build_config_changed || 'false' }}
           TESTING_CHANGED: ${{ needs.detect-src.outputs.testing_changed || 'false' }}
           CI_CHANGED: ${{ needs.detect-src.outputs.ci_changed || 'false' }}
-          EXTERNAL_TOOLING_CHANGED: ${{ needs.detect-src.outputs.external_tooling_changed || 'false' }}
           CONTAINER_CHANGED: ${{ needs.detect-src.outputs.container_changed || 'false' }}
           DOCS_ONLY: ${{ needs.detect-src.outputs.docs_only || 'false' }}
         run: |
@@ -939,7 +986,6 @@ jobs:
           : "${BUILD_CONFIG_CHANGED:=false}"
           : "${TESTING_CHANGED:=false}"
           : "${CI_CHANGED:=false}"
-          : "${EXTERNAL_TOOLING_CHANGED:=false}"
           : "${CONTAINER_CHANGED:=false}"
           : "${DOCS_ONLY:=false}"
 
@@ -960,7 +1006,6 @@ jobs:
             echo "- **Build config changed:** \`$(sanitize_line "${BUILD_CONFIG_CHANGED}")\`"
             echo "- **Testing/regression changed:** \`$(sanitize_line "${TESTING_CHANGED}")\`"
             echo "- **CI/governance changed:** \`$(sanitize_line "${CI_CHANGED}")\`"
-            echo "- **External research tooling changed:** \`$(sanitize_line "${EXTERNAL_TOOLING_CHANGED}")\`"
             echo "- **Container surface changed:** \`$(sanitize_line "${CONTAINER_CHANGED}")\`"
             echo "- **Docs only:** \`$(sanitize_line "${DOCS_ONLY}")\`"
             echo ""
@@ -1061,20 +1106,29 @@ jobs:
 
   tool-tests:
     if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' }}
-    # Together with gcc15-lto-ci, this is the compact strict Unix coverage.
-    name: Core Tool Tests (Debug)
+    # Fast lane pairs sanitized Release tools with strict GCC Release LTO.
+    name: ${{ needs.detect-src.outputs.fast_lane == 'true' && 'ASAN+UBSAN Release Tool Tests' || 'Core Tool Tests (Debug)' }}
     needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-iccdev-tool-tests.yml
     with:
       regression_image_tag: ${{ needs.validate-inputs.outputs.regression-image-tag }}
-      tool_build_type: Debug
+      tool_build_type: ${{ needs.detect-src.outputs.fast_lane == 'true' && 'Release' || 'Debug' }}
       ctest_mode: ${{ needs.validate-inputs.outputs.ctest-mode }}
       ctest_recent_limit: ${{ needs.validate-inputs.outputs.ctest-recent-limit }}
       exclude_extended_pr_tests: true
-      include_infrastructure_tests: false
-      instrumentation: core
+      instrumentation: ${{ needs.detect-src.outputs.fast_lane == 'true' && 'sanitizers' || 'core' }}
       warning_policy: ${{ needs.validate-inputs.outputs.warning-policy }}
       target_sha: ${{ needs.detect-src.outputs.target_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
+
+  mcp-server:
+    if: ${{ (needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.fast_lane != 'true') || needs.detect-src.outputs.mcp_changed == 'true' }}
+    name: MCP server package and Docker checks
+    needs: [detect-src]
+    uses: ./.github/workflows/ci-mcp-server.yml
+    with:
+      target_sha: ${{ needs.detect-src.outputs.target_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
 
   win-ci:
     if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' && needs.validate-inputs.outputs.include-windows == 'true' }}
@@ -1083,9 +1137,10 @@ jobs:
     uses: ./.github/workflows/ci-pr-win.yml
     with:
       target_sha: ${{ needs.detect-src.outputs.target_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
 
   macos-release-lto:
-    if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.ci_scope != 'fast-lane' }}
+    if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.fast_lane != 'true' }}
     name: macOS Clang Release LTO
     needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-pr-unix.yml
@@ -1096,10 +1151,12 @@ jobs:
       enable-lto: true
       warning-policy: ${{ needs.validate-inputs.outputs.warning-policy }}
       profile-test-mode: smoke
+      run-ctest: true
       target-sha: ${{ needs.detect-src.outputs.target_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
 
   macos-debug:
-    if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.ci_scope != 'fast-lane' }}
+    if: ${{ needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.fast_lane != 'true' }}
     name: macOS Clang Debug
     needs: [detect-src, validate-inputs]
     uses: ./.github/workflows/ci-pr-unix.yml
@@ -1110,7 +1167,20 @@ jobs:
       enable-lto: false
       warning-policy: ${{ needs.validate-inputs.outputs.warning-policy }}
       profile-test-mode: smoke
+      run-ctest: true
       target-sha: ${{ needs.detect-src.outputs.target_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
+
+  apple-xcode-ctest:
+    if: ${{ (needs.detect-src.outputs.run_native_matrix == 'true' && needs.detect-src.outputs.fast_lane != 'true') || needs.detect-src.outputs.apple_xcode_changed == 'true' }}
+    name: Apple Xcode CTest runtime layouts
+    needs: [detect-src, validate-inputs]
+    uses: ./.github/workflows/ci-apple-platform-smoke.yml
+    with:
+      scope: xcode
+      target-sha: ${{ needs.detect-src.outputs.target_sha }}
+      base-sha: ${{ needs.detect-src.outputs.base_sha }}
+      pr_number: ${{ needs.detect-src.outputs.pr_number }}
 
   example-project:
     if: ${{ needs.detect-src.outputs.example_consumer_changed == 'true' }}
@@ -1209,8 +1279,18 @@ jobs:
   finalize:
     name: PR Summary
     runs-on: ubuntu-latest
+    # Serialize with every maintainer-label request without dropping a pending
+    # dispatcher or finalizer. The status ID below chooses the exact owner.
+    concurrency:
+      group: >-
+        pr-summary-${{ needs.detect-src.outputs.pr_number || inputs.pr_number ||
+        github.event.pull_request.number || github.ref }}-${{
+        needs.detect-src.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
+      actions: read  # Compare direct-run creation time with later status requests.
       statuses: write  # Publish actual manual validation to branch protection.
     needs:
       - detect-src
@@ -1221,9 +1301,11 @@ jobs:
       # - lint
       # - scan-build
       - tool-tests
+      - mcp-server
       - win-ci
       - macos-release-lto
       - macos-debug
+      - apple-xcode-ctest
       - example-project
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
@@ -1278,9 +1360,11 @@ jobs:
           LINT_RESULT: skipped
           SCAN_RESULT: skipped
           TOOL_RESULT: ${{ needs['tool-tests'].result }}
+          MCP_RESULT: ${{ needs['mcp-server'].result }}
           WIN_RESULT: ${{ needs['win-ci'].result }}
           MACOS_RELEASE_LTO_RESULT: ${{ needs['macos-release-lto'].result }}
           MACOS_DEBUG_RESULT: ${{ needs['macos-debug'].result }}
+          APPLE_XCODE_RESULT: ${{ needs['apple-xcode-ctest'].result }}
           EXAMPLE_RESULT: ${{ needs['example-project'].result }}
         run: |
           set -euo pipefail
@@ -1317,9 +1401,11 @@ jobs:
           LINT_RESULT="${LINT_RESULT:-success}"
           SCAN_RESULT="${SCAN_RESULT:-success}"
           TOOL_RESULT="${TOOL_RESULT:-success}"
+          MCP_RESULT="${MCP_RESULT:-success}"
           WIN_RESULT="${WIN_RESULT:-success}"
           MACOS_RELEASE_LTO_RESULT="${MACOS_RELEASE_LTO_RESULT:-success}"
           MACOS_DEBUG_RESULT="${MACOS_DEBUG_RESULT:-success}"
+          APPLE_XCODE_RESULT="${APPLE_XCODE_RESULT:-success}"
           EXAMPLE_RESULT="${EXAMPLE_RESULT:-success}"
           GCC15_LTO_RESULT="${GCC15_LTO_RESULT:-success}"
 
@@ -1344,15 +1430,17 @@ jobs:
           LINT_RESULT="$(trim_and_norm "$LINT_RESULT")"
           SCAN_RESULT="$(trim_and_norm "$SCAN_RESULT")"
           TOOL_RESULT="$(trim_and_norm "$TOOL_RESULT")"
+          MCP_RESULT="$(trim_and_norm "$MCP_RESULT")"
           WIN_RESULT="$(trim_and_norm "$WIN_RESULT")"
           MACOS_RELEASE_LTO_RESULT="$(trim_and_norm "$MACOS_RELEASE_LTO_RESULT")"
           MACOS_DEBUG_RESULT="$(trim_and_norm "$MACOS_DEBUG_RESULT")"
+          APPLE_XCODE_RESULT="$(trim_and_norm "$APPLE_XCODE_RESULT")"
           EXAMPLE_RESULT="$(trim_and_norm "$EXAMPLE_RESULT")"
           GCC15_LTO_RESULT="$(trim_and_norm "$GCC15_LTO_RESULT")"
 
           # --- compute overall result from upstream jobs ----------------------
           job_res=success
-          required_results=("$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$WIN_RESULT" "$MACOS_RELEASE_LTO_RESULT" "$MACOS_DEBUG_RESULT" "$EXAMPLE_RESULT")
+          required_results=("$DETECT_RESULT" "$SETUP_RESULT" "$VALIDATE_RESULT" "$GCC15_LTO_RESULT" "$LINT_RESULT" "$SCAN_RESULT" "$TOOL_RESULT" "$MCP_RESULT" "$WIN_RESULT" "$MACOS_RELEASE_LTO_RESULT" "$MACOS_DEBUG_RESULT" "$APPLE_XCODE_RESULT" "$EXAMPLE_RESULT")
           for s in "${required_results[@]}"; do
             # 'skipped' is acceptable when run_native_matrix is false.
             # only 'failure' or 'cancelled' should cause overall failure
@@ -1423,9 +1511,11 @@ jobs:
             printf "| lint               | %s |\n" "$(sanitize_line "$LINT_RESULT")"
             printf "| scan-build         | %s |\n" "$(sanitize_line "$SCAN_RESULT")"
             printf "| tool-tests         | %s |\n" "$(sanitize_line "$TOOL_RESULT")"
+            printf "| mcp-server         | %s |\n" "$(sanitize_line "$MCP_RESULT")"
             printf "| win-ci             | %s |\n" "$(sanitize_line "$WIN_RESULT")"
             printf "| macos-release-lto  | %s |\n" "$(sanitize_line "$MACOS_RELEASE_LTO_RESULT")"
             printf "| macos-debug        | %s |\n" "$(sanitize_line "$MACOS_DEBUG_RESULT")"
+            printf "| apple-xcode-ctest  | %s |\n" "$(sanitize_line "$APPLE_XCODE_RESULT")"
             printf "| example-project    | %s |\n" "$(sanitize_line "$EXAMPLE_RESULT")"
             echo ""
             echo "**Overall Result:** \`$(sanitize_line "$job_res")\`"
@@ -1436,8 +1526,8 @@ jobs:
             exit 1
           fi
 
-      # preflight: allow-token-exposure reason=publish-validated-manual-commit-status
-      - name: Publish manual validation status
+      # preflight: allow-token-exposure reason=publish-validated-pr-head-status
+      - name: Publish current-head validation status
         if: >-
           ${{ always() && github.event_name == 'workflow_dispatch' &&
               (inputs.pr_number == '' || needs.detect-src.outputs.target_sha != '') }}
@@ -1446,18 +1536,82 @@ jobs:
           BASH_ENV: /dev/null
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TARGET_SHA: ${{ needs.detect-src.outputs.target_sha || github.sha }}
+          TARGET_SHA: ${{ needs.detect-src.outputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           VALIDATION_RESULT: ${{ job.status }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          REQUEST_STATUS_ID: ${{ inputs.request_status_id || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Validation target is not an exact commit SHA" >&2
+            exit 1
+          fi
+          if [[ ! "$CURRENT_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Validation run ID is invalid" >&2
+            exit 1
+          fi
+
+          # The dispatcher posts pending before starting its child. Only that
+          # exact request can complete it. The shared job concurrency group
+          # serializes this read/write against later label dispatches.
+          latest_status=$(gh api "repos/$GH_REPO/commits/$TARGET_SHA/status")
+          latest_summary=$(jq -c '([.statuses[]? | select(.context == "PR Summary")][0] // {})' \
+            <<< "$latest_status")
+          latest_state=$(jq -r '.state // empty' <<< "$latest_summary")
+          latest_url=$(jq -r '.target_url // empty' <<< "$latest_summary")
+          latest_description=$(jq -r '.description // empty' <<< "$latest_summary")
+          if [[ -n "$REQUEST_STATUS_ID" ]]; then
+            if [[ ! "$REQUEST_STATUS_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Dispatcher request status ID is invalid" >&2
+              exit 1
+            fi
+            latest_status_id=$(jq -r '.id // empty' <<< "$latest_summary")
+            request_url_prefix="https://github.com/$GH_REPO/actions/runs/"
+            latest_request_run_id="${latest_url#"$request_url_prefix"}"
+            # Re-run failed jobs retains this request ID and workflow run URL.
+            # Its earlier terminal status has a new status ID, but this same
+            # run may replace its own result when no later request intervened.
+            if [[ "$latest_url" == "$RUN_URL" &&
+                  ( "$latest_state" == success || "$latest_state" == failure ) &&
+                  "$latest_description" =~ ^Manual\ validation:\ (success|failure|cancelled)$ ]]; then
+              :
+            elif [[ "$latest_state" != pending || "$latest_status_id" != "$REQUEST_STATUS_ID" ||
+                  "$latest_url" != "$request_url_prefix"* ||
+                  ! "$latest_request_run_id" =~ ^[1-9][0-9]*$ ||
+                  ! "$latest_description" =~ ^Maintainer\ label\ ci:[A-Za-z0-9-]+:\ validation\ requested$ ||
+                  "$latest_description" == 'Maintainer label ci:skip: validation requested' ]]; then
+              echo "A different validation request owns PR Summary; leaving its status intact"
+              exit 0
+            fi
+          elif [[ -n "$latest_state" && "$latest_url" != "$RUN_URL" ]]; then
+            # Direct manual runs have no dispatcher marker. An older pending
+            # label request must not hide this run's result.
+            # A status created at or after this run began takes precedence;
+            # same-second ties are conservatively treated as newer.
+            latest_created_at=$(jq -r '.created_at // empty' <<< "$latest_summary")
+            run_created_at=$(gh api "repos/$GH_REPO/actions/runs/$CURRENT_RUN_ID" \
+              --jq '.created_at // empty')
+            timestamp_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+            if [[ ! "$latest_created_at" =~ $timestamp_pattern ||
+                  ! "$run_created_at" =~ $timestamp_pattern ]]; then
+              echo "Cannot establish PR Summary request order" >&2
+              exit 1
+            fi
+            if [[ "$latest_created_at" > "$run_created_at" ||
+                  "$latest_created_at" == "$run_created_at" ]]; then
+              echo "A later validation request owns PR Summary; leaving its status intact"
+              exit 0
+            fi
+          fi
           state=failure
           if [[ "$VALIDATION_RESULT" == "success" ]]; then
             state=success
           fi
+          description="Manual validation: $VALIDATION_RESULT"
           gh api --method POST "repos/$GH_REPO/statuses/$TARGET_SHA" \
             -f context="PR Summary" -f state="$state" \
-            -f description="Manual validation: $VALIDATION_RESULT" \
+            -f description="$description" \
             -f target_url="$RUN_URL"

@@ -141,8 +141,8 @@
         },
         "useHToS": {
           "type": "boolean",
-          "default": false,
-          "description": "Use hue-to-saturation transform for this profile step"
+          "default": true,
+          "description": "Apply the ICC.2 HDR-to-SDR (H2Sx) PCS range conversion for this profile step when the profile flags indicate an extended-to-standard connection (ICC.2:2023 7.2.13, 8.14). Set false to disable it (Annex K.2.9)"
         },
         "useV5SubProfile": {
           "type": "boolean",
@@ -340,6 +340,13 @@
         "srcImageFile": {
           "type": "string",
           "description": "Path to the source image file"
+        },
+        "srcIfd": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095,
+          "default": 0,
+          "description": "Zero-based main-chain TIFF IFD to transform; other IFDs and SubIFDs are not copied"
         },
         "dstImageFile": {
           "type": "string",

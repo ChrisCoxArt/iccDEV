@@ -24,4 +24,4 @@ Quick start::
     iccdev-mcp --transport sse --port 8080
 """
 
-__version__ = "0.1.1"
+__version__ = "2.4.2.6"

@@ -230,7 +230,7 @@ tools.
 ### Install
 
 Install the published package from <a href="https://pypi.org/project/iccdev/">PyPI</a>
-on a supported CPython 3.9-3.13 platform:
+on a supported CPython 3.11-3.14 platform:
 
 ```bash
 python -m pip install iccdev
@@ -260,7 +260,7 @@ python -m pip install "iccdev[numpy] @ git+https://github.com/InternationalColor
 
 The <a href="https://github.com/InternationalColorConsortium/iccDEV/releases/latest">Latest Build release</a>
 also provides exact-tag wheel URLs for reproducible installation. Choose a
-wheel matching CPython 3.9-3.13, OS, and architecture.
+wheel matching CPython 3.11-3.14, OS, and architecture.
 
 Check the install:
 
@@ -564,8 +564,10 @@ mcp-venv/bin/pip install "iccdev-mcp[rest]"
 ```
 
 (On Windows the commands are under `mcp-venv\Scripts\`.) It can share an
-environment with the native Python bindings because the MCP wheel ships only
-the `iccdev_mcp` namespace. Then point the server at an unzipped release bundle:
+environment with the native Python bindings on CPython 3.11-3.14 because the
+MCP wheel ships only the `iccdev_mcp` namespace. Python 3.10 supports the MCP
+package and CLI-backed tools, but the current compiled `iccdev` wheels require
+CPython 3.11-3.14. Then point the server at an unzipped release bundle:
 
 ```json
 {
@@ -623,7 +625,7 @@ These are the places where a prebuilt, install-and-go path does not exist yet.
 
 | Area | Limitation | Workaround |
 |------|------------|------------|
-| Python | PyPI supplies CPython 3.9-3.13 wheels but no source distribution | Install from the repository when no compatible wheel is available |
+| Python | PyPI supplies CPython 3.11-3.14 wheels but no source distribution | Install from the repository when no compatible wheel is available |
 | MCP | The PyPI package needs native bindings or a tools bundle for optional capabilities | Install `iccdev-mcp[rest]`, then configure the required tool paths or use Docker |
 | MATLAB | Prebuilt MEX is limited to Windows x64, Linux x86_64, and Apple Silicon macOS, built/tested with MATLAB R2023b (<a href="https://github.com/InternationalColorConsortium/iccDEV/issues/2801">#2801</a>) | Build from source for GNU Octave or unsupported architectures |
 | WebAssembly | Node.js only; tool-style interface, no browser package | Wrap `callMain` as shown above |

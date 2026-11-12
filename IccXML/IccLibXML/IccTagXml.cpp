@@ -643,7 +643,12 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
     icUtf8ToAnsi(ansiStr, buf);
 
     icUInt32Number nStrSize = (icUInt32Number)ansiStr.size();
-    GetBuffer(nStrSize);
+    if (!GetBuffer(nStrSize)) {
+      parseStr += "Memory error allocating textDescriptionType ASCII data\n";
+      free(buf);
+      delete file;
+      return false;
+    }
     if (nStrSize) {
       memcpy(m_szText, ansiStr.c_str(), nStrSize);  
       m_nASCIISize = nStrSize + 1;
@@ -657,12 +662,19 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
       parseStr += "'";
       parseStr += filename;
       parseStr += "' is not valid UTF-8.\n";
+      free(buf);
       delete file;
       return false;
     }
 
     nStrSize = (icUInt32Number)wstr.Size();
     m_uzUnicodeText = GetUnicodeBuffer(nStrSize);
+    if (!m_uzUnicodeText) {
+      parseStr += "Memory error allocating textDescriptionType Unicode data\n";
+      free(buf);
+      delete file;
+      return false;
+    }
 
     if (nStrSize) {
       // assign each entry in wstr to m_uzUnicodeText
@@ -687,6 +699,7 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
     if (nScriptCopy)
       memcpy(m_szScriptText, buf, nScriptCopy);
 
+    free(buf);
     delete file;
   }
 
@@ -697,7 +710,10 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
       return false;
     
     icUInt32Number nSize = (icUInt32Number)str.size();
-    (void) GetBuffer(nSize);        // has hidden side effects
+    if (!GetBuffer(nSize)) {
+      parseStr += "Memory error allocating textDescriptionType ASCII data\n";
+      return false;
+    }
 
     if (nSize) {
       memcpy(m_szText, str.c_str(), nSize);
@@ -731,6 +747,10 @@ bool CIccTagXmlTextDescription::ParseXml(xmlNode *pNode, std::string &parseStr)
 
             // set size of m_uzUnicodeText
             m_uzUnicodeText = GetUnicodeBuffer(nSize);
+            if (!m_uzUnicodeText) {
+              parseStr += "Memory error allocating textDescriptionType Unicode data\n";
+              return false;
+            }
             if (nSize) {
 
               // assign each entry in wstr to m_uzUnicodeText
@@ -1621,7 +1641,10 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
           n++;
 
       }
-      Reset(n, nChannelsPerMatrix);
+      if (!Reset(n, nChannelsPerMatrix)) {
+        parseStr += "Unable to allocate SparseMatrixArray data\n";
+        return false;
+      }
       m_nMatrixType = (icSparseMatrixType)nMatrixType;
 
       icUInt32Number bytesPerMatrix = GetBytesPerMatrix();
@@ -1744,7 +1767,10 @@ bool CIccTagXmlSparseMatrixArray::ParseXml(xmlNode *pNode, std::string &parseStr
               }
 
               CIccFloatArray data;
-              data.ParseTextArray(pChild);
+              if (!data.ParseTextArray(pChild)) {
+                parseStr += "Invalid FullMatrix data\n";
+                return false;
+              }
               if (data.GetSize()==(icUInt32Number)nRows*nCols) {
                 if (!mtx.FillFromFullMatrix(data.GetBuf()))
                   parseStr += "Exceeded maximum number of sparse matrix entries\n";
@@ -2955,7 +2981,10 @@ bool CIccTagXmlSpectralViewingConditions::ParseXml(xmlNode *pNode, std::string &
 
     if (pChild->children && pChild->children->content) {
       CIccFloatArray vals;
-      vals.ParseTextArray((icChar*)pChild->children->content);
+      if (!vals.ParseTextArray((icChar*)pChild->children->content)) {
+        parseStr += "Invalid ObserverFuncs samples\n";
+        return false;
+      }
       if (vals.GetSize()!=m_observerRange.steps*3)
         return false;
       m_observer = new (std::nothrow) icFloatNumber[m_observerRange.steps*3];
@@ -3024,7 +3053,10 @@ bool CIccTagXmlSpectralViewingConditions::ParseXml(xmlNode *pNode, std::string &
 
     if (pChild->children && pChild->children->content) {
       CIccFloatArray vals;
-      vals.ParseTextArray((icChar*)pChild->children->content);
+      if (!vals.ParseTextArray((icChar*)pChild->children->content)) {
+        parseStr += "Invalid IlluminantSPD samples\n";
+        return false;
+      }
       if (vals.GetSize()!=m_illuminantRange.steps)
         return false;
       m_illuminant = new (std::nothrow) icFloatNumber[m_illuminantRange.steps];
@@ -3191,7 +3223,10 @@ bool icXmlParseProfDesc(xmlNode *pNode, CIccProfileDescStruct &p, std::string &p
           p.m_deviceModel = icXmlStrToSig(pDescNode->children ? (const icChar*)pDescNode->children->content : "");
         }
         else if (!icXmlStrCmp(pDescNode->name, "DeviceAttributes")){
-          p.m_attributes = icGetDeviceAttrValue(pDescNode);      
+          if (!icGetDeviceAttrValue(pDescNode, p.m_attributes)) {
+            parseStr += "Invalid ProfileDesc DeviceAttributes VendorSpecific\n";
+            return false;
+          }
         }
         else if (!icXmlStrCmp(pDescNode->name, "Technology")){
           p.m_technology = (icTechnologySignature)icXmlStrToSig(pDescNode->children ? (const icChar*)pDescNode->children->content : "");
@@ -3424,6 +3459,12 @@ bool CIccTagXmlResponseCurveSet16::ParseXml(xmlNode *pNode, std::string &parseSt
 
   for (pNode = pNode->next; pNode; pNode = pNode->next) {
     if (pNode->type==XML_ELEMENT_NODE && !icXmlStrCmp(pNode->name, "ResponseCurve")) {
+      // ICC.1 Table 73 stores the number of measurement types in uInt16.
+      // Refuse the next curve before the count can wrap in Write().
+      if (m_ResponseCurves->size() >= 0xffff) {
+        parseStr += "Too many ResponseCurve entries in responseCurveSet16Type\n";
+        return false;
+      }
       const icChar *szMeasurmentType = icXmlAttrValue(pNode, "MeasUnitSignature");
 
       if (nChannels != icXmlNodeCount(pNode->children, "ChannelResponses"))
@@ -6531,6 +6572,10 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
       return false;
     }
 
+    if (vals.GetSize() % m_nPCSChannels) {
+      parseStr += "PCSValues count is not a multiple of channel count\n";
+      return false;
+    }
     m_NumberOfVertices = vals.GetSize() / m_nPCSChannels;
 
     if (m_NumberOfVertices<4) {
@@ -6567,6 +6612,10 @@ bool CIccTagXmlGamutBoundaryDesc::ParseXml(xmlNode *pNode, std::string &parseStr
       return false;
     }
 
+    if (vals.GetSize() % m_nDeviceChannels) {
+      parseStr += "DeviceValues count is not a multiple of channel count\n";
+      return false;
+    }
     int nVertices = vals.GetSize() / m_nDeviceChannels;
 
     if (m_NumberOfVertices != nVertices) {

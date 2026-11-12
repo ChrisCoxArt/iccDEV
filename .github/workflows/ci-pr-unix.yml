@@ -30,7 +30,7 @@ on:
       os-list:
         description: "List of operating systems"
         required: false
-        default: '["ubuntu-24.04", "macos-latest"]'
+        default: '["ubuntu-latest", "macos-latest"]'
         type: string
       build-types:
         description: "Build types"
@@ -57,13 +57,18 @@ on:
         required: false
         default: full
         type: string
-      compiler-version:
-        description: "Compiler version selector: system or gcc-15"
+      run-ctest:
+        description: "Run representative Unix CTest coverage"
         required: false
-        default: system
-        type: string
+        default: false
+        type: boolean
       target-sha:
         description: "Exact commit SHA to check out"
+        required: false
+        default: ""
+        type: string
+      pr_number:
+        description: "Resolved PR number for isolated concurrency"
         required: false
         default: ""
         type: string
@@ -84,9 +89,9 @@ jobs:
   build:
     name: "${{ matrix.os }} - ${{ matrix.compiler }} - ${{ matrix.build_type }}"
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 20 }}
     concurrency:
-      group: pr-unix-${{ github.event.pull_request.number || github.ref }}-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+      group: pr-unix-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}-${{ inputs.target-sha || github.event.pull_request.head.sha || github.sha }}-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ github.run_id }}
       cancel-in-progress: true
     defaults:
       run:
@@ -95,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJson(inputs.os-list || '["ubuntu-24.04", "macos-latest"]') }}
+        os: ${{ fromJson(inputs.os-list || '["ubuntu-latest", "macos-latest"]') }}
         compiler: ${{ fromJson(inputs.compilers || '["gcc", "clang"]') }}
         build_type: ${{ fromJson(inputs.build-types || '["Release", "Debug"]') }}
         exclude:
@@ -105,7 +110,7 @@ jobs:
             compiler: gcc-15
           - os: macos-latest
             compiler: clang-22
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             compiler: clang
 
     steps:
@@ -146,8 +151,8 @@ jobs:
           BT="${MATRIX_BUILD_TYPE}"
 
           case "$OS" in
-            ubuntu-24.04|macos-latest) ;;
-            *) echo "ERROR: invalid matrix.os: '$OS'. Allowed: ubuntu-24.04, macos-latest"; exit 1 ;;
+            ubuntu-latest|macos-latest) ;;
+            *) echo "ERROR: invalid matrix.os: '$OS'. Allowed: ubuntu-latest, macos-latest"; exit 1 ;;
           esac
           case "$COMP" in
             gcc|gcc-15|clang|clang-22) ;;
@@ -208,7 +213,6 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
-          COMPILER_VERSION: ${{ inputs.compiler-version || 'system' }}
           MATRIX_COMPILER: ${{ matrix.compiler }}
         run: |
           set -euo pipefail
@@ -216,30 +220,20 @@ jobs:
           unset GITHUB_TOKEN || true
           git config --add safe.directory "$PWD"
           source .trusted-workflow/.github/scripts/sanitize-sed.sh
+          # Runner package lists may be empty; refresh before probing versions.
+          bash .github/scripts/ci-safe-apt-update.sh
           case "$MATRIX_COMPILER" in
             gcc-15)
-              sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+              if ! apt-cache show gcc-15 2>/dev/null | grep -Fx 'Package: gcc-15' >/dev/null; then
+                sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+                bash .github/scripts/ci-safe-apt-update.sh
+              fi
               ;;
             clang-22)
-              llvm_key="$RUNNER_TEMP/llvm-snapshot.gpg.key"
-              llvm_keyring="$RUNNER_TEMP/llvm-snapshot.gpg"
-              curl --fail --location --silent --show-error \
-                https://apt.llvm.org/llvm-snapshot.gpg.key \
-                --output "$llvm_key"
-              gpg --show-keys --with-colons "$llvm_key" > "$RUNNER_TEMP/llvm-key-info"
-              llvm_fingerprint="$(awk -F: '$1 == "fpr" {print $10; exit}' "$RUNNER_TEMP/llvm-key-info")"
-              if [ "$llvm_fingerprint" != "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" ]; then
-                echo "Unexpected LLVM APT key fingerprint: $llvm_fingerprint" >&2
-                exit 1
-              fi
-              gpg --dearmor --output "$llvm_keyring" "$llvm_key"
-              sudo install -m 0644 "$llvm_keyring" /usr/share/keyrings/llvm-snapshot.gpg
-              printf '%s\n' \
-                'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' |
-                sudo tee /etc/apt/sources.list.d/llvm-toolchain-22.list >/dev/null
+              bash .github/scripts/ci-ensure-llvm-22.sh \
+                clang-22 clang-tools-22 llvm-22
               ;;
           esac
-          bash .github/scripts/ci-safe-apt-update.sh
           packages=(
             build-essential cmake \
             libpng-dev libxml2-dev libtiff-dev \
@@ -253,9 +247,6 @@ jobs:
             clang) packages+=(clang clang-tools llvm) ;;
             *) echo "ERROR: invalid compiler: '$MATRIX_COMPILER'"; exit 1 ;;
           esac
-          if [ "$COMPILER_VERSION" = "gcc-15" ] && [ "$MATRIX_COMPILER" = "gcc" ]; then
-            packages+=(gcc-15 g++-15)
-          fi
           sudo apt-get install -y "${packages[@]}"
 
       - name: Install Build Dependencies (macOS)
@@ -276,18 +267,13 @@ jobs:
         env:
           BASH_ENV: /dev/null
           MATRIX_COMPILER: ${{ matrix.compiler }}
-          COMPILER_VERSION: ${{ inputs.compiler-version || 'system' }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           git config --add safe.directory "$PWD"
           source .trusted-workflow/.github/scripts/sanitize-sed.sh
-          case "$COMPILER_VERSION" in
-            system|gcc-15) ;;
-            *) echo "::error title=Invalid compiler version::${COMPILER_VERSION}"; exit 1 ;;
-          esac
-          if [ "$MATRIX_COMPILER" = "gcc" ] && [ "$COMPILER_VERSION" = "gcc-15" ]; then
+          if [ "$MATRIX_COMPILER" = "gcc-15" ]; then
             command -v gcc-15 >/dev/null 2>&1
             command -v g++-15 >/dev/null 2>&1
             echo "CC=gcc-15" >> "$GITHUB_ENV"
@@ -295,6 +281,11 @@ jobs:
           elif [ "$MATRIX_COMPILER" = "gcc" ]; then
             echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
+          elif [ "$MATRIX_COMPILER" = "clang-22" ]; then
+            command -v clang-22 >/dev/null 2>&1
+            command -v clang++-22 >/dev/null 2>&1
+            echo "CC=clang-22" >> "$GITHUB_ENV"
+            echo "CXX=clang++-22" >> "$GITHUB_ENV"
           else
             echo "CC=clang" >> "$GITHUB_ENV"
             echo "CXX=clang++" >> "$GITHUB_ENV"
@@ -458,6 +449,31 @@ jobs:
           find . -iname "*.icc" | wc -l
           echo "Build complete."
 
+      - name: Run representative Unix CTest
+        if: ${{ inputs.run-ctest }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          git config --add safe.directory "$PWD"
+          source .trusted-workflow/.github/scripts/sanitize-sed.sh
+
+          jobs="$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)"
+          cmake --build Build --target build-test-binaries --parallel "$jobs"
+          ctest --test-dir Build -N \
+            --label-exclude 'slow|clusterfuzzlite|pr-extended|ci-infrastructure' \
+            --no-tests=error 2>&1 | tee Build/ctest-list-representative.log
+          grep -Eq 'Total Tests: [1-9][0-9]*' Build/ctest-list-representative.log
+          ctest --test-dir Build \
+            --parallel "$jobs" \
+            --label-exclude 'slow|clusterfuzzlite|pr-extended|ci-infrastructure' \
+            --output-on-failure \
+            --no-tests=error \
+            --output-junit Build/ctest-results.xml 2>&1 | tee Build/ctest-run.log
+
       - name: Generate PR Unix Summary Report
         if: always()
         shell: bash --noprofile --norc {0}
@@ -468,6 +484,7 @@ jobs:
           MATRIX_BUILD_TYPE: ${{ matrix.build_type }}
           ENABLE_LTO: ${{ inputs.enable-lto && 'ON' || 'OFF' }}
           PROFILE_TEST_MODE: ${{ inputs.profile-test-mode || 'full' }}
+          RUN_CTEST: ${{ inputs.run-ctest && 'ON' || 'OFF' }}
           WARNING_POLICY: ${{ inputs.warning-policy || 'warn' }}
         run: |
           set -euo pipefail
@@ -484,6 +501,7 @@ jobs:
           SANITIZED_BUILD_TYPE=$(sanitize_line "${MATRIX_BUILD_TYPE}")
           SANITIZED_LTO=$(sanitize_line "${ENABLE_LTO}")
           SANITIZED_PROFILE_TEST_MODE=$(sanitize_line "${PROFILE_TEST_MODE}")
+          SANITIZED_RUN_CTEST=$(sanitize_line "${RUN_CTEST}")
           SANITIZED_WARNING_POLICY=$(sanitize_line "${WARNING_POLICY}")
           {
             echo "## ci-pr-unix Build Summary"
@@ -492,5 +510,6 @@ jobs:
             echo "- **Build Type:** $SANITIZED_BUILD_TYPE"
             echo "- **LTO:**        $SANITIZED_LTO"
             echo "- **Profile Tests:** $SANITIZED_PROFILE_TEST_MODE"
+            echo "- **CTest:**      $SANITIZED_RUN_CTEST"
             echo "- **Warning Policy:** $SANITIZED_WARNING_POLICY"
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized

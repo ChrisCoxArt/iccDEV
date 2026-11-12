@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <algorithm>
 #include <limits>
 #include <climits>   // LONG_MAX, for the IFD-offset bound in readStoredExtraSamplesCount()
@@ -135,7 +136,6 @@ const IccTiffSanitizedHandlers g_icTiffSanitizedHandlers;
 #undef min
 #endif
 #else
-#include <cerrno>
 #include <sys/stat.h>
 #endif
 
@@ -160,6 +160,17 @@ static char THIS_FILE[]=__FILE__;
 namespace iccDEV {
 #endif
 
+std::string icTiffRuntimeVersion()
+{
+  const char *version = TIFFGetVersion();
+  if (!version)
+    return "unknown";
+  const char *end = version;
+  while (*end && *end != '\r' && *end != '\n')
+    ++end;
+  return std::string(version, end);
+}
+
 namespace {
 
 const icUInt16Number kMaxTiffSamples = std::numeric_limits<icUInt16Number>::max();
@@ -176,6 +187,41 @@ bool checkedUInt32(icUInt64Number value, unsigned int &result)
 bool checkedUInt32Product(unsigned int a, unsigned int b, unsigned int &result)
 {
   return checkedUInt32(static_cast<icUInt64Number>(a) * b, result);
+}
+
+const unsigned int kDefaultTiffDecodeBufferBytes = 256u * 1024u * 1024u;
+const char *const kTiffDecodeBufferEnv = "ICCDEV_TIFF_MAX_DECODE_MIB";
+
+// Keep hostile-input behavior bounded by default without turning that default
+// into a format restriction. A caller that has already made its own trust and
+// memory decision can pass an exact byte limit. Command-line invocations do not
+// pass a per-run API argument, so the environment provides the same opt-in.
+bool resolveDecodeBufferLimit(unsigned int requested, unsigned int &resolved)
+{
+  if (requested) {
+    resolved = requested;
+    return true;
+  }
+
+  const char *value = std::getenv(kTiffDecodeBufferEnv);
+  if (!value) {
+    resolved = kDefaultTiffDecodeBufferBytes;
+    return true;
+  }
+  if (!*value)
+    return false;
+  for (const char *p = value; *p; ++p) {
+    if (*p < '0' || *p > '9')
+      return false;
+  }
+
+  errno = 0;
+  char *end = NULL;
+  const unsigned long long mib = std::strtoull(value, &end, 10);
+  if (errno == ERANGE || !end || *end || !mib ||
+      mib > std::numeric_limits<unsigned int>::max() / (1024u * 1024u))
+    return false;
+  return checkedUInt32(mib * 1024ull * 1024ull, resolved);
 }
 
 #if defined(_WIN32)
@@ -571,7 +617,8 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
               unsigned int nBPS, unsigned int nPhoto, unsigned int nSamples, unsigned int nExtraSamples,
               float fXRes, float fYRes, bool bCompress, bool bSep,
               unsigned int nResolutionUnit, unsigned int nTileWidth,
-              unsigned int nTileHeight, bool bBigTiff)
+              unsigned int nTileHeight, bool bBigTiff,
+              unsigned int nMaxDecodeBufferBytes)
 {
   Close();
   m_bRead = false;
@@ -596,7 +643,9 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
   // and refuses before the destination is touched (#2386).  Neither tool caller can
   // reach it -- their depth comes back out of Open() -- so this guards the public API,
   // as the ResolutionUnit check below does.
-  if (!nBPS || nBPS % 8)
+  // The TIFF field is 16 bits. Reject an oversized caller value before the
+  // assignment below can wrap it into a different, apparently valid depth.
+  if (!nBPS || nBPS > std::numeric_limits<icUInt16Number>::max() || nBPS % 8)
     return false;
 
   if (bCompress && nBPS != 8 && nBPS != 16 && nBPS != 32)
@@ -662,12 +711,23 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
   case PHOTO_ICCLAB:
     m_nPhoto = PHOTOMETRIC_ICCLAB;
     break;
+
+  default:
+    // PHOTO_PALETTE and PHOTO_UNKNOWN are read-side diagnostics, not writable
+    // formats. An unrecognized selector would otherwise keep Close()'s zero
+    // value, silently writing PHOTOMETRIC_MINISWHITE.
+    return false;
   }
 
   // Reject unsupported or oversized tile layouts before opening a destination
   // that TIFFOpen would truncate, including a pre-existing regular file.
-  if (m_bTiled && !CalcTileLayout()) {
-    TIFFError(szFname, "Invalid or oversized TIFF tile band (maximum 256 MiB)");
+  unsigned int decodeBufferLimit = 0;
+  if (m_bTiled && !resolveDecodeBufferLimit(nMaxDecodeBufferBytes, decodeBufferLimit)) {
+    TIFFError(szFname, "Invalid ICCDEV_TIFF_MAX_DECODE_MIB value");
+    return false;
+  }
+  if (m_bTiled && !CalcTileLayout(decodeBufferLimit)) {
+    TIFFError(szFname, "Invalid TIFF tile layout or tile band exceeds the configured decode-buffer limit");
     return false;
   }
 
@@ -809,8 +869,8 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
   // we should always calculate this
   m_nBytesPerSample = m_nBitsPerSample / 8;
   if (m_bTiled) {
-    if (!SetupTiles()) {
-      TIFFError(szFname, "Invalid or oversized TIFF tile band (maximum 256 MiB)");
+    if (!SetupTiles(decodeBufferLimit)) {
+      TIFFError(szFname, "Invalid TIFF tile layout or tile band exceeds the configured decode-buffer limit");
       Close();
       return false;
     }
@@ -826,18 +886,18 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
 
     // TIFFStripSize() returns a signed 64-bit tmsize_t, and the products below are
     // computed from a width that comes straight out of the source image header. Open()
-    // already routes the identical arithmetic through calcBytesPerLine() (:471, :489)
+    // already routes the identical arithmetic through calcBytesPerLine()
     // and checkedUInt32(); Create() did the same sums raw, so the write path had no
     // guard where the read path had one.
     //
     // The wrap is reachable rather than theoretical. Create() runs before any pixel data
-    // is read (iccApplyProfiles.cpp:508), so a source TIFF only has to *declare* a large
+    // is read by iccApplyProfiles, so a source TIFF only has to *declare* a large
     // ImageWidth -- it needs no matching pixel data on disk. A width of 3e8 with a
     // 20-channel separated destination makes m_nBytesPerLine 6e9, which wraps to ~1.7e9,
     // while the strip allocation below asks for the true 6 GB and *succeeds* under Linux
     // overcommit -- so Create() returned true carrying a bytes-per-line far smaller than
     // a row. The caller then sizes its destination row buffer from exactly that value
-    // (iccApplyProfiles.cpp:539) and writes a full row through it. The big allocation is
+    // in iccApplyProfiles and writes a full row through it. The big allocation is
     // therefore not the accidental guard it looks like; measured, unfixed Create()
     // returns true for that shape.
     tmsize_t stripSize = TIFFStripSize(m_hTif);
@@ -896,7 +956,7 @@ bool CTiffImg::Create(const char *szFname, unsigned int nWidth, unsigned int nHe
 }
 
 bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirectory,
-                    unsigned int nMaxTileBandBytes)
+                    unsigned int nMaxDecodeBufferBytes)
 {
   Close();
   m_bRead = true;
@@ -935,27 +995,24 @@ bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirec
 
   TIFFGetFieldDefaulted(m_hTif, TIFFTAG_PLANARCONFIG, &m_nPlanar);
   TIFFGetFieldDefaulted(m_hTif, TIFFTAG_SAMPLESPERPIXEL, &m_nSamples);
-  // Plain Get, and its return is now kept: unlike its neighbours this one must
-  // report what the file STORES, because colour management sizes the image from
-  // it (iccApplyProfiles.cpp:543 lets a profile match sn-sen instead of sn).  A
-  // failed Get leaves the destination untouched, so m_nExtraSamples would silently
-  // keep whatever it held; Close() zeroes it at the top of Open() so that was 0 by
-  // luck rather than by contract.  Assign it explicitly and record whether tag 338
-  // was there at all -- 0 otherwise means "absent", not "stored as zero" (#2386).
+  // Keep the plain Get return to distinguish an absent ExtraSamples tag from
+  // a present one. The value is libtiff's working count, which can already be
+  // repaired in memory when the tag is present; it is not necessarily the
+  // count stored in the file. Colour management uses this working split in
+  // iccApplyProfiles. Assign zero explicitly when the tag is absent (#2386).
   m_bExtraSamplesStored =
     (TIFFGetField(m_hTif, TIFFTAG_EXTRASAMPLES, &m_nExtraSamples, &nSampleInfo) == 1);
   if (!m_bExtraSamplesStored)
     m_nExtraSamples = 0;
 
-  // The reporting-only companion.  When the photometric model plus the stored
-  // ExtraSamples do not add up to SamplesPerPixel, libtiff repairs the directory
-  // in memory and warns ("Defining non-color channels as ExtraSamples"), but it
-  // publishes the repaired count ONLY through the Defaulted getter -- the plain
-  // Get above still fails.  Measured on libtiff 4.5.1 and 4.7.2 against the tracked
-  // 81-band Testing/hybrid/Data/smCows380_5_780.tif: Get returns 0 and writes
-  // nothing, Defaulted returns 1 with 80.  Keep that figure for iccTiffDump to
-  // explain the layout the rest of libtiff is actually using, and keep it away from
-  // m_nExtraSamples, which must stay the stored count (see the header).
+  // The reporting-only companion. When the photometric model and ExtraSamples
+  // do not account for SamplesPerPixel, libtiff may repair the count in memory.
+  // With an absent tag, plain Get above fails while Defaulted can expose the
+  // effective repaired count. This occurs on the tracked 81-band
+  // Testing/hybrid/Data/smCows380_5_780.tif (measured on libtiff 4.5.1 and
+  // 4.7.2: plain Get fails, Defaulted returns 80). With a present tag, even
+  // plain Get may expose a repaired count. Keep the effective figure for
+  // iccTiffDump and use the raw IFD read below for the stored count.
   m_nEffectiveExtraSamples = m_nExtraSamples;
   {
     icUInt16Number nEffective = 0;
@@ -992,6 +1049,13 @@ bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirec
     calcBytesPerLine(m_nWidth, m_nBitsPerSample, m_nSamples, m_nBytesPerLine);
     return true;
   }
+
+  unsigned int decodeBufferLimit = 0;
+  if (!resolveDecodeBufferLimit(nMaxDecodeBufferBytes, decodeBufferLimit)) {
+    TIFFError(szFname, "Invalid ICCDEV_TIFF_MAX_DECODE_MIB value");
+    Close();
+    return false;
+  }
   
   if (m_nWidth == 0 || m_nHeight == 0 || m_nRowsPerStrip == 0 ||
       m_nSamples == 0 || m_nSamples > kMaxTiffSamples ||
@@ -1026,8 +1090,8 @@ bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirec
   m_nCurStrip=(unsigned int)-1;
   m_nCurLine = 0;
   if (m_bTiled) {
-    if (!SetupTiles(nMaxTileBandBytes)) {
-      TIFFError(szFname, "Invalid or oversized TIFF tile band (maximum 256 MiB per image or caller memory limit)");
+    if (!SetupTiles(decodeBufferLimit)) {
+      TIFFError(szFname, "Invalid TIFF tile layout or tile band exceeds the configured decode-buffer limit");
       Close();
       return false;
     }
@@ -1095,6 +1159,21 @@ bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirec
     return false;
   }
 
+  // A hostile directory can declare one multi-gigabyte strip while carrying
+  // only a few bytes of file data. libtiff reports that declared decoded size,
+  // and malloc() may either trip a fuzzer RSS limit or succeed under overcommit
+  // before ReadLine() attempts to materialize it. Apply the same configured
+  // limit used for tile bands to strip-backed images before allocating. The
+  // default is 256 MiB; trusted callers may explicitly raise it without making
+  // the fuzzer and ordinary CLI paths unbounded.
+  if (!stripBufferSize || stripBufferSize > decodeBufferLimit) {
+    TIFFError(szFname,
+              "Invalid TIFF strip buffer (%u bytes; configured maximum %u bytes)",
+              stripBufferSize, decodeBufferLimit);
+    Close();
+    return false;
+  }
+
   m_pStripBuf = static_cast<unsigned char*>(malloc((size_t)stripBufferSize));
 
   if (!m_pStripBuf) {
@@ -1103,6 +1182,11 @@ bool CTiffImg::Open(const char *szFname, bool bMetadataOnly, unsigned int nDirec
   }
 
   return true;
+}
+
+bool CTiffImg::GetDefaultDecodeBufferLimit(unsigned int &nBytes)
+{
+  return resolveDecodeBufferLimit(0, nBytes);
 }
 
 
@@ -1241,14 +1325,19 @@ bool CTiffImg::CalcTileLayout(unsigned int nMaxTileBandBytes)
   m_nBytesPerSample = m_nBitsPerSample / 8;
   if (!calcBytesPerLine(m_nWidth, m_nBitsPerSample, m_nSamples, m_nBytesPerLine))
     return false;
-  const uint64_t limit = std::min<uint64_t>(256u * 1024u * 1024u,
-                                             nMaxTileBandBytes);
+  unsigned int resolvedLimit = 0;
+  if (!resolveDecodeBufferLimit(nMaxTileBandBytes, resolvedLimit))
+    return false;
+  const uint64_t limit = resolvedLimit;
   const uint64_t expectedRow = static_cast<uint64_t>(m_nTileWidth) *
     m_nBytesPerSample * (m_nPlanar == PLANARCONFIG_SEPARATE ? 1 : m_nSamples);
-  if (expectedRow > limit || m_nTileHeight > limit / expectedRow)
+  if (!expectedRow || expectedRow > limit || m_nTileHeight > limit / expectedRow)
     return false;
-  m_nTileRowSize = static_cast<unsigned int>(expectedRow);
-  m_nTileSize = m_nTileRowSize * m_nTileHeight;
+  const uint64_t tileSize = expectedRow * m_nTileHeight;
+  if (tileSize > static_cast<uint64_t>(std::numeric_limits<tmsize_t>::max()) ||
+      !checkedUInt32(expectedRow, m_nTileRowSize) ||
+      !checkedUInt32(tileSize, m_nTileSize))
+    return false;
   m_nTilesAcross = m_nWidth / m_nTileWidth + (m_nWidth % m_nTileWidth != 0);
   const unsigned int planes = m_nPlanar == PLANARCONFIG_SEPARATE ? m_nSamples : 1;
   const unsigned int tilesDown = m_nHeight / m_nTileHeight + (m_nHeight % m_nTileHeight != 0);
@@ -1284,8 +1373,8 @@ bool CTiffImg::ReadTileLine(unsigned char *pBuf)
   const unsigned int tileY = m_nCurLine / m_nTileHeight * m_nTileHeight;
   const unsigned int row = m_nCurLine % m_nTileHeight;
   const unsigned int planes = m_nPlanar == PLANARCONFIG_SEPARATE ? m_nSamples : 1;
-  // CalcTileLayout() caps m_nTileSize at 256 MiB, so it fits tmsize_t on
-  // 32-bit targets such as wasm32 where tmsize_t is int (#2919).
+  // CalcTileLayout() independently proves that m_nTileSize fits tmsize_t,
+  // including on 32-bit targets such as wasm32 (#2919).
   const tmsize_t tileBytes = static_cast<tmsize_t>(m_nTileSize);
   if (!row) {
     for (unsigned int s = 0; s < planes; s++) {

@@ -23,6 +23,16 @@ requirements under `.github/ci/requirements/` and the checksummed QA tool
 releases before rebuilding. Keep the instrumented LLVM and libxml2 source
 revisions aligned with their documented runtime contracts.
 
+The pinned APT inventory includes direct dependencies used by repository QA,
+even when the Ubuntu base currently supplies them transitively. Keep GNU
+`find`/`sort`, `cloc`, Doxygen, Graphviz, `unzip`, and host metadata tools
+explicit because coverage matching, documentation QA, corpus refresh, and
+timing reports call them directly. Keep PyYAML pinned in the isolated
+workflow-QA virtual environment;
+the MCP virtual environment intentionally remains first on `PATH`.
+`DEBIAN_FRONTEND` is a build argument; do not persist it into the runtime
+environment.
+
 Validate a refresh with a local image build using `--no-cache --pull`, then run
 the unified-image, MCP/REST, and MemorySanitizer checks from `ci-docker` before
 pushing. For a local unpublished change, omit `GIT_COMMIT` so the image tests
@@ -107,11 +117,14 @@ The image includes the pinned CodeQL CLI bundle with the Actions, C++, and
 Python analysis surfaces used by iccDEV. The Actions extractor retains its
 JavaScript support; unused C#, Go, Java, Ruby, Rust, and Swift extractors and
 query packs are removed in the archive extraction layer. The image also
-includes `lcov`, `genhtml`, `gcovr`, `llvm-cov`, `llvm-profdata`, `gprof`,
-`perf`, `strace`, and a pinned FlameGraph checkout at
+includes GNU `find` and `sort`, `cloc`, Doxygen, Graphviz `dot`, `lcov`,
+`genhtml`, `gcovr`, `llvm-cov`, `llvm-profdata`, `gprof`, `perf`, `strace`, and
+a pinned FlameGraph checkout at
 `$ICCDEV_FLAMEGRAPH_DIR` (`/opt/FlameGraph`). Its exact revision is exposed as
 `ICCDEV_FLAMEGRAPH_REVISION`. Build coverage, profiling, and sanitizer modes in
 separate directories so their instrumentation does not contaminate results.
+PyYAML is installed in the workflow-QA virtual environment; invoke its Python
+through `$ICCDEV_WORKFLOW_QA_PYTHON` so the MCP environment stays isolated.
 LCOV uses the accelerated `JSON::XS` backend and treats unexecuted blocks on
 non-branch lines as zero-count blocks, avoiding inconsistent GCC standard
 library coverage records. `LCOV_HOME=/` makes LCOV load the checked system
@@ -122,6 +135,21 @@ directly and falls back to `gh codeql` only when no native CLI is present.
 For a caller checkout, resolve an image tag to a digest, mount the checkout
 read-only, and analyze a container-local copy; use the recipe in
 [CodeQL security analysis](codeql.md).
+
+The image can reproduce the coverage-policy and local timing setup without
+installing extra packages:
+
+```bash
+"$ICCDEV_WORKFLOW_QA_PYTHON" \
+  .github/scripts/check-workflow-fixed-output-batching.py \
+  .github/workflows/*.yml
+.github/scripts/iccdev-build-config-timing.py \
+  --configs debug,release,relwithdebinfo,minsizerel,coverage,asan \
+  --jobs 4 --test-iterations 3 --dry-run
+```
+
+Remove `--dry-run` and choose an output directory for measurements. Keep the
+prebuilt sanitizer tree separate from new coverage and timing trees.
 
 An `ENABLE_PROFILING=ON` Linux build with tests enabled registers
 `iccdev.profiling-smoke`. It proves that `iccDumpProfile` writes a nonempty
@@ -169,10 +197,8 @@ uses the same helper, requiring native validation. It is manual-dispatch only;
 when dispatched from `master`, `ci-qa-pr-docker-testing`,
 `ci-publish-colourbill-ctrl`, or a release tag, it publishes the corresponding
 approved image tags. Other feature branches remain non-publishing.
-The read-only `ci-docker-pr` caller uses it when building the changed Dockerfile;
-its trusted-base-image-only path does not claim to test a new runtime. No PR
-runtime artifacts are uploaded. The MCP package workflow includes the shared
-scanner and smoke helper paths in its test triggers.
+The MCP package workflow includes the shared scanner and smoke helper paths in
+its test triggers.
 
 The sole supported Dockerfile is the unified sanitizer image. Do not reintroduce
 retired per-variant Dockerfiles to test optional native-library behavior.
@@ -213,15 +239,6 @@ ASAN/UBSAN build. Issue #2380 provides a bounded manual workflow at
 `.github/workflows/ci-issue-2380-valgrind-repro.yml`. Its default
 scenario demonstrates the PR #2378 `GetNewApplyCmm()` race before and after the
 fix. It is a proof-of-concept workflow, not a hosted fuzzing service.
-
-Issue #2673 is guarded by
-`.github/workflows/ci-issue-2673-fromxml-valgrind-smoke.yml`. A push to
-`ci-qa-pr-docker-testing` runs it automatically; manual dispatch accepts a
-supported unified-image tag and resolves it to an immutable digest. The job
-builds a non-sanitized Debug `iccFromXml`, converts
-`Testing/Named/NamedColorV4.xml`, and passes only when Memcheck exits cleanly
-with zero error contexts while still producing a nonempty profile. The complete
-Memcheck report remains visible in the job log.
 
 For the maintained 14-target Memcheck, Helgrind, DRD, Massif, and Callgrind
 registry, use [Valgrind-Family Analysis](valgrind-analysis.md). The image
@@ -429,6 +446,14 @@ docker run --rm iccdev:local bash -lc '
 '
 ```
 
+The manual `ci-docker` workflow defaults `use_build_cache` to `true`. It first
+tries the last validated integration image, then `latest`, and resolves any
+available image to an immutable manifest digest before importing its inline
+BuildKit metadata. If neither image exists, the workflow performs a cold build.
+Successful published images carry only the inline `min` cache; no GitHub
+Actions cache or separate cache image is written. Dispatch with
+`use_build_cache=false` for an explicit clean hosted rebuild.
+
 ## Maintainer preflight and security checks
 
 Run this complete local preflight from a clean checkout before pushing a
@@ -440,17 +465,25 @@ environment, workflow and Dockerfile policy, shipped analyzer inventory,
 runtime behavior, and image health check.
 
 ```bash
-command -v docker gh actionlint zizmor hadolint trivy
+command -v docker gh jactionlint zizmor hadolint trivy
 git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
 PREFLIGHT_BASE_REF=origin/master .github/scripts/preflight-safety-checks.sh --require-tools
 
 IMAGE=iccdev-container-check:local
-docker build --no-cache -t "$IMAGE" .
+docker build --no-cache --pull -t "$IMAGE" .
 docker run --rm "$IMAGE" bash -lc '
   set -euo pipefail
   command -v git gh clang clang++ gcc g++ cmake cppcheck clang-tidy scan-build
+  command -v cloc doxygen dot find sort lscpu unzip
   command -v hadolint zizmor shellcheck afl-fuzz valgrind llvm-symbolizer
   command -v lcov genhtml gcovr llvm-cov llvm-profdata perf gprof strace
+  "$ICCDEV_WORKFLOW_QA_PYTHON" -c "import yaml"
+  "$ICCDEV_WORKFLOW_QA_PYTHON" \
+    .github/scripts/check-workflow-fixed-output-batching.py \
+    .github/workflows/*.yml
+  .github/scripts/iccdev-build-config-timing.py \
+    --configs debug,coverage --jobs 4 --test-iterations 1 --dry-run \
+    >/dev/null
   command -v iccDumpProfile iccdev-fuzz-env iccdev-mcp iccdev-mcp-rest
   test -x "$ICCDEV_FLAMEGRAPH_DIR/stackcollapse-perf.pl"
   test -x "$ICCDEV_FLAMEGRAPH_DIR/flamegraph.pl"
@@ -479,10 +512,10 @@ dependencies over time.
 ### SAST and image scanning
 
 `preflight-safety-checks.sh --require-tools` runs the workflow, shell,
-Dockerfile, and configuration SAST checks, including actionlint, yamllint,
+Dockerfile, and configuration SAST checks, including jactionlint, yamllint,
 zizmor, ShellCheck, hadolint, and Trivy configuration scanning. For
 component-partitioned cppcheck and clang-tidy reports, use the exact
-[maintainer static-analysis reproduction](build.md#maintainer-static-analysis).
+maintainer static-analysis reproduction in \ref md_docs_2build "the build guide".
 Path-scoped Trivy exceptions belong in `.trivyignore.yaml` with a concrete
 statement. Keep build-only image exceptions separate from the unified runtime
 image, and treat changes to the exception file as maintainer-owned container

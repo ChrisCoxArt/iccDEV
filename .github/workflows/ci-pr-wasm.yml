@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
-      - name: Assert no GitHub Actions cache primitives
+      - name: Check immutable download cache policy
         env:
           BASH_ENV: /dev/null
         run: |
@@ -76,7 +76,7 @@ jobs:
   wasm-build-and-validate:
     name: "WASM Release Build + Parity"
     needs: cache-policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
       EMSDK_VERSION: 4.0.21

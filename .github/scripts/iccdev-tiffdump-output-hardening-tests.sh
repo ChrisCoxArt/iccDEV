@@ -88,7 +88,8 @@ test_extra_arg_rejected() {
     return 1
   fi
 
-  grep -Fq "Usage: iccTiffDump {--evidence-json} {--ifd N} {--list-directories} tiff_file {exported_icc_file}" "$log" || return 1
+  grep -Fq "Usage: iccTiffDump {--evidence-json} {--ifd N} tiff_file {exported_icc_file}" "$log" || return 1
+  grep -Fq "iccTiffDump {--evidence-json} --list-directories tiff_file" "$log" || return 1
   [ ! -e "$dst" ]
 }
 
@@ -138,6 +139,51 @@ for t, ty, c, v in entries:
     d += (struct.pack("<H", v) + b"\0\0") if (ty == 3 and c == 1) else struct.pack("<I", v)
 d += struct.pack("<I", 0); d += cmap
 path.write_bytes(d)
+PY
+}
+
+generate_single_sample_tiff() {
+  # Minimal 2x2 8-bit TIFF.  For PHOTOMETRIC_SEPARATED (=5), InkSet=2
+  # identifies an ink set other than CMYK, with matching one-ink metadata.
+  "$PYTHON" - "$1" "$2" <<'PY'
+import pathlib
+import struct
+import sys
+
+path = pathlib.Path(sys.argv[1])
+photometric = int(sys.argv[2])
+w = h = 2
+pix = bytes((0x19, 0x33, 0x66, 0xCC))
+ink_names = b"Cyan\0" if photometric == 5 else b""
+data_offset = 8
+ifd_offset = data_offset + len(pix)
+entries = [
+    (256, 4, 1, w), (257, 4, 1, h), (258, 3, 1, 8),
+    (259, 3, 1, 1), (262, 3, 1, photometric), (273, 4, 1, data_offset),
+    (277, 3, 1, 1), (278, 4, 1, h), (279, 4, 1, len(pix)),
+    (284, 3, 1, 1), (296, 3, 1, 2),
+]
+if ink_names:
+    entries += [(332, 3, 1, 2), (333, 2, len(ink_names), 0),
+                (334, 3, 1, 1)]
+entries.sort()
+ink_names_offset = ifd_offset + 2 + len(entries) * 12 + 4
+entries = [(tag, kind, count, ink_names_offset if tag == 333 else value)
+           for tag, kind, count, value in entries]
+
+data = bytearray(b"II" + struct.pack("<H", 42) +
+                 struct.pack("<I", ifd_offset))
+data += pix
+data += struct.pack("<H", len(entries))
+for tag, kind, count, value in entries:
+    data += struct.pack("<HHI", tag, kind, count)
+    if kind == 3 and count == 1:
+        data += struct.pack("<H", value) + b"\0\0"
+    else:
+        data += struct.pack("<I", value)
+data += struct.pack("<I", 0)
+data += ink_names
+path.write_bytes(data)
 PY
 }
 
@@ -234,6 +280,37 @@ test_palette_photometric_report() {
   generate_palette_tiff "$pal" || return 1
   "$TIFFDUMP" "$pal" > "$log" 2>&1 || true
   grep -Eq 'Photometric:[[:space:]]+Palette' "$log"
+}
+
+test_separated_photometric_report() {
+  [ -n "$PYTHON" ] || { echo "    [SKIP] python3 unavailable"; return 0; }
+  local separated="$OUTDIR/separated.tif"
+  local log="$OUTDIR/tiffdump-separated.log"
+  generate_single_sample_tiff "$separated" 5 || return 1
+  "$TIFFDUMP" "$separated" > "$log" 2>&1 || return 1
+  grep -Eq 'Photometric:[[:space:]]+Separated' "$log" || return 1
+  ! grep -Eq 'Photometric:[[:space:]]+Min Is White' "$log"
+}
+
+test_unknown_photometric_code_report() {
+  [ -n "$PYTHON" ] || { echo "    [SKIP] python3 unavailable"; return 0; }
+  local unknown="$OUTDIR/unknown-photometric.tif"
+  local log="$OUTDIR/tiffdump-unknown-photometric.log"
+  local inventory="$OUTDIR/tiffdump-unknown-photometric.json"
+  generate_single_sample_tiff "$unknown" 65534 || return 1
+  "$TIFFDUMP" "$unknown" > "$log" 2>&1 || return 1
+  grep -Eq 'Photometric:[[:space:]]+Unknown \(65534\)' "$log" || return 1
+  "$TIFFDUMP" --evidence-json --list-directories "$unknown" > "$inventory" 2>&1 || return 1
+  "$PYTHON" - "$inventory" <<'PY'
+import json
+import pathlib
+import sys
+
+directories = json.loads(pathlib.Path(sys.argv[1]).read_text())["directories"]
+assert len(directories) == 1
+assert directories[0]["photometric"] == 65534
+assert directories[0]["photometricName"] == "Unknown"
+PY
 }
 
 test_defaulted_packbits_gray_loads() {
@@ -350,6 +427,8 @@ run_ok "tiffdump-export-path-escape" test_export_path_escaping
 run_ok "tiffdump-extra-arg-reject" test_extra_arg_rejected
 run_ok "tiffdump-no-profile-export-reject" test_missing_embedded_profile_export_rejected
 run_ok "tiffdump-palette-photometric-report" test_palette_photometric_report
+run_ok "tiffdump-separated-photometric-report" test_separated_photometric_report
+run_ok "tiffdump-unknown-photometric-code-report" test_unknown_photometric_code_report
 run_ok "tiffdump-defaulted-packbits-gray-load" test_defaulted_packbits_gray_loads
 run_ok "tiffdump-noncompliant-embedded-icc-preserve" test_noncompliant_embedded_icc_preserved
 run_ok "tiffdump-malformed-embedded-icc-preserve" test_malformed_embedded_icc_preserved

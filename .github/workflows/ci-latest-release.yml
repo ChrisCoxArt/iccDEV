@@ -36,6 +36,14 @@ permissions:
 "on":
   workflow_dispatch:
     inputs:
+      windows_vcpkg_source:
+        description: Windows dependencies from vcpkg manifest or the pinned 3087493 release bundle
+        required: true
+        default: manifest
+        type: choice
+        options:
+          - manifest
+          - pinned-release-bundle
       pypi_packages:
         description: Validated Python distributions to publish to PyPI
         required: true
@@ -85,7 +93,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Assert no GitHub Actions cache primitives
+      - name: Check release cache boundary
         env:
           BASH_ENV: /dev/null
         run: |
@@ -253,16 +261,47 @@ jobs:
             -exec cp -a {} "$stage/" \; 2>/dev/null || true
           find Build/IccConnect -type l -name '*.so*' \
             -exec cp -a {} "$stage/" \; 2>/dev/null || true
-          # 3. Copy Testing/README.md, LICENSE.md and docs/
+          # 3. Copy project and dependency licensing, README.md, and docs/
           cp Testing/README.md  "$stage/"
           cp LICENSE.md "$stage/"
+          cp Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md "$stage/"
+          license_root="$stage/third-party-licenses/debian"
+          package_list="$RUNNER_TEMP/iccdev-debian-license-packages.txt"
+          library_packages=(
+            libheif-dev libpng-dev libxml2-dev libtiff-dev
+            nlohmann-json3-dev libwxgtk3.2-dev wx-common
+          )
+          mkdir -p "$license_root"
+          {
+            printf '%s\n' "${library_packages[@]}"
+            apt-cache depends --recurse --installed "${library_packages[@]}" |
+              sed -n -E 's/^[[:space:]]*(Pre)?Depends: ([^ <][^ ]*).*$/\2/p'
+          } | sed 's/:.*$//' | sort -u > "$package_list"
+          while IFS= read -r package; do
+            if status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null)" \
+              && [ "$status" = "ii " ]; then
+              copyright="/usr/share/doc/$package/copyright"
+              if [ ! -f "$copyright" ]; then
+                echo "::error::Installed Debian dependency lacks copyright metadata: $package"
+                exit 1
+              fi
+              mkdir -p "$license_root/$package"
+              cp -L "$copyright" "$license_root/$package/copyright"
+            fi
+          done < "$package_list"
+          common_license_root="$license_root/common-licenses"
+          mkdir -p "$common_license_root"
+          cp -aL /usr/share/common-licenses/. "$common_license_root/"
+          test -s "$license_root/libheif-dev/copyright"
+          test -s "$license_root/libtiff-dev/copyright"
+          test -s "$common_license_root/GPL-2"
           cp -a docs    "$stage/docs"
           # 4. Copy the MATLAB package, native table sources, and QA fixtures.
           cp -a matlab "$stage/matlab"
           mkdir -p "$stage/Testing/Display" "$stage/Testing/HDR" \
             "$stage/Testing/ApplyDataFiles/test-profiles" "$stage/IccProfLib" \
             "$stage/.github/ci/regression" \
-            "$stage/.github/ci/tooling/heif/img"
+            "$stage/.github/ci/test-data/heif"
           cp Testing/sRGB_v4_ICC_preference.icc "$stage/Testing/"
           cp Testing/sRGB_v4_ICC_preference.icc "$stage/Testing/Display/"
           cp Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc \
@@ -275,10 +314,10 @@ jobs:
             "$stage/IccProfLib/"
           cp .github/ci/regression/gamma-2.20703125.icc \
             "$stage/.github/ci/regression/"
-          cp .github/ci/tooling/heif/img/valid-prof.heic \
-            .github/ci/tooling/heif/img/nclx-only.heif \
-            .github/ci/tooling/heif/img/invalid-ipma-index.heic \
-            "$stage/.github/ci/tooling/heif/img/"
+          cp .github/ci/test-data/heif/valid-prof.heic \
+            .github/ci/test-data/heif/nclx-only.heif \
+            .github/ci/test-data/heif/invalid-ipma-index.heic \
+            "$stage/.github/ci/test-data/heif/"
           if [ ! -s "$stage/matlab/+iccdev/private/icc_mex.mexa64" ]; then
             echo "::error::Required staged Linux MATLAB MEX gateway missing"
             exit 1
@@ -395,8 +434,13 @@ jobs:
   macos:
     name: "macOS arm64 Clang"
     needs: cache-policy
+    # Pin to macos-15: this job builds the macOS MATLAB MEX gateway, and
+    # MATLAB's mex toolchain is not qualified for macOS 26 (current
+    # macos-latest), which fails the native MEX link with undefined
+    # _mexFunctionAdapter symbols. macos-15 is the newest MATLAB-supported
+    # Apple Silicon runner.
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - name: Checkout master
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -518,16 +562,47 @@ jobs:
             -exec cp -a {} "$stage/" \; 2>/dev/null || true
           find Build/IccConnect -type l -name '*.dylib' \
             -exec cp -a {} "$stage/" \; 2>/dev/null || true
-          # 3. Copy Testing/README.md, LICENSE.md and docs/
+          # 3. Copy project and dependency licensing, README.md, and docs/
           cp Testing/README.md  "$stage/"
           cp LICENSE.md "$stage/"
+          cp Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md "$stage/"
+          nlohmann_prefix="$(brew --prefix nlohmann-json)"
+          nlohmann_license_root="$stage/third-party-licenses/nlohmann-json"
+          nlohmann_attribution_root="$nlohmann_license_root/runtime-attributions"
+          mkdir -p "$nlohmann_attribution_root"
+          cp -L "$nlohmann_prefix/LICENSE.MIT" "$nlohmann_license_root/LICENSE.MIT"
+          attribution_count=0
+          while IFS= read -r header; do
+            owners="$(grep '^// SPDX-FileCopyrightText:' "$header" || true)"
+            if [ -n "$owners" ] && grep -Fqv 'Niels Lohmann' <<< "$owners"; then
+              relative="${header#"$nlohmann_prefix/include/"}"
+              destination="$nlohmann_attribution_root/$relative"
+              mkdir -p "$(dirname "$destination")"
+              cp -L "$header" "$destination"
+              attribution_count=$((attribution_count + 1))
+            fi
+          done < <(
+            find "$nlohmann_prefix/include/nlohmann" -type f \
+              \( -name '*.hpp' -o -name '*.h' \) -print | sort
+          )
+          if [ "$attribution_count" -lt 4 ]; then
+            echo "::error::nlohmann-json runtime attribution headers are incomplete"
+            exit 1
+          fi
+          for attribution in \
+            nlohmann/detail/conversions/to_chars.hpp \
+            nlohmann/detail/meta/cpp_future.hpp \
+            nlohmann/detail/output/serializer.hpp \
+            nlohmann/thirdparty/hedley/hedley.hpp; do
+            test -s "$nlohmann_attribution_root/$attribution"
+          done
           cp -a docs    "$stage/docs"
           # 4. Copy the MATLAB package, native table sources, and QA fixtures.
           cp -a matlab "$stage/matlab"
           mkdir -p "$stage/Testing/Display" "$stage/Testing/HDR" \
             "$stage/Testing/ApplyDataFiles/test-profiles" "$stage/IccProfLib" \
             "$stage/.github/ci/regression" \
-            "$stage/.github/ci/tooling/heif/img"
+            "$stage/.github/ci/test-data/heif"
           cp Testing/sRGB_v4_ICC_preference.icc "$stage/Testing/"
           cp Testing/sRGB_v4_ICC_preference.icc "$stage/Testing/Display/"
           cp Testing/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc \
@@ -540,10 +615,10 @@ jobs:
             "$stage/IccProfLib/"
           cp .github/ci/regression/gamma-2.20703125.icc \
             "$stage/.github/ci/regression/"
-          cp .github/ci/tooling/heif/img/valid-prof.heic \
-            .github/ci/tooling/heif/img/nclx-only.heif \
-            .github/ci/tooling/heif/img/invalid-ipma-index.heic \
-            "$stage/.github/ci/tooling/heif/img/"
+          cp .github/ci/test-data/heif/valid-prof.heic \
+            .github/ci/test-data/heif/nclx-only.heif \
+            .github/ci/test-data/heif/invalid-ipma-index.heic \
+            "$stage/.github/ci/test-data/heif/"
           if [ ! -s "$stage/matlab/+iccdev/private/icc_mex.mexmaca64" ]; then
             echo "::error::Required staged Apple Silicon MATLAB MEX gateway missing"
             exit 1
@@ -810,6 +885,8 @@ jobs:
           Write-Host "OS:            $env:RUNNER_OS"
       - name: Install manifest dependencies and build
         shell: pwsh -NoProfile -NoLogo -NonInteractive -Command {0}
+        env:
+          WINDOWS_VCPKG_SOURCE: ${{ inputs.windows_vcpkg_source }}
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
@@ -823,19 +900,78 @@ jobs:
           Write-Host "Copyright (c) 2025 International Color Consortium. All rights reserved." -ForegroundColor Green
           git branch
           git status
-          Write-Host "========= Installing manifest dependencies... ================`n"
-          $vcpkgExecutable = (Get-Command vcpkg -CommandType Application -ErrorAction Stop).Source
-          $env:VCPKG_ROOT = Split-Path -Parent $vcpkgExecutable
+          $cmakeDependencyArgs = @()
+          if ($env:WINDOWS_VCPKG_SOURCE -eq 'pinned-release-bundle') {
+            # Immutable GitHub release asset; reject changed bytes before extraction.
+            $assetName = 'iccdev-windows-vcpkg-classic-libheif-3087493.zip'
+            $assetUri = "https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-23241-libheif-deps/$assetName"
+            $assetSha256 = '9b051a50f152f616986e735d618a2f5ade2cf5443c680216894f2897dbbf5eca'
+            $assetPath = Join-Path $env:RUNNER_TEMP $assetName
+            $bundleRoot = Join-Path $env:RUNNER_TEMP 'iccdev-vcpkg-3087493'
+            New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
+            Invoke-WebRequest -Uri $assetUri -OutFile $assetPath
+            $actualSha256 = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $assetSha256) {
+              throw "Pinned vcpkg release asset SHA256 mismatch: $actualSha256"
+            }
+            tar -xf $assetPath -C $bundleRoot
+            if ($LASTEXITCODE -ne 0) {
+              throw "Pinned vcpkg release asset extraction failed with exit code $LASTEXITCODE"
+            }
+            $env:VCPKG_ROOT = $bundleRoot
+            $env:VCPKG_INSTALLED_DIR = Join-Path $bundleRoot 'installed'
+            foreach ($required in @(
+              '.vcpkg-root',
+              'scripts/buildsystems/vcpkg.cmake',
+              'installed/x64-windows/include/libheif/heif.h',
+              'installed/x64-windows/bin'
+            )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $bundleRoot $required))) {
+                throw "Pinned vcpkg release asset missing $required"
+              }
+            }
+            $cmakeDependencyArgs = @(
+              '-DVCPKG_MANIFEST_MODE=OFF',
+              '-DVCPKG_APPLOCAL_DEPS=OFF',
+              "-DVCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows'
+            )
+            Write-Host "Using verified pinned vcpkg release bundle (SHA256 $actualSha256)"
+          } elseif ($env:WINDOWS_VCPKG_SOURCE -eq 'manifest') {
+            Write-Host "========= Installing manifest dependencies... ================`n"
+            $vcpkgExecutable = (Get-Command vcpkg -CommandType Application -ErrorAction Stop).Source
+            $env:VCPKG_ROOT = Split-Path -Parent $vcpkgExecutable
+            vcpkg integrate install
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg integrate install failed with exit code $LASTEXITCODE" }
+            vcpkg install
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
+            $env:VCPKG_INSTALLED_DIR = Join-Path $PWD 'vcpkg_installed'
+          } else {
+            throw "Unsupported Windows vcpkg source: $env:WINDOWS_VCPKG_SOURCE"
+          }
+          $vcpkgShare = Join-Path $env:VCPKG_INSTALLED_DIR 'x64-windows\share'
+          if (-not (Test-Path -LiteralPath $vcpkgShare -PathType Container)) {
+            throw "vcpkg dependency metadata directory not found: $vcpkgShare"
+          }
+          "VCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $vcpkgToolchain = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
           if (-not (Test-Path -LiteralPath $vcpkgToolchain -PathType Leaf)) {
             throw "vcpkg toolchain file not found: $vcpkgToolchain"
           }
-          vcpkg integrate install
-          vcpkg install
           Write-Host "========= Building... ================`n"
           cmake --preset vs2022-x64 -B msvc -S Build/Cmake `
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain" `
+            @cmakeDependencyArgs
+          if ($LASTEXITCODE -ne 0) { throw "Windows CMake configure failed with exit code $LASTEXITCODE" }
           cmake --build msvc --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Windows Release build failed with exit code $LASTEXITCODE" }
+          cmake --build msvc --config Release --target iccDEVCmmSmokeTest --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Windows CMM smoke target build failed with exit code $LASTEXITCODE" }
+          ctest --test-dir msvc -C Release -R '^iccdev\.windows-iccdevcmm-smoke$' `
+            --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw "Windows CMM smoke failed with exit code $LASTEXITCODE" }
           $runtimeDir = Resolve-Path ".\msvc\bin\Release"
           Get-ChildItem -File -Path $runtimeDir |
             Where-Object { $_.Extension -in '.exe','.dll' } |
@@ -880,15 +1016,80 @@ jobs:
             'iccToJson.exe',
             'iccFromJson.exe',
             'iccPawgReport.exe',
+            'IccDEVCmm.dll',
             'IccProfLib2.dll'
           )) {
             if (-not (Test-Path (Join-Path $stage $required))) {
               throw "Required staged Windows runtime artifact missing: $required"
             }
           }
-          # 3. Copy Testing/README.md, LICENSE.md and docs/
+          # 3. Copy project and dependency licensing, README.md, and docs/
           Copy-Item -Path "Testing/README.md"  -Destination $stage -Force
           Copy-Item -Path "LICENSE.md" -Destination $stage -Force
+          Copy-Item -Path "Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md" `
+            -Destination $stage -Force
+          $vcpkgShare = Join-Path $env:VCPKG_INSTALLED_DIR 'x64-windows\share'
+          $licenseRoot = Join-Path $stage 'third-party-licenses\vcpkg'
+          $copyrightFiles = @(
+            Get-ChildItem -Path (Join-Path $vcpkgShare '*\copyright') -File
+          )
+          if ($copyrightFiles.Count -eq 0) {
+            throw "No vcpkg dependency copyright files found under $vcpkgShare"
+          }
+          foreach ($copyright in $copyrightFiles) {
+            $port = $copyright.Directory.Name
+            $destination = Join-Path $licenseRoot $port
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+            Copy-Item -LiteralPath $copyright.FullName `
+              -Destination (Join-Path $destination 'copyright') -Force
+            $spdx = Join-Path $copyright.Directory.FullName 'vcpkg.spdx.json'
+            if (Test-Path -LiteralPath $spdx -PathType Leaf) {
+              Copy-Item -LiteralPath $spdx -Destination $destination -Force
+            }
+          }
+          foreach ($requiredPort in @('libheif', 'tiff')) {
+            $requiredCopyright = Join-Path $licenseRoot "$requiredPort\copyright"
+            if (-not (Test-Path -LiteralPath $requiredCopyright -PathType Leaf)) {
+              throw "Required vcpkg dependency copyright missing: $requiredPort"
+            }
+          }
+          $nlohmannInclude = Join-Path $env:VCPKG_INSTALLED_DIR `
+            'x64-windows\include\nlohmann'
+          $nlohmannAttributionRoot = Join-Path $licenseRoot `
+            'nlohmann-json\runtime-attributions\nlohmann'
+          $attributionCount = 0
+          Get-ChildItem -LiteralPath $nlohmannInclude -Recurse -File |
+            Where-Object { $_.Extension -in '.hpp', '.h' } |
+            Sort-Object FullName |
+            ForEach-Object {
+              $owners = @(Select-String -LiteralPath $_.FullName `
+                -Pattern '^// SPDX-FileCopyrightText:')
+              $additionalOwners = @($owners | Where-Object {
+                $_.Line -notmatch 'Niels Lohmann'
+              })
+              if ($owners.Count -gt 0 -and $additionalOwners.Count -gt 0) {
+                $relative = [IO.Path]::GetRelativePath($nlohmannInclude, $_.FullName)
+                $destination = Join-Path $nlohmannAttributionRoot $relative
+                New-Item -ItemType Directory -Force `
+                  -Path (Split-Path -Parent $destination) | Out-Null
+                Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+                $attributionCount++
+              }
+            }
+          if ($attributionCount -lt 4) {
+            throw "nlohmann-json runtime attribution headers are incomplete"
+          }
+          foreach ($attribution in @(
+            'detail\conversions\to_chars.hpp',
+            'detail\meta\cpp_future.hpp',
+            'detail\output\serializer.hpp',
+            'thirdparty\hedley\hedley.hpp'
+          )) {
+            $attributionPath = Join-Path $nlohmannAttributionRoot $attribution
+            if (-not (Test-Path -LiteralPath $attributionPath -PathType Leaf)) {
+              throw "Required nlohmann-json attribution missing: $attribution"
+            }
+          }
           Copy-Item -Path "docs"       -Destination "$stage/docs" -Recurse -Force
           # 4. Copy the complete MATLAB source tree and the MEX/runtime files
           #    produced by the tested Release build above.
@@ -918,10 +1119,10 @@ jobs:
             -Destination "$stage/IccProfLib/IccColorimetry.cpp" -Force
           Copy-Item -Path ".github/ci/regression/gamma-2.20703125.icc" `
             -Destination "$stage/.github/ci/regression/gamma-2.20703125.icc" -Force
-          $heifFixtureDir = "$stage/.github/ci/tooling/heif/img"
+          $heifFixtureDir = "$stage/.github/ci/test-data/heif"
           New-Item -ItemType Directory -Force -Path $heifFixtureDir | Out-Null
           foreach ($fixture in @('valid-prof.heic', 'nclx-only.heif', 'invalid-ipma-index.heic')) {
-            Copy-Item -LiteralPath ".github/ci/tooling/heif/img/$fixture" `
+            Copy-Item -LiteralPath ".github/ci/test-data/heif/$fixture" `
               -Destination $heifFixtureDir -Force
           }
           $matlabRequired = @(
@@ -958,9 +1159,9 @@ jobs:
             'IccProfLib\IccTagBasic.cpp',
             'IccProfLib\IccColorimetry.cpp',
             '.github\ci\regression\gamma-2.20703125.icc',
-            '.github\ci\tooling\heif\img\valid-prof.heic',
-            '.github\ci\tooling\heif\img\nclx-only.heif',
-            '.github\ci\tooling\heif\img\invalid-ipma-index.heic'
+            '.github\ci\test-data\heif\valid-prof.heic',
+            '.github\ci\test-data\heif\nclx-only.heif',
+            '.github\ci\test-data\heif\invalid-ipma-index.heic'
           )
           foreach ($required in $matlabRequired) {
             if (-not (Test-Path (Join-Path $stage $required))) {
@@ -1043,6 +1244,16 @@ jobs:
           )) {
             if (-not (Test-Path -LiteralPath (Join-Path $stage $requiredIisBinary))) {
               throw "Required staged IIS binary missing: $requiredIisBinary"
+            }
+          }
+          # The Windows ICM CMM is a separate consumer DLL, with its usage guide.
+          $cmmStage = Join-Path $stage 'IccDEVCmm'
+          New-Item -ItemType Directory -Force -Path $cmmStage | Out-Null
+          Copy-Item -LiteralPath (Join-Path $stage 'IccDEVCmm.dll') -Destination $cmmStage -Force
+          Copy-Item -LiteralPath 'Tools/Winnt/IccDEVCmm/README.md' -Destination $cmmStage -Force
+          foreach ($requiredCmmFile in @('IccDEVCmm.dll', 'README.md')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $cmmStage $requiredCmmFile))) {
+              throw "Required staged Windows CMM artifact missing: $requiredCmmFile"
             }
           }
           # 6. Generate path.bat helper script
@@ -1163,7 +1374,7 @@ jobs:
   wasm:
     name: "WASM Release (Emscripten)"
     needs: cache-policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       EMSDK_VERSION: 4.0.21
@@ -1582,6 +1793,72 @@ jobs:
           chmod +x Build/Cmake/wasm-package/stage.sh
           Build/Cmake/wasm-package/stage.sh build-wasm wasm-stage "$VERSION"
 
+          license_root="wasm-stage/third-party-licenses"
+          third_party="$PWD/third_party"
+          cp Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md wasm-stage/
+          mkdir -p "$license_root"
+          for dependency in zlib libpng libjpeg libtiff libxml2 nlohmann-json; do
+            source_dir="$third_party/$dependency"
+            destination="$license_root/$dependency"
+            notice_count=0
+            mkdir -p "$destination"
+            while IFS= read -r notice; do
+              cp -L "$notice" "$destination/$(basename "$notice")"
+              notice_count=$((notice_count + 1))
+            done < <(
+              find "$source_dir" -maxdepth 1 -type f \
+                \( -iname 'license*' -o -iname 'licence*' -o \
+                   -iname 'copying*' -o -iname 'copyright*' -o \
+                   -iname 'notice*' \) -print | sort
+            )
+            if [ "$dependency" = "libjpeg" ]; then
+              cp -L "$source_dir/README" "$destination/README"
+              notice_count=$((notice_count + 1))
+            fi
+            if [ "$notice_count" -eq 0 ]; then
+              echo "::error::WASM dependency lacks license metadata: $dependency"
+              exit 1
+            fi
+          done
+          nlohmann_source="$third_party/nlohmann-json/include/nlohmann"
+          nlohmann_attribution_root="$license_root/nlohmann-json/runtime-attributions"
+          attribution_count=0
+          while IFS= read -r header; do
+            owners="$(grep '^// SPDX-FileCopyrightText:' "$header" || true)"
+            if [ -n "$owners" ] && grep -Fqv 'Niels Lohmann' <<< "$owners"; then
+              relative="${header#"$third_party/nlohmann-json/include/"}"
+              destination="$nlohmann_attribution_root/$relative"
+              mkdir -p "$(dirname "$destination")"
+              cp -L "$header" "$destination"
+              attribution_count=$((attribution_count + 1))
+            fi
+          done < <(
+            find "$nlohmann_source" -type f \
+              \( -name '*.hpp' -o -name '*.h' \) -print | sort
+          )
+          if [ "$attribution_count" -lt 4 ]; then
+            echo "::error::nlohmann-json runtime attribution headers are incomplete"
+            exit 1
+          fi
+          for attribution in \
+            nlohmann/detail/conversions/to_chars.hpp \
+            nlohmann/detail/meta/cpp_future.hpp \
+            nlohmann/detail/output/serializer.hpp \
+            nlohmann/thirdparty/hedley/hedley.hpp; do
+            test -s "$nlohmann_attribution_root/$attribution"
+          done
+          node -e '
+            const fs = require("fs");
+            const path = "wasm-stage/package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            for (const entry of ["THIRD-PARTY-NOTICES.md", "third-party-licenses/"]) {
+              if (!pkg.files.includes(entry)) {
+                pkg.files.push(entry);
+              }
+            }
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          '
+
           {
             echo "### WASM npm-shaped bundle"
             echo "| Field | Value |"
@@ -1715,7 +1992,7 @@ jobs:
   cpack-linux:
     name: "Linux CPack runtime packages"
     needs: cache-policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
       run:
@@ -1802,6 +2079,8 @@ jobs:
           unzip -Z1 "${zip_file}" > build-cpack/ZIP-CONTENTS.txt
           grep -q '/VERSION$' build-cpack/ZIP-CONTENTS.txt
           grep -q '/TOOL-CATALOG.md$' build-cpack/ZIP-CONTENTS.txt
+          grep -q '/LICENSE.md$' build-cpack/ZIP-CONTENTS.txt
+          grep -q '/THIRD-PARTY-NOTICES.md$' build-cpack/ZIP-CONTENTS.txt
           grep -q '/bin/iccHeifDump$' build-cpack/ZIP-CONTENTS.txt
           unzip -p "${zip_file}" '*/TOOL-CATALOG.md' |
             grep -Fx -- "- \`iccHeifDump\`"
@@ -1868,7 +2147,7 @@ jobs:
   doxygen:
     name: "Doxygen HTML Docs"
     needs: cache-policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
       run:
@@ -1921,6 +2200,7 @@ jobs:
           test -f docs/generated/html/curatedlibraries.html
           test -f docs/generated/html/curatedtools.html
           test -f docs/generated/html/curatedmaintainerqa.html
+          python3 .github/scripts/check-doxygen-html.py docs/generated/html
           if grep -q 'superpowers' docs/generated/html/navtreedata.js; then
             echo "::error::Doxygen navigation contains excluded internal documentation"
             exit 1
@@ -1935,6 +2215,12 @@ jobs:
             echo "::error::Anonymous namespace references leaked into generated HTML"
             exit 1
           fi
+          cp LICENSE.md docs/generated/html/LICENSE.md
+          cp Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md \
+            docs/generated/html/THIRD-PARTY-NOTICES.md
+          cmp -s LICENSE.md docs/generated/html/LICENSE.md
+          cmp -s Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md \
+            docs/generated/html/THIRD-PARTY-NOTICES.md
           echo "Full iccDEV Doxygen HTML generation complete"
           find docs/generated/html -maxdepth 1 -printf '%p\n' |
             sort |
@@ -1974,8 +2260,10 @@ jobs:
             echo "CLI tools including IccPawgReport and"
             echo "IccProfileVisualize, Winnt tools including"
             echo "IccIisIsapi and its OpenAPI contract,"
-            echo "wxWidget tools, hello-iccdev, docs, Testing notes,"
+            echo "wxWidget tools, hello-iccdev, iOS examples, maintainer docs,"
             echo "and iccApply command-line lane references."
+            echo ""
+            echo "**Navigation QA**: Five curated entry points and no broken packaged links."
             echo ""
             echo "**Visual aids**: Interactive SVG (pan/zoom),"
             echo "class hierarchy browser, call/caller graphs,"
@@ -2009,7 +2297,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022]
+        os: [ubuntu-latest, windows-2022]
     defaults:
       run:
         shell: bash --noprofile --norc {0}
@@ -2035,12 +2323,18 @@ jobs:
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           unset ICCDEV_BUILD_DIR ICCDEV_VALIDATION_LIBRARY ICCDEV_TOOLS_DIR PYTHONPATH || true
-          python -m pip install "build>=1.2,<1.7" "twine>=5,<8" "PyYAML>=6,<7"
+          python -m pip install "build>=1.2,<1.7" "twine>=5,<8" "PyYAML>=6,<7" \
+            "cryptography==50.0.2"
           python -m pip install -e "./iccdev-mcp[dev,rest]"
           python -m pytest --rootdir . --import-mode=importlib \
+            -o asyncio_default_fixture_loop_scope=function \
+            .github/tests/test_downstream_oidc_gate.py \
+            .github/tests/test_downstream_oidc_workflow.py \
             .github/tests/test_mcp_release_package.py \
             .github/tests/test_wasm_workflow.py -q
-          python -m pytest --rootdir . --import-mode=importlib iccdev-mcp/tests/test_server.py iccdev-mcp/tests/test_rest_api.py -q
+          python -m pytest --rootdir . --import-mode=importlib \
+            -o asyncio_default_fixture_loop_scope=function \
+            iccdev-mcp/tests/test_server.py iccdev-mcp/tests/test_rest_api.py -q
           python .github/scripts/iccdev-mcp-package-smoke.py --source-tree
           python -m build iccdev-mcp --outdir mcp-dist
           python .github/scripts/validate-mcp-release-package.py mcp-dist
@@ -2067,10 +2361,114 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  apple-mobile-core:
+    name: Build Apple mobile release cores
+    needs: cache-policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-apple-mobile-core.yml
+    with:
+      release-artifact: true
+
+  downstream-plan:
+    name: Check downstream OIDC eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    outputs:
+      pypi_iccdev: ${{ steps.oidc_gate.outputs.pypi_iccdev }}
+      pypi_mcp: ${{ steps.oidc_gate.outputs.pypi_mcp }}
+      npm_iccdev: ${{ steps.oidc_gate.outputs.npm_iccdev }}
+      selected_but_blocked: ${{ steps.oidc_gate.outputs.selected_but_blocked }}
+      reason_pypi_iccdev: ${{ steps.oidc_gate.outputs.reason_pypi_iccdev }}
+      reason_pypi_mcp: ${{ steps.oidc_gate.outputs.reason_pypi_mcp }}
+      reason_npm_iccdev: ${{ steps.oidc_gate.outputs.reason_npm_iccdev }}
+      gate_outcome: ${{ steps.oidc_gate.outcome }}
+      planner_run_attempt: ${{ steps.oidc_gate.outputs.planner_run_attempt }}
+    steps:
+      - name: Checkout full source history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python for provenance verification
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13"
+
+      # preflight: allow-package-install reason=read-only-downstream-provenance-bootstrap
+      - name: Install downstream provenance verifier
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' &&
+              github.ref == 'refs/heads/master' &&
+              (inputs.pypi_packages == 'iccdev' ||
+               inputs.pypi_packages == 'iccdev-mcp' ||
+               inputs.pypi_packages == 'both' ||
+               inputs.npm_packages == 'iccdev') }}
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          python3 -m pip install --no-cache-dir --require-hashes \
+            --only-binary=:all: --index-url https://pypi.org/simple \
+            -r .github/ci/downstream-oidc-requirements.txt
+
+      - name: Set up Node.js for npm provenance verification
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' &&
+              github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Evaluate selected downstream packages
+        id: oidc_gate
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          PYPI_PACKAGES: ${{ inputs.pypi_packages }}
+          NPM_PACKAGES: ${{ inputs.npm_packages }}
+          NPM_VERSION: ${{ inputs.npm_version }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          python3 .github/scripts/check-downstream-oidc-gate.py \
+            --repo-root . \
+            --pypi-packages "${PYPI_PACKAGES:-none}" \
+            --npm-packages "${NPM_PACKAGES:-none}" \
+            --npm-version "$NPM_VERSION" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output downstream-oidc-gate.json
+          printf 'planner_run_attempt=%s\n' "$(sanitize_line "$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_OUTPUT"
+
   release:
     name: "Publish Latest Release"
-    needs: [linux, macos, windows, wasm, cpack-linux, doxygen, python-wheels, mcp-package]
-    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci-fix-windows-packaging-failure' || github.ref == 'refs/heads/ci-publish-colourbill-ctrl' }}
+    needs: [linux, macos, windows, wasm, cpack-linux, doxygen, python-wheels, mcp-package, apple-mobile-core, downstream-plan]
+    if: >-
+      ${{ !cancelled() &&
+          (github.ref == 'refs/heads/master' ||
+           github.ref == 'refs/heads/ci-fix-windows-packaging-failure' ||
+           github.ref == 'refs/heads/ci-publish-colourbill-ctrl') &&
+          needs.linux.result == 'success' &&
+          needs.macos.result == 'success' &&
+          needs.windows.result == 'success' &&
+          needs.wasm.result == 'success' &&
+          needs.cpack-linux.result == 'success' &&
+          needs.doxygen.result == 'success' &&
+          needs.python-wheels.result == 'success' &&
+          needs.mcp-package.result == 'success' &&
+          needs.apple-mobile-core.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: >-
@@ -2082,6 +2480,10 @@ jobs:
       contents: write  # Required to publish the latest release.
       id-token: write  # Required for artifact attestation identity.
       attestations: write  # Required to publish release archive provenance.
+    outputs:
+      pypi_iccdev_publication: ${{ steps.pypi_iccdev.outcome }}
+      pypi_mcp_publication: ${{ steps.pypi_mcp.outcome }}
+      npm_iccdev_publication: ${{ steps.npm_iccdev.outcome }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -2105,6 +2507,12 @@ jobs:
         with:
           name: iccdev-macos-clang
           path: artifacts/iccdev-macos-clang
+
+      - name: Download Apple mobile core libraries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: iccdev-apple-mobile-core
+          path: artifacts/iccdev-apple-mobile-core
 
       - name: Download Windows artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -2191,12 +2599,13 @@ jobs:
 
           bash .github/scripts/ci-safe-apt-update.sh
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            patchelf
+            patchelf zip
 
           expected=(
             iccdev-linux-gcc
             iccdev-linux-clang
             iccdev-macos-clang
+            iccdev-apple-mobile-core
             iccdev-windows-msvc
             iccdev-wasm-release
             iccdev-doxygen-html
@@ -2216,8 +2625,19 @@ jobs:
               exit 1
             fi
           done
+          python3 .github/scripts/validate-apple-mobile-core-artifact.py \
+            artifacts/iccdev-apple-mobile-core
 
           windows_bundle_root="artifacts/iccdev-windows-msvc/iccDEV-Testing"
+          for required in \
+            "IccDEVCmm.dll" \
+            "IccDEVCmm/IccDEVCmm.dll" \
+            "IccDEVCmm/README.md"; do
+            if [ ! -s "${windows_bundle_root}/${required}" ]; then
+              echo "::error::Missing expected Windows CMM release artifact: $(sanitize_line "$required")"
+              exit 1
+            fi
+          done
           matlab_required=(
             "iccHeifDump.exe"
             "iccToJson.exe"
@@ -2261,9 +2681,9 @@ jobs:
             "IccProfLib/IccTagBasic.cpp"
             "IccProfLib/IccColorimetry.cpp"
             ".github/ci/regression/gamma-2.20703125.icc"
-            ".github/ci/tooling/heif/img/valid-prof.heic"
-            ".github/ci/tooling/heif/img/nclx-only.heif"
-            ".github/ci/tooling/heif/img/invalid-ipma-index.heic"
+            ".github/ci/test-data/heif/valid-prof.heic"
+            ".github/ci/test-data/heif/nclx-only.heif"
+            ".github/ci/test-data/heif/invalid-ipma-index.heic"
           )
           for required in "${matlab_required[@]}"; do
             if [ ! -s "${windows_bundle_root}/${required}" ]; then
@@ -2307,9 +2727,9 @@ jobs:
             "IccProfLib/IccTagBasic.cpp"
             "IccProfLib/IccColorimetry.cpp"
             ".github/ci/regression/gamma-2.20703125.icc"
-            ".github/ci/tooling/heif/img/valid-prof.heic"
-            ".github/ci/tooling/heif/img/nclx-only.heif"
-            ".github/ci/tooling/heif/img/invalid-ipma-index.heic"
+            ".github/ci/test-data/heif/valid-prof.heic"
+            ".github/ci/test-data/heif/nclx-only.heif"
+            ".github/ci/test-data/heif/invalid-ipma-index.heic"
           )
           for compiler in gcc clang; do
             linux_bundle_root="artifacts/iccdev-linux-${compiler}/iccDEV-Testing"
@@ -2373,6 +2793,111 @@ jobs:
               -x 'strings-hygiene.txt' \
               -x 'binary-review/*')
             echo "  Created ${name}.zip ($(du -h "release-assets/${name}.zip" | cut -f1))"
+          done
+
+          for name in \
+            iccdev-linux-gcc \
+            iccdev-linux-clang \
+            iccdev-macos-clang \
+            iccdev-apple-mobile-core \
+            iccdev-windows-msvc \
+            iccdev-wasm-release \
+            iccdev-doxygen-html; do
+            archive="release-assets/$name.zip"
+            entries="$(unzip -Z1 "$archive")"
+            if ! grep -qE '(^|/)LICENSE(\.md)?$' <<< "$entries"; then
+              echo "::error::$name omits the ICC project license"
+              exit 1
+            fi
+          done
+
+          doxygen_archive="release-assets/iccdev-doxygen-html.zip"
+          doxygen_entries="$(unzip -Z1 "$doxygen_archive")"
+          if ! grep -Fxq 'THIRD-PARTY-NOTICES.md' <<< "$doxygen_entries"; then
+            echo "::error::iccdev-doxygen-html omits third-party notices"
+            exit 1
+          fi
+
+          for name in \
+            iccdev-linux-gcc \
+            iccdev-linux-clang \
+            iccdev-macos-clang \
+            iccdev-apple-mobile-core \
+            iccdev-windows-msvc \
+            iccdev-wasm-release; do
+            archive="release-assets/$name.zip"
+            entries="$(unzip -Z1 "$archive")"
+            expected_notice='iccDEV-Testing/THIRD-PARTY-NOTICES.md'
+            if [ "$name" = 'iccdev-wasm-release' ] ||
+                [ "$name" = 'iccdev-apple-mobile-core' ]; then
+              expected_notice='THIRD-PARTY-NOTICES.md'
+            fi
+            if ! grep -Fxq "$expected_notice" <<< "$entries"; then
+              echo "::error::$name omits third-party notices"
+              exit 1
+            fi
+            if ! grep -qE '(^|/)third-party-licenses/.+' <<< "$entries"; then
+              echo "::error::$name omits dependency license files"
+              exit 1
+            fi
+          done
+
+          for name in \
+            iccdev-macos-clang \
+            iccdev-apple-mobile-core \
+            iccdev-wasm-release; do
+            archive="release-assets/$name.zip"
+            entries="$(unzip -Z1 "$archive")"
+            expected_license='third-party-licenses/nlohmann-json/LICENSE.MIT'
+            if [ "$name" = 'iccdev-macos-clang' ]; then
+              expected_license="iccDEV-Testing/$expected_license"
+            fi
+            if ! grep -Fxq "$expected_license" <<< "$entries"; then
+              echo "::error::$name omits a nonempty nlohmann-json LICENSE.MIT"
+              exit 1
+            fi
+            if ! license_bytes="$(unzip -p "$archive" "$expected_license" | wc -c)" ||
+                [ "$license_bytes" -eq 0 ]; then
+              echo "::error::$name omits a nonempty nlohmann-json LICENSE.MIT"
+              exit 1
+            fi
+          done
+
+          for name in iccdev-linux-gcc iccdev-linux-clang; do
+            archive="release-assets/$name.zip"
+            entries="$(unzip -Z1 "$archive")"
+            expected="third-party-licenses/debian/common-licenses/GPL-2"
+            if ! grep -qE "(^|/)${expected}$" <<< "$entries"; then
+              echo "::error::$name omits Debian common-license texts"
+              exit 1
+            fi
+          done
+
+          nlohmann_attributions=(
+            nlohmann/detail/conversions/to_chars.hpp
+            nlohmann/detail/meta/cpp_future.hpp
+            nlohmann/detail/output/serializer.hpp
+            nlohmann/thirdparty/hedley/hedley.hpp
+          )
+          for name in \
+            iccdev-macos-clang \
+            iccdev-apple-mobile-core \
+            iccdev-windows-msvc \
+            iccdev-wasm-release; do
+            archive="release-assets/$name.zip"
+            entries="$(unzip -Z1 "$archive")"
+            if [ "$name" = "iccdev-windows-msvc" ]; then
+              prefix="third-party-licenses/vcpkg/nlohmann-json/runtime-attributions"
+            else
+              prefix="third-party-licenses/nlohmann-json/runtime-attributions"
+            fi
+            for attribution in "${nlohmann_attributions[@]}"; do
+              expected="$prefix/$attribution"
+              if ! grep -qE "(^|/)${expected//./\\.}$" <<< "$entries"; then
+                echo "::error::$name omits nlohmann-json attribution: $attribution"
+                exit 1
+              fi
+            done
           done
 
           runtime_dir="artifacts/reficcmax-runtime-packages-linux"
@@ -2485,11 +3010,12 @@ jobs:
             echo "| Linux x86_64 (GCC + MATLAB R2023b MEX) | \`iccdev-linux-gcc.zip\` |"
             echo "| Linux x86_64 (Clang + MATLAB R2023b MEX) | \`iccdev-linux-clang.zip\` |"
             echo "| macOS arm64 (Clang + MATLAB R2023b MEX) | \`iccdev-macos-clang.zip\` |"
-            echo "| Windows x64 (MSVC + MATLAB R2023b MEX) | \`iccdev-windows-msvc.zip\` |"
+            echo "| Apple mobile static cores (available SDKs) | \`iccdev-apple-mobile-core.zip\` |"
+            echo "| Windows x64 (MSVC + MATLAB R2023b MEX + IccDEVCmm) | \`iccdev-windows-msvc.zip\` |"
             echo "| WASM (Emscripten) | \`iccdev-wasm-release.zip\` |"
             echo "| Doxygen HTML Docs | \`iccdev-doxygen-html.zip\` |"
             echo "| Linux CPack Runtime | \`reficcmax-*.zip\`, \`reficcmax-*.deb\`, \`reficcmax-*.rpm\` |"
-            echo "| Python (CPython 3.9-3.13) | \`iccdev-*.whl\` for Linux, macOS, and Windows |"
+            echo "| Python (CPython 3.11-3.14) | \`iccdev-*.whl\` for Linux, macOS, and Windows |"
             echo "| MCP server (Python 3.10+) | \`iccdev_mcp-*-py3-none-any.whl\` and \`iccdev_mcp-*.tar.gz\` |"
             echo "| Checksums | \`SHA256SUMS\`, \`SHA512SUMS\` |"
             echo ""
@@ -2511,7 +3037,7 @@ jobs:
             echo ""
             echo "### Install Python without a compiler"
             echo ""
-            echo "Install \`iccdev\` from PyPI on CPython 3.9-3.13, or choose an exact-tag wheel asset matching your Python version, OS, and architecture."
+            echo "Install \`iccdev\` from PyPI on CPython 3.11-3.14, or choose an exact-tag wheel asset matching your Python version, OS, and architecture."
             echo "PyPI currently provides wheels only; install from the repository when no compatible wheel is available."
             echo "Linux wheels cover manylinux and musllinux x86_64/aarch64; macOS covers x86_64/arm64/universal2; Windows covers AMD64/ARM64."
             echo "Core profile/CMM APIs are self-contained. CLI-backed helpers need the matching native tool bundle."
@@ -2538,28 +3064,36 @@ jobs:
             --latest
 
       - name: Stage validated PyPI distributions
-        if: ${{ inputs.pypi_packages != 'none' && github.ref == 'refs/heads/master' }}
+        id: stage_pypi
+        if: >-
+          ${{ github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              steps.attest.outcome == 'success' &&
+              steps.publish.outcome == 'success' &&
+              (needs.downstream-plan.outputs.pypi_iccdev == 'true' ||
+               needs.downstream-plan.outputs.pypi_mcp == 'true') }}
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
-          PYPI_PACKAGES: ${{ inputs.pypi_packages }}
+          PYPI_ICCDEV_ALLOWED: ${{ needs.downstream-plan.outputs.pypi_iccdev }}
+          PYPI_MCP_ALLOWED: ${{ needs.downstream-plan.outputs.pypi_mcp }}
         run: |
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
           source .github/scripts/sanitize-sed.sh
 
-          if [[ "$PYPI_PACKAGES" == "iccdev" || "$PYPI_PACKAGES" == "both" ]]; then
+          if [[ "$PYPI_ICCDEV_ALLOWED" == "true" ]]; then
             python3 .github/scripts/validate-python-release-wheels.py release-assets --release
             mkdir -p pypi-iccdev
             cp release-assets/iccdev-*.whl pypi-iccdev/
             distribution_count="$(find pypi-iccdev -maxdepth 1 -type f | wc -l)"
-            if [[ "$distribution_count" -ne 45 ]]; then
-              echo "::error::Expected 45 iccdev wheels, found $(sanitize_line "$distribution_count")"
+            if [[ "$distribution_count" -ne 36 ]]; then
+              echo "::error::Expected 36 iccdev wheels, found $(sanitize_line "$distribution_count")"
               exit 1
             fi
           fi
-          if [[ "$PYPI_PACKAGES" == "iccdev-mcp" || "$PYPI_PACKAGES" == "both" ]]; then
+          if [[ "$PYPI_MCP_ALLOWED" == "true" ]]; then
             python3 .github/scripts/validate-mcp-release-package.py release-assets
             mkdir -p pypi-iccdev-mcp
             cp release-assets/iccdev_mcp-*.whl release-assets/iccdev_mcp-*.tar.gz \
@@ -2571,22 +3105,70 @@ jobs:
             fi
           fi
 
+      - name: Recheck iccdev PyPI target availability
+        id: target_pypi_iccdev
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.pypi_iccdev == 'true' &&
+              steps.stage_pypi.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          python3 .github/scripts/check-downstream-oidc-gate.py \
+            --check-target-only --repo-root . \
+            --pypi-packages iccdev --npm-packages none --npm-version "" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output target-pypi-iccdev.json
+
       - name: Publish iccdev to PyPI
         id: pypi_iccdev
         if: >-
-          ${{ github.ref == 'refs/heads/master' &&
-              (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              needs.downstream-plan.outputs.pypi_iccdev == 'true' &&
+              steps.stage_pypi.outcome == 'success' &&
+              steps.target_pypi_iccdev.outputs.target_pypi_iccdev_available == 'true' }}
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           packages-dir: pypi-iccdev/
           attestations: true
           verbose: true
 
+      - name: Recheck iccdev-mcp PyPI target availability
+        id: target_pypi_mcp
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.pypi_mcp == 'true' &&
+              steps.stage_pypi.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          python3 .github/scripts/check-downstream-oidc-gate.py \
+            --check-target-only --repo-root . \
+            --pypi-packages iccdev-mcp --npm-packages none --npm-version "" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output target-pypi-mcp.json
+
       - name: Publish iccdev-mcp to PyPI
         id: pypi_mcp
         if: >-
-          ${{ github.ref == 'refs/heads/master' &&
-              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              needs.downstream-plan.outputs.pypi_mcp == 'true' &&
+              steps.stage_pypi.outcome == 'success' &&
+              steps.target_pypi_mcp.outputs.target_pypi_mcp_available == 'true' }}
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           packages-dir: pypi-iccdev-mcp/
@@ -2594,15 +3176,28 @@ jobs:
           verbose: true
 
       - name: Set up Node.js for npm publication
-        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        id: setup_npm_node
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              steps.attest.outcome == 'success' &&
+              steps.publish.outcome == 'success' &&
+              needs.downstream-plan.outputs.npm_iccdev == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
       - name: Stage validated npm distribution
-        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        id: stage_npm
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              steps.attest.outcome == 'success' &&
+              steps.publish.outcome == 'success' &&
+              needs.downstream-plan.outputs.npm_iccdev == 'true' &&
+              steps.setup_npm_node.outcome == 'success' }}
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2635,6 +3230,34 @@ jobs:
             echo "::error::Staged npm package version does not match npm_version"
             exit 1
           fi
+          for required in LICENSE THIRD-PARTY-NOTICES.md; do
+            if [[ ! -s "$required" ]]; then
+              echo "::error::Staged npm package omits $required"
+              exit 1
+            fi
+          done
+          for dependency in zlib libpng libjpeg libtiff libxml2 nlohmann-json; do
+            notice=""
+            if [[ -d "third-party-licenses/$dependency" ]]; then
+              notice="$(find "third-party-licenses/$dependency" -maxdepth 1 -type f -size +0c -print -quit)"
+            fi
+            if [[ -z "$notice" ]]; then
+              echo "::error::Staged npm package omits $dependency license metadata"
+              exit 1
+            fi
+          done
+          nlohmann_attributions=(
+            nlohmann/detail/conversions/to_chars.hpp
+            nlohmann/detail/meta/cpp_future.hpp
+            nlohmann/detail/output/serializer.hpp
+            nlohmann/thirdparty/hedley/hedley.hpp
+          )
+          for attribution in "${nlohmann_attributions[@]}"; do
+            if [[ ! -s "third-party-licenses/nlohmann-json/runtime-attributions/$attribution" ]]; then
+              echo "::error::Staged npm package omits nlohmann-json attribution: $attribution"
+              exit 1
+            fi
+          done
           npm pack --dry-run --json >/dev/null
 
           mkdir -p "$GITHUB_WORKSPACE/npm-iccdev"
@@ -2650,12 +3273,55 @@ jobs:
             echo "::error::npm package tarball does not contain package.json"
             exit 1
           fi
+          if ! grep -Fqx "package/THIRD-PARTY-NOTICES.md" <<< "$archive_entries"; then
+            echo "::error::npm package tarball omits THIRD-PARTY-NOTICES.md"
+            exit 1
+          fi
+          if ! grep -q '^package/third-party-licenses/' <<< "$archive_entries"; then
+            echo "::error::npm package tarball omits dependency license files"
+            exit 1
+          fi
+          for attribution in "${nlohmann_attributions[@]}"; do
+            expected="package/third-party-licenses/nlohmann-json/runtime-attributions/$attribution"
+            if ! grep -Fqx "$expected" <<< "$archive_entries"; then
+              echo "::error::npm package tarball omits nlohmann-json attribution: $attribution"
+              exit 1
+            fi
+          done
+
+      - name: Recheck iccdev npm target availability
+        id: target_npm_iccdev
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.npm_iccdev == 'true' &&
+              steps.stage_npm.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+          NPM_VERSION: ${{ inputs.npm_version }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          python3 .github/scripts/check-downstream-oidc-gate.py \
+            --check-target-only --repo-root . \
+            --pypi-packages none --npm-packages iccdev \
+            --npm-version "$NPM_VERSION" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output target-npm-iccdev.json
 
       # preflight: allow-token-exposure reason=npm-oidc-trusted-publishing
       # preflight: allow-package-install reason=npm-oidc-validated-tarball-publish
       - name: Publish iccdev to npm
         id: npm_iccdev
-        if: ${{ github.ref == 'refs/heads/master' && inputs.npm_packages == 'iccdev' }}
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/master' &&
+              needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) &&
+              needs.downstream-plan.outputs.npm_iccdev == 'true' &&
+              steps.stage_npm.outcome == 'success' &&
+              steps.target_npm_iccdev.outputs.target_npm_iccdev_available == 'true' }}
         shell: bash --noprofile --norc {0}
         env:
           BASH_ENV: /dev/null
@@ -2692,7 +3358,7 @@ jobs:
           ${{ !cancelled() && github.ref == 'refs/heads/master' &&
               steps.pypi_iccdev.outcome == 'success' &&
               steps.setup_public_iccdev_python.outcome == 'success' &&
-              (inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') }}
+              needs.downstream-plan.outputs.pypi_iccdev == 'true' }}
         continue-on-error: true
         shell: bash --noprofile --norc {0}
         env:
@@ -2734,7 +3400,7 @@ jobs:
           ${{ !cancelled() && github.ref == 'refs/heads/master' &&
               steps.pypi_mcp.outcome == 'success' &&
               steps.setup_public_iccdev_python.outcome == 'success' &&
-              (inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') }}
+              needs.downstream-plan.outputs.pypi_mcp == 'true' }}
         continue-on-error: true
         shell: bash --noprofile --norc {0}
         env:
@@ -2772,7 +3438,8 @@ jobs:
         id: verify_public_iccdev_npm
         if: >-
           ${{ !cancelled() && github.ref == 'refs/heads/master' &&
-              steps.npm_iccdev.outcome == 'success' && inputs.npm_packages == 'iccdev' }}
+              steps.npm_iccdev.outcome == 'success' &&
+              needs.downstream-plan.outputs.npm_iccdev == 'true' }}
         continue-on-error: true
         shell: bash --noprofile --norc {0}
         env:
@@ -2810,6 +3477,36 @@ jobs:
           PACKAGE_VERSION="$NPM_VERSION" node -e \
             'const pkg = require(process.argv[1] + "/package.json"); if (pkg.version !== process.env.PACKAGE_VERSION) process.exit(1);' \
             "$npm_environment/package"
+          for required in LICENSE THIRD-PARTY-NOTICES.md; do
+            if [[ ! -s "$npm_environment/package/$required" ]]; then
+              echo "::error::Published npm package omits $required"
+              exit 1
+            fi
+          done
+          for dependency in zlib libpng libjpeg libtiff libxml2 nlohmann-json; do
+            notice=""
+            dependency_dir="$npm_environment/package/third-party-licenses/$dependency"
+            if [[ -d "$dependency_dir" ]]; then
+              notice="$(find "$dependency_dir" -maxdepth 1 -type f -size +0c -print -quit)"
+            fi
+            if [[ -z "$notice" ]]; then
+              echo "::error::Published npm package omits $dependency license metadata"
+              exit 1
+            fi
+          done
+          nlohmann_attributions=(
+            nlohmann/detail/conversions/to_chars.hpp
+            nlohmann/detail/meta/cpp_future.hpp
+            nlohmann/detail/output/serializer.hpp
+            nlohmann/thirdparty/hedley/hedley.hpp
+          )
+          for attribution in "${nlohmann_attributions[@]}"; do
+            attribution_path="$npm_environment/package/third-party-licenses/nlohmann-json/runtime-attributions/$attribution"
+            if [[ ! -s "$attribution_path" ]]; then
+              echo "::error::Published npm package omits nlohmann-json attribution: $attribution"
+              exit 1
+            fi
+          done
 
       - name: Summary Report
         if: always()
@@ -2818,6 +3515,24 @@ jobs:
           BASH_ENV: /dev/null
           RELEASE_OUTCOME: ${{ steps.publish.outcome }}
           ATTESTATION_OUTCOME: ${{ steps.attest.outcome }}
+          OIDC_GATE_OUTCOME: ${{ needs.downstream-plan.outputs.gate_outcome }}
+          OIDC_PLAN_BLOCKED: ${{ needs.downstream-plan.outputs.selected_but_blocked }}
+          OIDC_PLAN_ATTEMPT: ${{ needs.downstream-plan.outputs.planner_run_attempt }}
+          OIDC_PLAN_CURRENT: ${{ needs.downstream-plan.outputs.planner_run_attempt == format('{0}', github.run_attempt) }}
+          PYPI_REQUESTED: ${{ inputs.pypi_packages }}
+          NPM_REQUESTED: ${{ inputs.npm_packages }}
+          PYPI_ICCDEV_ELIGIBLE: ${{ needs.downstream-plan.outputs.pypi_iccdev }}
+          PYPI_MCP_ELIGIBLE: ${{ needs.downstream-plan.outputs.pypi_mcp }}
+          NPM_ICCDEV_ELIGIBLE: ${{ needs.downstream-plan.outputs.npm_iccdev }}
+          PYPI_ICCDEV_REASON: ${{ needs.downstream-plan.outputs.reason_pypi_iccdev }}
+          PYPI_MCP_REASON: ${{ needs.downstream-plan.outputs.reason_pypi_mcp }}
+          NPM_ICCDEV_REASON: ${{ needs.downstream-plan.outputs.reason_npm_iccdev }}
+          PYPI_ICCDEV_TARGET: ${{ steps.target_pypi_iccdev.outputs.target_pypi_iccdev_available }}
+          PYPI_MCP_TARGET: ${{ steps.target_pypi_mcp.outputs.target_pypi_mcp_available }}
+          NPM_ICCDEV_TARGET: ${{ steps.target_npm_iccdev.outputs.target_npm_iccdev_available }}
+          PYPI_ICCDEV_TARGET_REASON: ${{ steps.target_pypi_iccdev.outputs.reason_target_pypi_iccdev }}
+          PYPI_MCP_TARGET_REASON: ${{ steps.target_pypi_mcp.outputs.reason_target_pypi_mcp }}
+          NPM_ICCDEV_TARGET_REASON: ${{ steps.target_npm_iccdev.outputs.reason_target_npm_iccdev }}
           PYPI_ICCDEV_OUTCOME: ${{ steps.pypi_iccdev.outcome }}
           PYPI_MCP_OUTCOME: ${{ steps.pypi_mcp.outcome }}
           NPM_ICCDEV_OUTCOME: ${{ steps.npm_iccdev.outcome }}
@@ -2837,6 +3552,25 @@ jobs:
             sanitize_line() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._:/#=-'; }
             sanitize_filename() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9._-'; }
           fi
+          # Keep dynamic values on their assigned summary line before batching
+          # the expensive sanitizer work for Windows ARM64 Git Bash.
+          summary_fields=(
+            RELEASE_OUTCOME ATTESTATION_OUTCOME OIDC_GATE_OUTCOME OIDC_PLAN_BLOCKED
+            OIDC_PLAN_ATTEMPT OIDC_PLAN_CURRENT PYPI_REQUESTED NPM_REQUESTED
+            PYPI_ICCDEV_ELIGIBLE PYPI_MCP_ELIGIBLE NPM_ICCDEV_ELIGIBLE
+            PYPI_ICCDEV_REASON PYPI_MCP_REASON NPM_ICCDEV_REASON
+            PYPI_ICCDEV_TARGET PYPI_MCP_TARGET NPM_ICCDEV_TARGET
+            PYPI_ICCDEV_TARGET_REASON PYPI_MCP_TARGET_REASON NPM_ICCDEV_TARGET_REASON
+            PYPI_ICCDEV_OUTCOME PYPI_MCP_OUTCOME NPM_ICCDEV_OUTCOME
+            PYTHON_SETUP_OUTCOME PYPI_ICCDEV_VERIFY_OUTCOME
+            PYPI_MCP_VERIFY_OUTCOME NPM_ICCDEV_VERIFY_OUTCOME
+          )
+          for field in "${summary_fields[@]}"; do
+            value="${!field-}"
+            value="${value//$'\r'/ }"
+            value="${value//$'\n'/ }"
+            printf -v "$field" '%s' "$value"
+          done
           release_tag="ci-latest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
           asset_count=0
           for f in release-assets/*.zip release-assets/*.deb release-assets/*.rpm release-assets/*.whl release-assets/*.tar.gz; do
@@ -2850,6 +3584,17 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA:0:7}\`"
             echo "- Release publication: ${RELEASE_OUTCOME:-skipped}"
             echo "- Artifact attestation: ${ATTESTATION_OUTCOME:-skipped}"
+            echo "- Downstream OIDC eligibility check: ${OIDC_GATE_OUTCOME:-skipped}"
+            echo "- Downstream planner attempt: ${OIDC_PLAN_ATTEMPT:-none}; current attempt: ${GITHUB_RUN_ATTEMPT}; current approval: ${OIDC_PLAN_CURRENT:-false}"
+            echo "- Requested downstream selection blocked during planning: ${OIDC_PLAN_BLOCKED:-unknown}"
+            echo "- PyPI selection: ${PYPI_REQUESTED:-none}"
+            echo "- npm selection: ${NPM_REQUESTED:-none}"
+            echo "- PyPI iccdev eligibility: ${PYPI_ICCDEV_ELIGIBLE:-false} (${PYPI_ICCDEV_REASON:-not-evaluated})"
+            echo "- PyPI iccdev-mcp eligibility: ${PYPI_MCP_ELIGIBLE:-false} (${PYPI_MCP_REASON:-not-evaluated})"
+            echo "- npm iccdev eligibility: ${NPM_ICCDEV_ELIGIBLE:-false} (${NPM_ICCDEV_REASON:-not-evaluated})"
+            echo "- PyPI iccdev target available: ${PYPI_ICCDEV_TARGET:-false} (${PYPI_ICCDEV_TARGET_REASON:-not-evaluated})"
+            echo "- PyPI iccdev-mcp target available: ${PYPI_MCP_TARGET:-false} (${PYPI_MCP_TARGET_REASON:-not-evaluated})"
+            echo "- npm iccdev target available: ${NPM_ICCDEV_TARGET:-false} (${NPM_ICCDEV_TARGET_REASON:-not-evaluated})"
             echo "- PyPI iccdev publication: ${PYPI_ICCDEV_OUTCOME:-skipped}"
             echo "- PyPI iccdev-mcp publication: ${PYPI_MCP_OUTCOME:-skipped}"
             echo "- npm iccdev publication: ${NPM_ICCDEV_OUTCOME:-skipped}"
@@ -2863,7 +3608,51 @@ jobs:
               [ -f "$f" ] || continue
               printf '  - %s\n' "$(sanitize_filename "$(basename "$f")")"
             done
-          } | while IFS= read -r line; do
-            sanitize_line "$line"
-            printf '\n'
-          done >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+          } | {
+            if [[ -f .github/scripts/sanitize-sed.sh ]]; then
+              summary="$(cat)"
+              # Include the complete 36-wheel inventory and other release assets.
+              SANITIZE_PRINT_MAXLEN=65536
+              sanitize_print "$summary"
+              printf '\n'
+            else
+              while IFS= read -r line; do
+                sanitize_line "$line"
+                printf '\n'
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
+
+  downstream-selection-rejected:
+    name: Selected downstream publication incomplete
+    needs: release
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/master' &&
+          needs.release.result == 'success' &&
+          (((inputs.pypi_packages == 'iccdev' || inputs.pypi_packages == 'both') &&
+            needs.release.outputs.pypi_iccdev_publication != 'success') ||
+           ((inputs.pypi_packages == 'iccdev-mcp' || inputs.pypi_packages == 'both') &&
+            needs.release.outputs.pypi_mcp_publication != 'success') ||
+           (inputs.npm_packages == 'iccdev' &&
+            needs.release.outputs.npm_iccdev_publication != 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report rejected downstream selection
+        shell: bash --noprofile --norc {0}
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          echo "::error::A selected downstream package was not published; see the Release Summary for gate and registry diagnostics."
+          exit 1

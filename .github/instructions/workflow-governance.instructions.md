@@ -120,6 +120,24 @@ grep -q 'pattern' "$filepath"
 [[ "$value" =~ pattern ]]
 ```
 
+## Fixed-Output Batching
+
+Do not use `xargs` to invoke a report generator repeatedly when every child
+writes the same `-o` or `--output` path. GNU `xargs` may split one input stream
+into multiple commands below the operating-system argument limit, so the last
+child silently overwrites earlier output. Do not replace it with an unbounded
+shell glob, which can exceed the argument limit.
+
+For `llvm-profdata merge`, write a sorted input list and pass
+`--input-files=<path>`, or use unique staged outputs followed by one final
+merge. Apply the same reasoning to gcovr, lcov, genhtml, and other single-report
+producers. Streaming tools such as checksums remain safe when child stdout is
+collected by one outer redirection.
+
+The local preflight runs
+`.github/scripts/check-workflow-fixed-output-batching.py` across affected
+workflows.
+
 ## Output Sanitization
 
 Sanitize every write to `GITHUB_STEP_SUMMARY` or `GITHUB_OUTPUT`.
@@ -145,16 +163,33 @@ For multiline content, sanitize one line at a time.
 ## Cache, Artifact, and Publish Boundaries
 
 Treat cache, artifact, and release boundaries as security boundaries. GitHub's
-secure-use guidance favors least-privilege tokens, SHA-pinned actions, explicit
-environment protection for secrets, and manually reviewed logs for secret
-exposure. The Wiz GitHub Actions guidance highlights the same practical risks:
-credential theft, poisoned pipeline execution, artifact handling, and cache or
-tooling state crossing into release or package publishing.
+cache service treats entries as unsigned state visible to other workflow runs.
+Never cache secrets, credentials, build outputs, package trees, binaries,
+coverage, CTest state, or files derived from PR-controlled source.
 
-Do not use `actions/cache` or Docker Buildx `type=gha` cache in jobs that publish
-packages, containers, attestations, or GitHub Releases. Release and publishing
-jobs must rebuild trusted inputs from pinned refs or verified checksums instead
-of restoring mutable cache state.
+The only permitted Actions-service workflow cache is one immutable download
+archive whose exact SHA-256 appears in a literal cache key. Use SHA-pinned
+`actions/cache/restore`
+and `actions/cache/save` steps, one archive path, no restore prefixes, no
+cross-OS restore, and no implicit setup-action cache. Verify the archive's
+pinned checksum on every hit before extraction. Save only after a restore miss
+from trusted `push`, `schedule`, or `workflow_dispatch` events; pull requests
+may restore but must never save.
+
+The manual-only `ci-docker` workflow may import inline cache metadata from a
+previously validated canonical image after resolving its tag to an immutable
+manifest digest. It may export only `type=inline` metadata with the candidate
+image, and it must retain a dispatch input that disables cache use. Do not use
+Docker Buildx `type=gha`, a separate mutable cache image, or a cache written by
+pull-request or fork-controlled code. Final local container proof remains a
+no-cache build.
+
+Do not use any Actions cache or Docker Buildx `type=gha` cache in workflows with
+low-trust metadata triggers or jobs that publish packages, attestations, or
+GitHub Releases. Package and release jobs must rebuild trusted inputs from
+pinned refs or verified checksums. Keep cache use within the free storage
+allowance, prefer a small shared key over per-branch keys, and remove a pilot if
+cache upload/download churn outweighs runner-time savings.
 
 Publishing jobs must download artifacts by explicit `name:` or constrained
 `pattern:` and validate the expected artifact set before packaging, attestation,
@@ -176,7 +211,7 @@ exception must be marked directly before the step with
 exposure still appears in preflight output.
 
 Use preflight canaries for indicators of compromise and auth/accounting drift:
-cache use in publish jobs, broad artifact intake, missing release artifacts,
+cache policy violations, broad artifact intake, missing release artifacts,
 untrusted PR artifact uploads, `secrets: inherit`, token exposure in
 write-permission jobs, dangerous triggers, direct expression interpolation, and
 checkout credential persistence. Package install/build/publish commands in
@@ -184,7 +219,7 @@ workflow `run:` blocks must either use locked, checksummed inputs or be isolated
 to an unprivileged scanner/bootstrap step marked with
 `# preflight: allow-package-install reason=<short-reason>`. Treat token-exposure canaries in
 write-permission jobs as advisory until reviewed and explicitly marked;
-publishing cache, broad artifact intake, and untrusted PR artifact upload
+unsafe cache use, broad artifact intake, and untrusted PR artifact upload
 canaries are blocking.
 
 GitHub App installation tokens, including Actions `GITHUB_TOKEN`, are moving to
@@ -195,6 +230,21 @@ When maintaining GitHub Apps that create installation tokens, validate both the
 temporary `X-GitHub-Stateless-S2S-Token: enabled` and `disabled` request-header
 paths described in GitHub's changelog, then remove the override header after
 both token formats are accepted end-to-end.
+
+## Action Pin Ownership
+
+Workflow files are the sole source of truth for exact GitHub Action commit
+SHAs. Tests and scripts must assert the expected action identity, a lowercase
+40-character commit-pin shape, relevant inputs, and any required equality
+between corresponding steps. Do not copy a workflow's current action SHA into
+a test, script, document, prompt, skill, or agent file.
+
+All workflow references to the same `owner/repository` action must use one SHA
+unless a maintainer records a narrowly scoped exception. Run
+`.github/scripts/check-workflow-action-pins.py` to validate pin shape,
+repository-wide parity, Docker action digests, and the absence of mirrored
+pins. Dependabot updates workflow dependency references; do not add privileged
+write-back automation to modify assertions on Dependabot branches.
 
 ## Automated Scanner
 
@@ -212,13 +262,13 @@ trigger unless the caller gate is removed to prevent duplicate checks.
 `ci-preflight-safety.yml` runs the local pre-flight script on workflow and hook
 changes. When any workflow changes, workflow scanners run against the full
 `.github/workflows/` set so changed reusable callers cannot hide risk in
-unchanged callees. It installs and runs actionlint, yamllint, shellcheck, zizmor,
+unchanged callees. It installs and runs jactionlint, yamllint, shellcheck, zizmor,
 CodeQL Actions analysis, and CodeQL query resolution, then delegates repository-specific checks to
 `.github/scripts/preflight-safety-checks.sh`. Dockerfile changes are checked
 with hadolint and Trivy config scanning when those tools or Docker are available.
 Use that script locally before pushing maintainer-owned infrastructure changes.
 The local script intentionally runs only the deterministic subset of
-`ci-pr-risk-security-analysis.yml`: changed-workflow YAML parsing, actionlint,
+`ci-pr-risk-security-analysis.yml`: changed-workflow YAML parsing, jactionlint,
 yamllint, zizmor, SHA pin checks, dangerous-trigger checks, run-block expression
 injection checks, checkout credential checks, shellcheck for changed scripts,
 cache/artifact publish-boundary canaries, CodeQL Actions analysis for workflow
@@ -265,18 +315,24 @@ Treat these green-run signals as actionable:
 - Static vcpkg triplets linked against the wrong CRT.
 - Matrix configurations that skip smoke tests for non-Debug variants.
 
-Use YAML parsing, `actionlint`, shellcheck, `yamllint`, `zizmor`, and the
+Use YAML parsing, pinned `jactionlint` with the `correctness` profile,
+shellcheck, `yamllint`, `zizmor`, and the
 workflow permission audit for workflow files. Use `hadolint`, Trivy config, or
 equivalent Dockerfile checks when container files are in scope. Run CodeQL for
 related C/C++ or CMake changes, not as the workflow YAML checker.
+The CI commit pin is in `ci-preflight-safety.yml`; local maintainers can install
+its immutable v2.5.0 release with:
 
-The repository-level `.github/zizmor.yml` temporarily disables zizmor 1.30's
+```bash
+GOTOOLCHAIN=go1.27.3 go install github.com/jdx/jactionlint/v2/cmd/jactionlint@v2.5.0
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+The repository-level `.github/zizmor.yml` temporarily disables zizmor's
 `self-repository` audit. Keep same-repository `uses:` references in the `./`
-form until released actionlint supports GitHub's `$/` form
-([actionlint #711](https://github.com/rhysd/actionlint/issues/711)) and the
-repository no longer needs GitHub Enterprise Server compatibility.
-Remove the exception and migrate all local references together; do not suppress
-actionlint's syntax validation per workflow.
+form while GitHub Enterprise Server compatibility is required. Remove the
+exception and migrate all local references together; keep jactionlint's syntax
+validation enabled per workflow.
 
 The pre-flight gate must include Dockerfile paths when container files change.
 Dockerfile checks are blocking for changed container files: avoid advisory-only
@@ -287,7 +343,7 @@ Before merging workflow changes, run:
 
 ```bash
 python3 -c "import yaml; [yaml.safe_load(open(p)) for p in ['.github/workflows/<workflow>.yml']]; print('YAML OK')"
-actionlint -no-color .github/workflows/<workflow>.yml
+jactionlint --profile correctness --no-color .github/workflows/<workflow>.yml
 yamllint -d '{extends: default, rules: {document-start: disable, truthy: disable, line-length: {max: 120}}}' .github/workflows/<workflow>.yml
 zizmor .github/workflows/<workflow>.yml
 gh codeql resolve queries .github/codeql-queries/iccdev-security-suite.qls

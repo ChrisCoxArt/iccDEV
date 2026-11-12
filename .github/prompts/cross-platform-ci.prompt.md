@@ -18,12 +18,16 @@ gh run view <RUN_ID> --repo InternationalColorConsortium/iccDEV --log-failed
 
 | Workflow | Platform | Compiler | Key Differences |
 |----------|----------|----------|-----------------|
-| `ci-pr-action.yml` | ubuntu-24.04 | clang | Gold-standard bash governance |
-| `ci-pr-unix.yml` | ubuntu-24.04 | GCC 15, Clang 22 | Linux toolchains from the matching signed APT repositories |
-| `ci-pr-win.yml` | windows-latest | MSVC | vcpkg deps, PowerShell governance |
-| `ci-sanitizer-tests.yml` | ubuntu-24.04 | clang | ASan, UBSan, TSan, MSan matrix |
-| `ci-pr-wasm.yml` | ubuntu-24.04 | emcc | Release WASM PR parity gate |
+| `ci-pr-action.yml` | ubuntu-latest orchestrator; delegated runners | Varies by selected lane | GCC 15.2 and GCC tool gates; macOS Clang Release/LTO and Debug CTest; optional Windows validation |
+| `ci-pr-unix.yml` | ubuntu-latest, macos-latest | System GCC/Clang by default; GCC 15/Clang 22 selectable on Linux | Versioned compilers come from runner packages or signed APT repositories |
+| `ci-pr-win.yml` | windows-latest | MSVC, ClangCL, MinGW UCRT64 | vcpkg and MSYS2 deps, PowerShell governance |
+| `ci-sanitizer-tests.yml` | ubuntu-latest, windows-2025-vs2026 | N/A (shell tests) | Bash and PowerShell sanitizer-helper regressions |
+| `ci-sanitizer-regression.yml` | ubuntu-latest | GCC with ASan and UBSan | Path-scoped native regression gate using the tool workflow |
+| `ci-pr-wasm.yml` | ubuntu-latest | emcc | Release WASM PR parity gate |
 | `ci-vcpkg-ports.yml` | windows-2022 | MSVC | Required vcpkg overlay port install + verify; Linux/macOS are manual diagnostics |
+
+Native ARM64 Docker and wheel jobs retain a versioned Ubuntu ARM runner because
+GitHub does not provide an `ubuntu-latest-arm` label.
 
 ### 3. Common Failure Categories
 
@@ -40,6 +44,12 @@ target_compile_options(target PRIVATE
   $<$<CXX_COMPILER_ID:GNU>:-Wno-maybe-uninitialized>
 )
 ```
+
+On macOS, a Release/LTO-only `dynamic_cast` failure across a dylib boundary is
+an ABI signal, not a reason to weaken the test. Check that the polymorphic base
+has an exported out-of-line key function and that explicitly instantiated
+templates have matching `extern template` declarations in consumer headers.
+Compare Release/LTO with Debug and inspect RTTI ownership with `nm -m`.
 
 #### Sanitizer-Specific
 ```

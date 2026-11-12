@@ -278,7 +278,8 @@ void Usage(FILE* stream)
   fprintf(stream, "    100 + Intent - Spectral Only\n");
   fprintf(stream, "    +1000 - Use Luminance based PCS adjustment\n");
   fprintf(stream, "   +10000 - Use V5 sub-profile if present\n");
-  fprintf(stream, "  +100000 - Use HToS tag if present\n");
+  fprintf(stream, "  +100000 - Use HDR-to-SDR (H2Sx) tag if indicated (default;\n");
+  fprintf(stream, "            \"useHToS\": false in a -cfg file turns it off)\n");
   fprintf(stream, " +1000000 - NamedColor over black (icSigNmclSpectralOverBlackMbr 'spcb')\n");
   fprintf(stream, " +2000000 - NamedColor over gray  (icSigNmclSpectralOverGrayMbr 'spcg')\n");
   // The two overprint codes read as additive flags, and #2190 was filed by a
@@ -565,28 +566,28 @@ int main(int argc, const char* argv[])
     }
 
     if (!exportFile.empty()) {
+      json cfgJson;
+      json applyJson, profilesJson;
+
+      cfgApply.toJson(applyJson);
+
+      if (bExportData) {
+        json dataJson;
+        cfgData.toJson(dataJson);
+        cfgJson["colorData"] = dataJson;
+
+        applyJson["srcFile"] = nullptr;
+        applyJson["srcType"] = "colorData";
+      }
+
+      cfgJson["dataFiles"] = applyJson;
+
+      cfgProfiles.toJson(profilesJson);
+      cfgJson["profileSequence"] = profilesJson;
+
+      std::string jsonText = cfgJson.dump(1);
       FILE* f = icOpenWriteTextFile(exportFile.c_str());
       if (f) {
-        json cfgJson;
-        json applyJson, profilesJson;
-
-        cfgApply.toJson(applyJson);
-
-        if (bExportData) {
-          json dataJson;
-          cfgData.toJson(dataJson);
-          cfgJson["colorData"] = dataJson;
-
-          applyJson["srcFile"] = nullptr;
-          applyJson["srcType"] = "colorData";
-        }
-
-        cfgJson["dataFiles"] = applyJson;
-
-        cfgProfiles.toJson(profilesJson);
-        cfgJson["profileSequence"] = profilesJson;
-
-        std::string jsonText = cfgJson.dump(1);
         size_t n = fwrite(jsonText.c_str(), 1, jsonText.size(), f);
         if (n != jsonText.size()) {
           printf("Error writing json config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());

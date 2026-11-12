@@ -6,10 +6,11 @@
 #
 # Reusable workflow: Build + Test iccDEV on Linux/macOS
 #
-# Caller passes os, python-version, and run-full-tests flag.
+# Caller passes os, python-version, and test-selection flags.
 # Full tests (Linux): profile generation (all scripts), RunTests,
 #   CalcTest, tool parity (dump/toxml/fromxml/roundtrip/tojson/fromjson).
-# Light tests (macOS): CreateAllProfiles only, Python wheel, MCP.
+# CTest can run independently on Linux or macOS without enabling the full
+# parity sweep.
 #
 ###############################################################
 
@@ -33,16 +34,24 @@ on:
         description: "Run comprehensive tool parity tests"
         type: boolean
         default: false
+      run-ctest:
+        description: "Run the routine Unix CTest gate"
+        type: boolean
+        default: false
       run-wheel-smoke:
         description: "Run legacy native wheel smoke when no shared wheel matrix is used"
         type: boolean
         default: true
+      timeout-minutes:
+        description: "Maximum execution time after a runner is assigned"
+        type: number
+        default: 45
 
 jobs:
   build-test:
     name: "Build + Test (${{ inputs.os }}, Python ${{ inputs.python-version }})"
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.timeout-minutes }}
 
     defaults:
       run:
@@ -251,10 +260,7 @@ jobs:
           echo ""
           echo "=== hybrid/BuildAndTest.sh ==="
           cd "${WORKSPACE_DIR}/Testing/hybrid"
-          sh BuildAndTest.sh 2>&1 | tee "$LOGDIR/hybrid-BuildAndTest.log" || {
-            rc=$?
-            echo "WARN: hybrid/BuildAndTest.sh exited $rc"
-          }
+          sh BuildAndTest.sh 2>&1 | tee "$LOGDIR/hybrid-BuildAndTest.log"
           HYBRID_COUNT=$(find . -name '*.icc' | wc -l)
           echo "Generated $HYBRID_COUNT hybrid profiles"
 
@@ -280,8 +286,8 @@ jobs:
           TOTAL_COUNT=$(find "${WORKSPACE_DIR}/Testing" -name '*.icc' | wc -l)
           echo "Total: $TOTAL_COUNT ICC profiles in Testing/"
 
-      - name: Run Linux CTest gate
-        if: ${{ inputs.run-full-tests }}
+      - name: Run Unix CTest gate
+        if: ${{ inputs.run-full-tests || inputs.run-ctest }}
         env:
           BASH_ENV: /dev/null
           WORKSPACE_DIR: ${{ github.workspace }}
@@ -301,17 +307,20 @@ jobs:
             --parallel "$NPROC" 2>&1 | tee "$LOGDIR/build-test-binaries.log"
 
           echo "=== CTest discovery ==="
-          ctest --test-dir "${WORKSPACE_DIR}/Build" -N --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list.txt"
-
-          echo "=== Routine CTest discovery (excluding slow) ==="
           ctest --test-dir "${WORKSPACE_DIR}/Build" -N \
-            --label-exclude slow \
+            --label-exclude clusterfuzzlite \
+            --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list.txt"
+
+          echo "=== Routine CTest discovery (excluding slow and ClusterFuzzLite) ==="
+          ctest --test-dir "${WORKSPACE_DIR}/Build" -N \
+            --label-exclude 'slow|clusterfuzzlite' \
             --no-tests=error 2>&1 | tee "$LOGDIR/ctest-list-routine.txt"
+          grep -Eq 'Total Tests: [1-9][0-9]*' "$LOGDIR/ctest-list-routine.txt"
 
           echo "=== CTest execution ==="
           ctest --test-dir "${WORKSPACE_DIR}/Build" \
             --parallel "$NPROC" \
-            --label-exclude slow \
+            --label-exclude 'slow|clusterfuzzlite' \
             --output-on-failure \
             --no-tests=error \
             --output-junit "$LOGDIR/ctest-results.xml" 2>&1 | tee "$LOGDIR/ctest-run.log"
@@ -746,8 +755,7 @@ jobs:
             "build>=1.2,<1.4" \
             "cython>=3.0,<3.2" \
             "numpy>=1.23,<3" \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "setuptools>=77,<85" \
             "twine>=5.0,<7" \
             "wheel>=0.46.2,<0.47" \
@@ -788,8 +796,7 @@ jobs:
           python -m pip install \
             "build>=1.2,<1.4" \
             "cython>=3.0,<3.2" \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "setuptools>=77,<85" \
             "twine>=5.0,<7" \
             "wheel>=0.46.2,<0.47" \
@@ -836,8 +843,7 @@ jobs:
           )
           /tmp/iccdev-sdist-venv/bin/python -m pip show -f iccdev
           /tmp/iccdev-sdist-venv/bin/python -m pip install \
-            "pytest>=7.0,<9; python_version < '3.10'" \
-            "pytest>=9.0.3,<10; python_version >= '3.10'" \
+            "pytest>=9.0.3,<10" \
             "numpy>=1.23,<3" \
             --quiet
           (
@@ -864,11 +870,11 @@ jobs:
           source .github/scripts/sanitize-sed.sh
 
           cd "${WORKSPACE_DIR}/python"
-          if [[ ! "$PYTHON_VERSION" =~ ^3\.(9|12|13)$ ]]; then
+          if [[ ! "$PYTHON_VERSION" =~ ^3\.(11|12|13|14)$ ]]; then
             echo "Unsupported Python version for cibuildwheel smoke: $PYTHON_VERSION" >&2
             exit 1
           fi
-          python -m pip install "cibuildwheel>=2.23,<3" "twine>=5.0,<7" --quiet
+          python -m pip install "cibuildwheel==3.4.0" "twine>=5.0,<7" --quiet
 
           echo "=== cibuildwheel configured identifiers ==="
           python -m cibuildwheel --print-build-identifiers --platform windows
@@ -899,11 +905,6 @@ jobs:
           set -euo pipefail
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-
-          if [[ "$PYTHON_VERSION" == "3.9" ]]; then
-            echo "[SKIP] iccdev-mcp requires Python >=3.10; skipping MCP verification on Python $PYTHON_VERSION"
-            exit 0
-          fi
 
           cd "${WORKSPACE_DIR}"
           pip install "./iccdev-mcp/" 2>&1 | tail -10
@@ -950,7 +951,7 @@ jobs:
           ls -lhR artifact-tools/
 
       - name: Collect test logs
-        if: always() && inputs.run-full-tests
+        if: always() && (inputs.run-full-tests || inputs.run-ctest)
         env:
           BASH_ENV: /dev/null
         run: |
@@ -1024,7 +1025,7 @@ jobs:
 
       # preflight: allow-untrusted-artifact reason=sanitized-developer-report
       - name: Upload test logs
-        if: always() && inputs.run-full-tests && github.event_name != 'pull_request'
+        if: always() && (inputs.run-full-tests || inputs.run-ctest) && github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: "iccdev-test-logs-${{ inputs.os }}-py${{ inputs.python-version }}-attempt${{ github.run_attempt }}"

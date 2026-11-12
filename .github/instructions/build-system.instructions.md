@@ -8,7 +8,7 @@ applyTo: "Build/**"
 
 Primary build file: `Build/Cmake/CMakeLists.txt`
 
-- Project: RefIccMAX v2.3.2.4
+- Project: RefIccMAX v2.4.2.6
 - Direct configuration minimum CMake: 3.18
 - Preset minimum CMake: 3.23
 - C++ standard: C++17
@@ -129,6 +129,11 @@ cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake
 cd Build && rm -rf CMakeCache.txt CMakeFiles && CC=clang CXX=clang++ cmake Cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TOOLS=ON -DENABLE_PROFILING=ON
 ```
 
+Use `docs/code-coverage.md` for pooled profraw naming, deterministic
+module-matched merging, and local build-configuration timing. Never pass an
+unbounded profile glob or an `xargs` batch to one fixed `llvm-profdata -o`
+output.
+
 Build after configure with:
 
 ```bash
@@ -218,6 +223,14 @@ writes do not update MSan shadow state. Use `iccdev-build-msan-libcxx.sh` and
 `CMAKE_INTERPROCEDURAL_OPTIMIZATION` is ON for Release builds when sanitizers and
 coverage are both OFF. Consumers using non-LTO-aware linkers should pass
 `-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF` or use `RelWithDebInfo`.
+
+Public polymorphic base classes used across shared-library boundaries must have
+an exported out-of-line key function so RTTI and vtables have one library-owned
+definition. Public template specializations instantiated by IccProfLib must
+pair their explicit definitions with consumer-visible `extern template`
+declarations. Keep the macOS Release/LTO CTest lane green when changing either
+contract; do not replace a failed cross-dylib `dynamic_cast` with an unchecked
+cast or a type-signature-only workaround.
 
 ## Adding a New Tool
 

@@ -1112,7 +1112,9 @@ bool CIccTagJsonNamedColor2::ParseJson(const IccJson &j, std::string &parseStr)
         parseStr += "namedColor2 deviceCoords must be an array\n";
         return false;
       }
-      const icUInt32Number nJsonCoords = bHasCoords ? (icUInt32Number)c["deviceCoords"].size() : 0;
+      // Compare the full size_t.  Cast to 32 bits, an array 2^32 entries
+      // longer than countOfDeviceCoords would have matched.
+      const size_t nJsonCoords = bHasCoords ? c["deviceCoords"].size() : 0;
       if ((nDevCoords || bHasCoords) && nJsonCoords != nDevCoords) {
         parseStr += "namedColor2 deviceCoords count differs from countOfDeviceCoords\n";
         return false;
@@ -2054,6 +2056,13 @@ bool CIccTagJsonResponseCurveSet16::ParseJson(const IccJson &j, std::string &par
 
   if (!jsonExistsField(j, "ResponseCurves") || !j["ResponseCurves"].is_array())
     return true;
+
+  // ICC.1 Table 73 stores this count in uInt16. Check it before constructing
+  // the list so Write() cannot narrow 65536 entries to zero.
+  if (j["ResponseCurves"].size() > 0xffff) {
+    parseStr += "Too many ResponseCurves in ResponseCurveSet16\n";
+    return false;
+  }
 
   for (const IccJson &jCurve : j["ResponseCurves"]) {
     std::string measUnit;

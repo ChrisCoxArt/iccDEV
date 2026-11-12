@@ -29,7 +29,8 @@ input artifact.
 - `jsonparse`: parses a JSON buffer and drives
   `CIccProfileJson::ParseJson()` and validation
 - `connectconfig`: drives the public IccConnect `fromJson()`/`toJson()`
-  round-trip paths for top-level and nested configuration objects without
+  round-trip paths for top-level and nested configuration objects in reset and
+  non-reset modes, including a bounded set of later array elements, without
   launching a tool or opening a configured path
 - `pawgreport`: calls the purpose-built `AssessPawgFromMemory()` and
   `PawgCompressionVerdict()` assessment seams
@@ -64,11 +65,20 @@ select `run_mode=full` for the complete matrix. Scheduled runs always use the
 full `address`, `undefined`, and `memory` matrix; libFuzzer is the engine for
 every matrix entry, not a fourth sanitizer. The nine full-mode group/sanitizer
 combinations run at most three at a time to stay within hosted-runner and
-artifact API limits. ICC, XML, and JSON
+artifact API limits. Before those jobs start, a bounded refresh step uses the
+GitHub artifact API's exact-name filter to republish the newest valid corpus for
+each selected target with one-day retention. This keeps the pinned
+ClusterFuzzLite runner from paginating the repository-wide artifact history,
+while preserving accumulated corpus inputs. A target with no valid prior
+artifact receives an empty TAR so its checked-in seed corpus can establish the
+first persistent artifact. ICC, XML, and JSON
 targets receive only the matching
 tracked seed family from `.github/ci/test-data/`, plus a format-specific
 dictionary and options file. `connectconfig` has a schema-shaped seed and a
 dedicated configuration dictionary rather than relying on profile-JSON tokens.
+Focused seeds preserve current image options and later nested array entries,
+and the runner's `max_len` remains the single input-length policy for the
+harness.
 The address-sanitizer prune job uses `!cancelled()` after configuration so one
 real finding does not indefinitely starve corpus maintenance while cancellation
 still stops cleanup. An optional manual input builds all targets with the coverage
@@ -78,10 +88,12 @@ sanitizer. After pruning, only a separate cleanup job receives `actions: write`;
 it preserves the newest same-run corpus for each of the eight exact target
 names and deletes only the superseded duplicates from that run.
 
-Local validation uses an OSS-Fuzz checkout:
+Local validation uses an OSS-Fuzz checkout. Give the external source directory
+a lowercase basename because the helper derives its Docker repository name
+from that basename, and Docker rejects uppercase repository names:
 
 ```bash
-iccdev_source=/path/to/iccDEV
+iccdev_source=/path/to/iccdev-clean-source
 source_sha="$(git -C "$iccdev_source" rev-parse HEAD)"
 source_digest="$("$iccdev_source/.github/scripts/iccdev-cfl-source-digest.sh" "$iccdev_source")"
 python3 infra/helper.py build_image --external --pull "$iccdev_source"

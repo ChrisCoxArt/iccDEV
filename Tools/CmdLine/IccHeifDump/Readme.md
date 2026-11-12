@@ -9,15 +9,15 @@ property parser buffers the carrier. The parser also limits property
 associations to 4096 and cumulative extracted ICC bytes to 256 MiB; profile
 views share the carrier buffer rather than copying each association's payload.
 
-The Nokia reader A/B research tool remains under `.github/ci/tooling/heif/`.
-Its pinned reader is isolated in the standalone CTest wrapper and manually
-dispatched workflow, where it is compared with this release implementation.
-
 ## Usage
 
 ```sh
 iccHeifDump input.heic [existing-output-directory]
 ```
+
+`--version` reports the IccProfLib and libheif build versions plus the linked
+libheif runtime version. `--help` prints that banner before the usage text.
+Paths and libheif diagnostics echoed to the console escape control characters.
 
 An input path that cannot be opened is reported separately from a malformed
 HEIF colour-property structure, and both conditions return exit status 2.
@@ -39,8 +39,8 @@ a fresh directory when retrying.
 
 The focused `iccdev.heif-output-safety` CTest checks this contract on Windows
 and Unix using the tracked carrier and its pinned ICC digest. It needs Python 3
-and the native tool, but does not need the Nokia reader. Windows symlink cases
-report a skip if the account lacks symlink creation privileges.
+and the native tool. Windows symlink cases report a skip if the account lacks
+symlink creation privileges.
 
 Each embedded ICC property reports its carrier metadata, byte count, output
 path, and `proflib_parse` status:
@@ -48,8 +48,9 @@ path, and `proflib_parse` status:
 - `ok`: IccProfLib parsed the blob.
 - `failed`: the raw blob was preserved but IccProfLib rejected it.
 - `empty`: the carrier has a zero-byte ICC payload.
-- `too-large`: the carrier blob exceeds IccProfLib's `icUInt32Number` input
-  limit.
+- `too-large`: defensive status if a carrier blob exceeds IccProfLib's
+  `icUInt32Number` input limit; the current 256 MiB carrier cap prevents it
+  during normal parsing.
 
 ## Local build and test
 
@@ -61,5 +62,17 @@ cmake --build build --target iccHeifDump --parallel
 build/Tools/IccHeifDump/iccHeifDump input.heic [existing-output-directory]
 ```
 
-For the separate Nokia reader carrier A/B research workflow, see
-<a href="../../../.github/ci/tooling/heif/Readme.md">HEIF ICC Carrier QA</a>.
+Run the extraction safety regression directly against the built tool:
+
+```sh
+python3 .github/scripts/test_heif_output_safety.py \
+  --tool build/Tools/IccHeifDump/iccHeifDump \
+  --corpus .github/ci/test-data/heif
+```
+
+The <a href="https://github.com/InternationalColorConsortium/iccDEV/blob/master/.github/ci/test-data/heif/Readme.md">native HEIF fixtures</a>
+also cover no-ICC and malformed-input behavior in the Python and MATLAB CLI
+tests and staged release bundles.
+
+See the [image-tool QA review](../../../docs/analysis/image-tool-tiff-qa-2026-11-01.md)
+for remaining cross-tool work.

@@ -14,21 +14,26 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches:
-      - master
-    types:
-      - opened
-      - reopened
-      - ready_for_review
-    paths:
-      - "Dockerfile"
-      - "iccdev-mcp/**"
-      - ".github/workflows/ci-mcp-server.yml"
+  workflow_call:
+    inputs:
+      target_sha:
+        description: Exact commit selected by the calling PR workflow
+        required: false
+        type: string
+        default: ''
+      pr_number:
+        description: Resolved PR number for isolated concurrency
+        required: false
+        type: string
+        default: ''
+  # ci-pr-action owns PR routing; keep this workflow callable and rerunnable.
   workflow_dispatch:
 
 concurrency:
-  group: "mcp-server-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}"
+  group: >-
+    mcp-server-${{ github.workflow }}-${{ github.event_name }}-${{
+    inputs.pr_number || github.event.pull_request.number || github.ref }}-${{
+    inputs.target_sha || github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -50,6 +55,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: ${{ inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Python
@@ -148,6 +154,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: ${{ inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Docker Buildx

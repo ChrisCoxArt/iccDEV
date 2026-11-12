@@ -38,28 +38,48 @@ maintainers unless an iccDEV maintainer explicitly approves the change.
 
 Choose the smallest gate that proves the behavior:
 
-- `ci-pr-action` full: deterministic Unix GCC/Clang Release and Debug, exact
+- Pre-PR screening: complete applicable local pre-commit and preflight checks,
+  using the maintainer image for zizmor, Trivy, CodeQL, fuzzers, Valgrind, and
+  other focused tools. Run `ci-qa-pr` with full CTest and no recent limit, plus
+  `ci-codeql-security`, on the same pre-PR branch head. Open a PR only after
+  those checks pass and PR creation is authorized.
+- `ci-pr-action` full: final PR-head sounding board for merge readiness. It
+  builds profiles and a representative CTest corpus across deterministic Unix
+  GCC/Clang Release and Debug, including macOS Clang Release/LTO and Debug, exact
   GCC 15.2 strict Release LTO, non-sanitized GCC core tool tests, and Windows
-  validation. Its tool-test caller excludes `pr-extended` and
-  `ci-infrastructure` CTests.
+  validation. Its tool-test caller excludes `pr-extended` CTests; the reusable
+  tool workflow always excludes `ci-infrastructure` and `clusterfuzzlite`
+  CTests. It does not substitute for the exhaustive pre-PR matrix or local
+  preflight.
 - `ci-pr-action` fast lane: exact GCC 15.2 strict Release LTO plus
-  non-sanitized GCC core tool validation and the latest CTest by default, with
-  Windows opt-in. It does not run Docker verification for a container-surface
-  change.
+  GCC ASAN+UBSAN Release tool validation and the latest CTest by default, with
+  Windows opt-in. Container-surface changes require separate local image
+  validation.
 - `ci-pr-action` auto: default path-scoped selection. Source, build, and test
   changes select the full matrix; documentation-only changes use the constrained
   fast-lane settings. Workflow-only changes keep the core orchestrator at setup
   and finalization while the standalone preflight check remains path-scoped.
   Container-only changes use that security check and local container validation.
-- Rebase safety: `synchronize` runs only `ci-rebase-safety`, which verifies the
-  PR head contains its event base. Dispatch each applicable final lane manually
-  against the rebased PR head; do not restore automatic full-matrix triggers.
-  Keep `Rebase Safety` separate from `PR Summary` so ancestry cannot approve
+- An open same-repository `master`-target PR push or rebase runs
+  `ci-pr-action` fast lane and `ci-rebase-safety`. A trusted completion
+  event refreshes status labels. Verify the current head, `PR Summary`,
+  labels, and merge state before reporting `Merge Ready`. If an automatic
+  run is absent, dispatch the trusted `master` workflow with PR number and
+  exact head SHA, then refresh labels manually. An upper stacked PR with a
+  non-`master` base cannot use PR-number dispatch.
+- Rebase safety verifies that the PR head contains its event base; it does
+  not replace the fast lane or the final full matrix. Dispatch each
+  applicable final lane explicitly against the rebased PR head. Keep
+  `Rebase Safety` separate from `PR Summary` so ancestry cannot approve
   unvalidated source pushes. Manual security audits check all Bash prologues.
 - MATLAB compatibility: `ci-matlab` is manual-dispatch only because its
   multi-platform MEX and container lanes consume scarce runner capacity.
 - Risk analysis: `ci-risk-analysis-gate` is manual-dispatch only; use it for
   the explicit final Linux and Windows workflow-security audit.
+- Cache policy: use only exact-key, checksum-addressed immutable download
+  archives. PR jobs restore only; trusted events may save after verification.
+  Keep compiler output, CTest state, artifacts, releases, and publish jobs
+  uncached, and retain a pilot only after a cold/warm timing comparison.
 - CTest suite: cross-platform tool/profile behavior that belongs in the normal
   local and CI test surface.
 - Focused `.github/scripts/*.sh` regression: reusable Linux regression logic or
@@ -92,6 +112,10 @@ Choose the smallest gate that proves the behavior:
   pinned unified image digests.
 - Update `.github/skills/README.md` or a skill when the process becomes a
   repeatable maintainer workflow.
+- Route LLVM source-coverage and timing changes through
+  `docs/code-coverage.md` and
+  `.github/skills/code-coverage-analysis/SKILL.md`. Reject unbounded globs or
+  `xargs` batches that repeatedly write one fixed report output.
 - For registry QA workflow runs, preserve `summary.md`, `results.tsv`, and
   `findings.txt` as the review source of truth. The workflow may retain bounded
   log excerpts by default; rerun with `registry_qa_log_tail_lines=0` only when
@@ -100,7 +124,7 @@ Choose the smallest gate that proves the behavior:
   Package and upload the developer report with `always()` so a failed registry
   scan retains its classifier counters and raw evidence.
 - Container changes require the local canonical-image build and smoke in
-  `docs/regression-container.md`. The Docker PR verification job is disabled.
+  `docs/regression-container.md`.
 - When adding cases inside an existing script-backed suite, document that the
   CTest suite count is unchanged and validate both direct script execution and
   the CTest wrapper.
@@ -175,7 +199,7 @@ Workflow YAML:
 
 ```bash
 python3 -c "import yaml; [yaml.safe_load(open(p)) for p in ['.github/workflows/<workflow>.yml']]; print('YAML parse OK')"
-actionlint -no-color .github/workflows/<workflow>.yml
+jactionlint --profile correctness --no-color .github/workflows/<workflow>.yml
 ```
 
 Apple mobile core and simulator smoke on macOS:
@@ -199,8 +223,9 @@ gh workflow run "<workflow>" --repo InternationalColorConsortium/iccDEV --ref <b
 gh run watch <run-id> --repo InternationalColorConsortium/iccDEV --exit-status
 ```
 
-Trigger workflows with shared concurrency sequentially. Use `ci-pr-action` for
-normal maintainer validation; it defaults to `ci_scope=auto`. Use
+Trigger workflows with shared concurrency sequentially. Use `ci-qa-pr` and
+`ci-codeql-security` to screen the pre-PR head, then `ci-pr-action` as final
+validation on the PR head; it defaults to `ci_scope=auto`. Use
 `ci_scope=fast-lane` with an open same-repository PR number for the shortest
 exact GCC 15.2 core lane. Use the standalone `ci-regression-checks` workflow
 for ASAN/UBSAN CTest coverage.

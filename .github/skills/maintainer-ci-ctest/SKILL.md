@@ -46,6 +46,10 @@ when practical.
 
 - `check` must exist on every platform.
 - `check` and workflow CTest execution must use `--no-tests=error`.
+- Unix CTest shell harnesses must run under the Bash 3.2 shipped by macOS as
+  well as current Linux Bash. Avoid `mapfile`, GNU-only utility flags, and bare
+  empty-array expansion under `set -u`; keep the generated `timeout` fallback
+  free of orphaned sleepers and captured termination diagnostics.
 - Do not add hard-coded CTest suite totals to workflows, docs, or maintainer
   instructions; keep suite lists descriptive and let CTest discovery report the
   current total.
@@ -79,32 +83,43 @@ when practical.
 ## Workflow Rules
 
 - Follow `.github/instructions/workflow-governance.instructions.md`.
-- Treat `ci-pr-action` `full` as the deterministic core maintainer gate. It runs
+- Use `ci-qa-pr` with `ctest-mode=full` and `ctest-recent-limit=0` on the
+  pre-PR branch for the comprehensive build and CTest screening matrix. Pair
+  it with `ci-codeql-security` on the same head. Complete the applicable local
+  pre-commit and preflight checks first; the maintainer image supplies zizmor,
+  Trivy, CodeQL, fuzzers, Valgrind, and other focused tools. Open a PR only
+  after the pre-PR evidence passes and PR creation is authorized.
+- Treat `ci-pr-action` as the final PR-head sounding board for merge readiness.
+  Its full scope runs
   Unix GCC/Clang Release and Debug builds, exact GCC 15.2 strict Release LTO in
-  the regression container, non-sanitized GCC core tool tests, and Windows.
-  Its tool-test caller excludes `pr-extended` and `ci-infrastructure` CTests.
+  the regression container, non-sanitized GCC core tool tests, profile builds,
+  representative CTest coverage in both macOS Release/LTO and Debug, and
+  Windows.
+  Its tool-test caller excludes `pr-extended` CTests; the reusable tool
+  workflow always excludes `ci-infrastructure` and `clusterfuzzlite` CTests.
+  It does not replace exhaustive pre-PR screening or local preflight.
 - `ci_scope=auto` is the default. It selects the full matrix for source, build,
   and test changes; documentation-only changes use the constrained fast-lane
   settings. Workflow-only changes keep the core orchestrator limited to setup
   and finalization while the standalone preflight and risk-analysis workflows
   provide their required contexts. Container-only changes use those standalone
   security gates and local container validation.
-- On `synchronize`, `ci-rebase-safety` is the only validation lane: it proves
-  that the PR head contains the event base without fanning out core, sanitizer,
-  JSON, MCP, MATLAB, preflight, or risk-analysis gates. Dispatch the final
-  applicable lanes explicitly against the rebased PR head. Ancestry publishes
-  only `Rebase Safety`; only completed validation may supply `PR Summary`.
+- On `synchronize`, `ci-rebase-safety` proves ancestry and `ci-pr-action`
+  starts its bounded fast lane on the same-repository PR head. This does not
+  fan out the full, sanitizer, JSON, MCP, MATLAB, preflight, or risk-analysis
+  gates. Dispatch final applicable lanes explicitly. Ancestry alone cannot
+  supply `PR Summary`; completed validation must publish it for the head.
 - `ci-risk-analysis-gate` is manual-dispatch only. It runs the Linux and
   Windows workflow-security audits for an explicit final security review.
   Manual audits validate all workflow Bash prologues, not an empty self-diff.
 - `ci-matlab` is manual-dispatch only. Do not restore its pull-request trigger:
   its Windows, Linux, macOS, and container lanes are reserved for explicit
   compatibility validation.
-- Use `ci_scope=fast-lane` for the exact GCC 15.2 Release LTO and non-sanitized
-  core tool lanes. Fast lane defaults to the latest CTest with Windows
-  disabled; it does not run a Docker verification job.
+- Use `ci_scope=fast-lane` for the exact GCC 15.2 Release LTO and ASAN+UBSAN
+  Release tool lane. Fast lane defaults to the latest CTest with Windows
+  disabled.
 - Container changes require the local canonical-image build and smoke in
-  `docs/regression-container.md`; the Docker PR verification job is disabled.
+  `docs/regression-container.md`.
 - Apple mobile core changes must keep the dependency-free `apple-*-core`
   presets available, align matching `apple-*-extended-core` presets with SDK
   and dependency discovery, and keep simulator app capability/gap reporting in
@@ -112,6 +127,12 @@ when practical.
 - Do not use `|| true` around profile generation, CTest discovery, regression
   execution, sanitizer checks, or packaging verification.
 - Use least-privilege permissions and credential cleanup.
+- Cache only one immutable download archive per entry, with its SHA-256 in the
+  exact key and verification before extraction. Use explicit restore/save
+  actions; PRs restore only and trusted events save only after a restore miss.
+  Never cache CTest, artifact, or release state. The manual Docker workflow may reuse only inline
+  metadata from a previously validated canonical image resolved to an immutable
+  digest; keep `type=gha` disabled and retain a no-cache dispatch option.
 - Sanitize all `GITHUB_STEP_SUMMARY` and `GITHUB_OUTPUT` writes.
 - Check out the base ref's `.github/scripts` sparsely and source its sanitizer
   helpers for every workflow that executes PR-controlled source.
@@ -119,8 +140,13 @@ when practical.
   both PR and manual-dispatch events, so a manual lane cannot cancel its PR
   counterpart.
 - Trigger shared-concurrency workflows sequentially to avoid canceling your own
-  run. Use `ci-pr-action` for normal core validation and the standalone
+  run. Use `ci-qa-pr` for comprehensive pre-PR validation, `ci-pr-action` for
+  final PR-head validation, and the standalone
   path-scoped/manual `ci-regression-checks` workflow for ASAN/UBSAN coverage.
+- For source-coverage workflows, follow
+  `.github/skills/code-coverage-analysis/SKILL.md`. Use pooled signature-bearing
+  profraw names and `llvm-profdata --input-files`; never let `xargs` split one
+  logical report across repeated writes to the same output.
 
 ## Local Validation
 
@@ -128,6 +154,7 @@ For focused workflow iteration, start with:
 
 ```bash
 .github/scripts/preflight-safety-checks.sh --fast-lane
+.github/scripts/check-workflow-cache-policy.sh .github/workflows
 ```
 
 This scans changed workflow/script surfaces without running CTest or local
@@ -164,7 +191,9 @@ For workflow YAML:
 
 ```bash
 python3 -c "import yaml; [yaml.safe_load(open(p)) for p in ['.github/workflows/<workflow>.yml']]; print('YAML parse OK')"
-actionlint -no-color .github/workflows/<workflow>.yml
+jactionlint --profile correctness --no-color .github/workflows/<workflow>.yml
+python3 .github/scripts/check-workflow-fixed-output-batching.py \
+  .github/workflows/<workflow>.yml
 ```
 
 For Apple mobile core and simulator workflow changes on macOS:
@@ -202,17 +231,37 @@ branch or SHA tag to `ci-iccdev-tool-tests.yml`.
 
 ## GitHub Validation
 
-After pushing, trigger only the workflows affected by the change:
+After pushing a pre-PR branch, run the comprehensive screening and CodeQL on
+that exact head. After an authorized PR is opened, run the final PR-head gate
+and any additional workflow whose contract applies:
 
 ```bash
-gh workflow run "ci-pr-action" --repo InternationalColorConsortium/iccDEV --ref <branch> -f ci_scope=full
-gh workflow run "ci-pr-action" --repo InternationalColorConsortium/iccDEV --ref <branch> \
-  -f ci_scope=fast-lane -f pr_number=<open-pr-number>
+gh workflow run "ci-qa-pr" --repo InternationalColorConsortium/iccDEV --ref <pre-pr-branch> \
+  -f ctest-mode=full -f ctest-recent-limit=0
+gh workflow run "ci-codeql-security" --repo InternationalColorConsortium/iccDEV --ref <pre-pr-branch>
+gh workflow run "ci-pr-action" --repo InternationalColorConsortium/iccDEV --ref master \
+  -f ci_scope=auto -f pr_number=<open-master-target-pr-number> \
+  -f expected_head_sha=<40-character-head-sha>
+gh workflow run "ci-pr-action" --repo InternationalColorConsortium/iccDEV --ref master \
+  -f ci_scope=full -f pr_number=<open-master-target-pr-number> \
+  -f expected_head_sha=<40-character-head-sha>
+gh workflow run "ci-pr-action" --repo InternationalColorConsortium/iccDEV --ref master \
+  -f ci_scope=fast-lane -f pr_number=<open-master-target-pr-number> \
+  -f expected_head_sha=<40-character-head-sha>
 gh workflow run "ci-matlab" --repo InternationalColorConsortium/iccDEV --ref <branch>
 gh workflow run "ci-risk-analysis-gate" --repo InternationalColorConsortium/iccDEV --ref <branch>
 gh workflow run "ci-risk-analysis" --repo InternationalColorConsortium/iccDEV --ref <branch> \
   -f analysis_target="Specific git ref" -f git_ref=<full-sha> -f severity_threshold=HIGH -f fail_on_findings=true
 ```
+
+On each push or rebase, the automatic fast lane validates an open
+same-repository `master`-target PR head. Its completion triggers the trusted
+status labeler. If either automatic run is absent, use the exact-head
+trusted-`master` commands above and manually dispatch `update-labels.yml`
+after validation. Verify the PR's current head, `PR Summary` status, labels,
+and merge state before reporting `Merge Ready`, as described in
+`../../../docs/label-system.md`. A non-`master`-base upper stack PR cannot
+use PR-number dispatch. Retain the full final PR-head gate in the pre-PR policy.
 
 Wait for shared-concurrency workflows one at a time. Capture run IDs, head SHA,
 job conclusions, artifact names, and key sentinel lines such as `Total Tests`,

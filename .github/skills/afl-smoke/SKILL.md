@@ -20,7 +20,7 @@ Use this skill when changing `.github/workflows/ci-afl-smoke.yml`,
 2. Validate workflow syntax and governance:
 
    ```bash
-   actionlint .github/workflows/ci-afl-smoke.yml
+   jactionlint --profile correctness --no-color .github/workflows/ci-afl-smoke.yml
    yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' .github/workflows/ci-afl-smoke.yml
    .github/scripts/preflight-safety-checks.sh --require-tools
    ```
@@ -77,6 +77,10 @@ Use this skill when changing `.github/workflows/ci-afl-smoke.yml`,
 - Require a matching Clang 21 or Clang 22 C/C++ pair. The packaged wrapper uses
   21 and the rebuilt workflow wrapper uses 22; reject older or mismatched
   `AFL_CC` and `AFL_CXX` values before configuring iccDEV.
+- Preserve valid caller `AFL_TESTCACHE_SIZE` settings. Reject non-numeric
+  values and normalize positive values below the AFL++ 5.04a minimum of 128
+  MiB to `0`, with a warning, rather than letting AFL++ abort before starting
+  the forkserver or allocating more memory implicitly for every target.
 - Keep the workflow bootstrap narrow: build `afl-fuzz`, `afl-showmap`,
   `afl-cc`, `afl-compiler-rt.o`, `SanitizerCoveragePCGUARD.so`, and
   `cmplog-routines-pass.so`. Avoid broad AFL++ targets that enter optional GCC

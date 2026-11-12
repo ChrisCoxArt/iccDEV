@@ -45,10 +45,40 @@
  //////////////////////////////////////////////////////////////////////
 
 #include "IccCmmSearch.h"
+#include "IccApplyBPC.h"
 
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <utility>
+
+namespace {
+
+icStatusCMM AddSearchStageXform(CIccCmm* pCmm,
+                                CIccProfile& profile,
+                                icRenderingIntent intent,
+                                icXformInterp interp,
+                                IIccProfileConnectionConditions* pPcc,
+                                icXformLutType lutType,
+                                bool useD2BxB2DxTags,
+                                bool useBPC,
+                                bool adjustPcsLuminance,
+                                bool useHToS)
+{
+  CIccCreateXformHintManager hints;
+  if (!hints.AddHint(new (std::nothrow) CIccUseHToSHint(useHToS)))
+    return icCmmStatAllocErr;
+  if (useBPC && !hints.AddHint(new (std::nothrow) CIccApplyBPCHint()))
+    return icCmmStatAllocErr;
+  if (adjustPcsLuminance &&
+      !hints.AddHint(new (std::nothrow) CIccLuminanceMatchingHint()))
+    return icCmmStatAllocErr;
+
+  return pCmm->AddXform(profile, intent, interp, pPcc, lutType,
+                        useD2BxB2DxTags, &hints);
+}
+
+} // namespace
 
 
 CIccApplyCmmSearch::CIccApplyCmmSearch(CIccCmm* pBaseCmm) : CIccApplyCmm(pBaseCmm)
@@ -312,10 +342,10 @@ CIccCmmSearch::~CIccCmmSearch()
 icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
   icRenderingIntent nIntent,
   icXformInterp nInterp,
-  IIccProfileConnectionConditions* /* pPc */,
+  IIccProfileConnectionConditions* /* pPcc */,
   icXformLutType nLutType,
   bool bUseD2BxB2DxTags,
-  CIccCreateXformHintManager* /* pHintManager */)
+  CIccCreateXformHintManager* pHintManager)
 {
   // This override owns pProfile on every path, matching the base
   // CIccCmm::AddXform contract (#1327): the successful cases below store it and
@@ -328,6 +358,24 @@ icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
     return icCmmStatInvalidLut;
   }
 
+  bool useHToS = true;
+  bool useBPC = false;
+  bool adjustPcsLuminance = false;
+  if (pHintManager) {
+    IIccCreateXformHint* pHint = pHintManager->GetHint("CIccUseHToSHint");
+    if (pHint)
+      useHToS = static_cast<CIccUseHToSHint*>(pHint)->UseHToS();
+    IIccCreateXformHint* pAdjust =
+      pHintManager->GetHint("CIccCreateAdjustPCSXformHint");
+    if (pAdjust) {
+      CIccCreateAdjustPCSXformHint* pAdjustPcs =
+        static_cast<CIccCreateAdjustPCSXformHint*>(pAdjust);
+      useBPC = !strcmp(pAdjustPcs->GetAdjustPCSType(), "CIccApplyBPCHint");
+    }
+    adjustPcsLuminance =
+      pHintManager->GetHint("CIccLuminanceMatchingHint") != nullptr;
+  }
+
   switch (m_nAttached) {
   case 0:
     m_pSrcProfile = pProfile;
@@ -335,6 +383,9 @@ icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
     m_nSrcInterp = nInterp;
     m_nSrcLutType = nLutType;
     m_bSrcUseD2BxB2DxTags = bUseD2BxB2DxTags;
+    m_bSrcUseHToS = useHToS;
+    m_bSrcUseBPC = useBPC;
+    m_bSrcAdjustPcsLuminance = adjustPcsLuminance;
     break;
   case 1:
     m_pDstProfile = pProfile;
@@ -342,6 +393,9 @@ icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
     m_nDstInterp = nInterp;
     m_nDstLutType = nLutType;
     m_bDstUseD2BxB2DxTags = bUseD2BxB2DxTags;
+    m_bDstUseHToS = useHToS;
+    m_bDstUseBPC = useBPC;
+    m_bDstAdjustPcsLuminance = adjustPcsLuminance;
     break;
   case 2:
     m_pMidProfile = m_pDstProfile;
@@ -349,12 +403,18 @@ icStatusCMM CIccCmmSearch::AddXform(CIccProfile* pProfile,
     m_nMidInterp = m_nDstInterp;
     m_nMidLutType = m_nDstLutType;
     m_bMidUseD2BxB2DxTags = m_bDstUseD2BxB2DxTags;
+    m_bMidUseHToS = m_bDstUseHToS;
+    m_bMidUseBPC = m_bDstUseBPC;
+    m_bMidAdjustPcsLuminance = m_bDstAdjustPcsLuminance;
 
     m_pDstProfile = pProfile;
     m_nDstIntent = nIntent;
     m_nDstInterp = nInterp;
     m_nDstLutType = nLutType;
     m_bDstUseD2BxB2DxTags = bUseD2BxB2DxTags;
+    m_bDstUseHToS = useHToS;
+    m_bDstUseBPC = useBPC;
+    m_bDstAdjustPcsLuminance = adjustPcsLuminance;
     break;
   default:
     delete pProfile;
@@ -373,12 +433,51 @@ void CIccCmmSearch::SetDstInitProfile(CIccProfile* pProfile,
   icXformLutType nLutType,
   bool bUseD2BxB2DxTags)
 {
+  SetDstInitProfile(pProfile, nIntent, nInterp, pPcc, nLutType,
+                    bUseD2BxB2DxTags, false);
+}
+
+void CIccCmmSearch::SetDstInitProfile(CIccProfile* pProfile,
+  icRenderingIntent nIntent,
+  icXformInterp nInterp,
+  IIccProfileConnectionConditions* pPcc,
+  icXformLutType nLutType,
+  bool bUseD2BxB2DxTags,
+  bool bAdjustPcsLuminance)
+{
   m_pDstInitProfile = pProfile;
   m_nDstInitIntent = nIntent;
   m_nDstInitInterp = nInterp;
   m_pDstInitPcc = pPcc;
   m_nDstInitLutType = nLutType;
   m_bDstInitUseD2BxB2DxTags = bUseD2BxB2DxTags;
+  m_bDstInitAdjustPcsLuminance = bAdjustPcsLuminance;
+}
+
+icStatusCMM CIccCmmSearch::AddDstInitXform(CIccCmm* pCmm)
+{
+  if (!pCmm || !m_pDstInitProfile)
+    return icCmmStatBadXform;
+
+  CIccCreateXformHintManager hints;
+  CIccCreateXformHintManager* pHints = nullptr;
+  if (m_bDstInitAdjustPcsLuminance) {
+    if (!hints.AddHint(new (std::nothrow) CIccLuminanceMatchingHint()))
+      return icCmmStatAllocErr;
+    pHints = &hints;
+  }
+
+  icStatusCMM rv = pCmm->AddXform(
+    m_pDstInitProfile,
+    m_nDstInitIntent,
+    m_nDstInitInterp,
+    m_pDstInitPcc,
+    m_nDstInitLutType,
+    m_bDstInitUseD2BxB2DxTags,
+    pHints);
+  // The pointer overload owns the profile on success and failure.
+  m_pDstInitProfile = nullptr;
+  return rv;
 }
 
 
@@ -469,16 +568,21 @@ icStatusCMM CIccCmmSearch::Begin(bool bAllocNewApply, bool /* bUsePcsConversion 
   if (m_nAttached == 2) {
     //mid_to_dst
     CIccCmmPtr cmm = CIccCmmPtr(new CIccCmm); 
-    rv = cmm->AddXform(*m_pSrcProfile, m_nSrcIntent, m_nSrcInterp, m_pSrcPcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags);
+    rv = AddSearchStageXform(cmm.get(), *m_pSrcProfile, m_nSrcIntent,
+      m_nSrcInterp, m_pSrcPcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags,
+      m_bSrcUseBPC, m_bSrcAdjustPcsLuminance,
+      m_bSrcUseHToS);
     checkCmmStatus(rv);
 
     if (m_pDstInitProfile) {
-      rv = cmm->AddXform(m_pDstInitProfile, m_nDstInitIntent, m_nDstInitInterp, m_pDstInitPcc, m_nDstInitLutType, m_bDstInitUseD2BxB2DxTags);
-      m_pDstInitProfile = nullptr;
+      rv = AddDstInitXform(cmm.get());
       checkCmmStatus(rv);
     }
     else {
-      rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nDstInterp, m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags);
+      rv = AddSearchStageXform(cmm.get(), *m_pDstProfile, m_nDstIntent,
+        m_nDstInterp, m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags,
+        m_bDstUseBPC, m_bDstAdjustPcsLuminance,
+        m_bDstUseHToS);
       checkCmmStatus(rv);
     }
 
@@ -489,10 +593,18 @@ icStatusCMM CIccCmmSearch::Begin(bool bAllocNewApply, bool /* bUsePcsConversion 
 
     //dst_to_mid
     cmm = CIccCmmPtr(new CIccCmm);
-    rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nDstInterp, m_pcc.size() ? m_pcc[0] : m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags);
+    rv = AddSearchStageXform(cmm.get(), *m_pDstProfile, m_nDstIntent,
+      m_nDstInterp, m_pcc.size() ? m_pcc[0] : m_pDstPcc,
+      m_nDstLutType, m_bDstUseD2BxB2DxTags, m_bDstUseBPC,
+      m_bDstAdjustPcsLuminance,
+      m_bDstUseHToS);
     checkCmmStatus(rv);
 
-    rv = cmm->AddXform(*m_pSrcProfile, m_nSrcIntent, m_nSrcInterp, m_pcc.size() ? m_pcc[0] : m_pSrcPcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags);
+    rv = AddSearchStageXform(cmm.get(), *m_pSrcProfile, m_nSrcIntent,
+      m_nSrcInterp, m_pcc.size() ? m_pcc[0] : m_pSrcPcc,
+      m_nSrcLutType, m_bSrcUseD2BxB2DxTags, m_bSrcUseBPC,
+      m_bSrcAdjustPcsLuminance,
+      m_bSrcUseHToS);
     checkCmmStatus(rv);
 
     delete m_pDstProfile;
@@ -516,16 +628,21 @@ icStatusCMM CIccCmmSearch::Begin(bool bAllocNewApply, bool /* bUsePcsConversion 
 
     //mid_to_dst
     CIccCmmPtr cmm = CIccCmmPtr(new CIccCmm);
-    rv = cmm->AddXform(*m_pMidProfile, m_nMidIntent, m_nMidInterp, m_pMidPcc, m_nMidLutType, m_bMidUseD2BxB2DxTags);
+    rv = AddSearchStageXform(cmm.get(), *m_pMidProfile, m_nMidIntent,
+      m_nMidInterp, m_pMidPcc, m_nMidLutType, m_bMidUseD2BxB2DxTags,
+      m_bMidUseBPC, m_bMidAdjustPcsLuminance,
+      m_bMidUseHToS);
     checkCmmStatus(rv);
 
     if (m_pDstInitProfile) {
-      rv = cmm->AddXform(m_pDstInitProfile, m_nDstInitIntent, m_nDstInitInterp, m_pDstInitPcc, m_nDstInitLutType, m_bDstInitUseD2BxB2DxTags);
-      m_pDstInitProfile = nullptr;
+      rv = AddDstInitXform(cmm.get());
       checkCmmStatus(rv);
     }
     else {
-      rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nDstInterp, m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags);
+      rv = AddSearchStageXform(cmm.get(), *m_pDstProfile, m_nDstIntent,
+        m_nDstInterp, m_pDstPcc, m_nDstLutType, m_bDstUseD2BxB2DxTags,
+        m_bDstUseBPC, m_bDstAdjustPcsLuminance,
+        m_bDstUseHToS);
       checkCmmStatus(rv);
     }
 
@@ -540,10 +657,16 @@ icStatusCMM CIccCmmSearch::Begin(bool bAllocNewApply, bool /* bUsePcsConversion 
       for (auto pcc : m_pcc) {
         //dst_to_mid
         cmm = CIccCmmPtr(new CIccCmm);
-        rv = cmm->AddXform(*m_pDstProfile, m_nDstIntent, m_nDstInterp, pcc, m_nDstLutType, m_bDstUseD2BxB2DxTags);
+        rv = AddSearchStageXform(cmm.get(), *m_pDstProfile, m_nDstIntent,
+          m_nDstInterp, pcc, m_nDstLutType, m_bDstUseD2BxB2DxTags,
+          m_bDstUseBPC, m_bDstAdjustPcsLuminance,
+          m_bDstUseHToS);
         checkCmmStatus(rv);
 
-        rv = cmm->AddXform(*m_pMidProfile, m_nMidIntent, m_nMidInterp, pcc, m_nMidLutType, m_bMidUseD2BxB2DxTags);
+        rv = AddSearchStageXform(cmm.get(), *m_pMidProfile, m_nMidIntent,
+          m_nMidInterp, pcc, m_nMidLutType, m_bMidUseD2BxB2DxTags,
+          m_bMidUseBPC, m_bMidAdjustPcsLuminance,
+          m_bMidUseHToS);
         checkCmmStatus(rv);
 
         rv = cmm->Begin();
@@ -552,10 +675,16 @@ icStatusCMM CIccCmmSearch::Begin(bool bAllocNewApply, bool /* bUsePcsConversion 
 
         //src_to_mid
         cmm = CIccCmmPtr(new CIccCmm);
-        rv = cmm->AddXform(*m_pSrcProfile, m_nSrcIntent, m_nSrcInterp, pcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags);
+        rv = AddSearchStageXform(cmm.get(), *m_pSrcProfile, m_nSrcIntent,
+          m_nSrcInterp, pcc, m_nSrcLutType, m_bSrcUseD2BxB2DxTags,
+          m_bSrcUseBPC, m_bSrcAdjustPcsLuminance,
+          m_bSrcUseHToS);
         checkCmmStatus(rv);
 
-        rv = cmm->AddXform(*m_pMidProfile, m_nMidIntent, m_nMidInterp, pcc, m_nMidLutType, m_bMidUseD2BxB2DxTags);
+        rv = AddSearchStageXform(cmm.get(), *m_pMidProfile, m_nMidIntent,
+          m_nMidInterp, pcc, m_nMidLutType, m_bMidUseD2BxB2DxTags,
+          m_bMidUseBPC, m_bMidAdjustPcsLuminance,
+          m_bMidUseHToS);
         checkCmmStatus(rv);
 
         rv = cmm->Begin();

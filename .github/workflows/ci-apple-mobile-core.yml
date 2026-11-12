@@ -4,20 +4,29 @@ name: Apple mobile core libraries
 
 'on':
   workflow_call:
+    inputs:
+      release-artifact:
+        description: Upload the built libraries for the trusted latest-release workflow
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: apple-core-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: apple-core-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.workflow != 'ci-latest-release' }}
 
 jobs:
   build:
     name: Build Apple mobile static cores
-    runs-on: macos-latest
-    timeout-minutes: 45
+    # Release artifacts are cross-compiled for explicit Apple SDK/architecture
+    # pairs, so use the less-constrained Intel pool for that caller. Standalone
+    # smoke keeps Apple Silicon because it launches arm64 simulator hosts.
+    runs-on: ${{ inputs.release-artifact && 'macos-15-intel' || 'macos-latest' }}
+    timeout-minutes: 60
 
     defaults:
       run:
@@ -78,6 +87,38 @@ jobs:
 
           rm -rf artifacts
           mkdir -p artifacts
+          cp LICENSE.md artifacts/LICENSE.md
+          cp Build/Cmake/Packaging/THIRD-PARTY-NOTICES.md artifacts/
+          nlohmann_prefix="$(brew --prefix nlohmann-json)"
+          nlohmann_license_root="artifacts/third-party-licenses/nlohmann-json"
+          nlohmann_attribution_root="$nlohmann_license_root/runtime-attributions"
+          mkdir -p "$nlohmann_attribution_root"
+          cp -L "$nlohmann_prefix/LICENSE.MIT" "$nlohmann_license_root/LICENSE.MIT"
+          attribution_count=0
+          while IFS= read -r header; do
+            owners="$(grep '^// SPDX-FileCopyrightText:' "$header" || true)"
+            if [ -n "$owners" ] && grep -Fqv 'Niels Lohmann' <<< "$owners"; then
+              relative="${header#"$nlohmann_prefix/include/"}"
+              destination="$nlohmann_attribution_root/$relative"
+              mkdir -p "$(dirname "$destination")"
+              cp -L "$header" "$destination"
+              attribution_count=$((attribution_count + 1))
+            fi
+          done < <(
+            find "$nlohmann_prefix/include/nlohmann" -type f \
+              \( -name '*.hpp' -o -name '*.h' \) -print | sort
+          )
+          if [ "$attribution_count" -lt 4 ]; then
+            echo "::error::nlohmann-json runtime attribution headers are incomplete"
+            exit 1
+          fi
+          for attribution in \
+            nlohmann/detail/conversions/to_chars.hpp \
+            nlohmann/detail/meta/cpp_future.hpp \
+            nlohmann/detail/output/serializer.hpp \
+            nlohmann/thirdparty/hedley/hedley.hpp; do
+            test -s "$nlohmann_attribution_root/$attribution"
+          done
           artifact_manifest="artifacts/manifest.txt"
           : > "$artifact_manifest"
 
@@ -161,8 +202,19 @@ jobs:
             done < "$artifact_manifest"
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
+      # preflight: allow-pr-script-execution reason=readonly-apple-artifact-validation
+      - name: Validate Apple mobile core artifact
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          python3 .github/scripts/validate-apple-mobile-core-artifact.py artifacts
+
       # preflight: allow-pr-script-execution reason=native-apple-host-test-only
       - name: Exercise Apple simulator hosts
+        if: ${{ !inputs.release-artifact }}
         env:
           BASH_ENV: /dev/null
           ICCDEV_APPLE_DOWNLOAD_RUNTIME: '1'
@@ -177,6 +229,7 @@ jobs:
 
       # preflight: allow-pr-script-execution reason=xcode-ctest-runtime-test-only
       - name: Exercise Xcode CTest runtime layouts
+        if: ${{ !inputs.release-artifact }}
         env:
           BASH_ENV: /dev/null
         run: |
@@ -186,6 +239,7 @@ jobs:
           bash .github/scripts/iccdev-xcode-ctest-smoke.sh
 
       - name: Summarize native Apple smoke results
+        if: ${{ !inputs.release-artifact }}
         env:
           BASH_ENV: /dev/null
         run: |
@@ -207,7 +261,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"  # elements-sanitized
 
       - name: Upload Apple mobile core libraries
-        if: github.event_name == 'workflow_dispatch'
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' &&
+              (github.workflow == 'Apple mobile core libraries' ||
+               (inputs.release-artifact && github.workflow == 'ci-latest-release')) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: iccdev-apple-mobile-core

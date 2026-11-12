@@ -17,6 +17,11 @@ name: "_build-test-windows"
 permissions:
   contents: read
 
+env:
+  ICCDEV_VCPKG_EXPORT_URL: >-
+    https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-23241-libheif-deps/iccdev-windows-vcpkg-classic-libheif-3087493.zip
+  ICCDEV_VCPKG_EXPORT_SHA256: 9b051a50f152f616986e735d618a2f5ade2cf5443c680216894f2897dbbf5eca
+
 on:
   workflow_call:
     inputs:
@@ -69,6 +74,13 @@ jobs:
       # ---------------------------------------------------------------
       # Phase 2: Fetch vcpkg dependencies
       # ---------------------------------------------------------------
+      - name: Restore pinned vcpkg archive
+        id: vcpkg-archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/iccdev-vcpkg-export.zip
+          key: iccdev-vcpkg-windows-9b051a50f152f616986e735d618a2f5ade2cf5443c680216894f2897dbbf5eca
+
       - name: Fetch vcpkg dependencies
         env:
           POWERSHELL_TELEMETRY_OPTOUT: "1"
@@ -83,16 +95,25 @@ jobs:
             Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
           }
 
-          Write-Host "Fetching vcpkg dependencies from release..."
-          Start-BitsTransfer -Source https://github.com/InternationalColorConsortium/iccDEV/releases/download/vcpkg-win-2324-libheif-deps/iccdev-windows-vcpkg-classic-libheif-04a9d8e.zip -Destination "deps.zip"
-          $actualDigest = (Get-FileHash -LiteralPath 'deps.zip' -Algorithm SHA256).Hash
-          if ($actualDigest -ne '89ba13a04b883bbe5f97b5baabe15a508ff431c081e73c72022532ccfed5cb7e') {
+          $archive = Join-Path $env:RUNNER_TEMP 'iccdev-vcpkg-export.zip'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            Write-Host "Fetching vcpkg dependencies from release..."
+            Start-BitsTransfer -Source $env:ICCDEV_VCPKG_EXPORT_URL -Destination $archive
+          }
+          $actualDigest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actualDigest -ne $env:ICCDEV_VCPKG_EXPORT_SHA256) {
             throw "vcpkg export digest mismatch: $actualDigest"
           }
           Write-Host "Extracting dependencies..."
-          tar -xf deps.zip
-          Remove-Item deps.zip
+          tar -xf $archive
           Write-Host "[OK] Dependencies extracted"
+
+      - name: Save verified vcpkg archive
+        if: github.event_name == 'workflow_dispatch' && steps.vcpkg-archive.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/iccdev-vcpkg-export.zip
+          key: iccdev-vcpkg-windows-9b051a50f152f616986e735d618a2f5ade2cf5443c680216894f2897dbbf5eca
 
       # ---------------------------------------------------------------
       # Phase 3: Build iccDEV C++ tools (MSVC)
@@ -167,7 +188,8 @@ jobs:
           }
 
           Write-Host "Discovering CTest suites..."
-          $ctestList = ctest --test-dir out\vs2022-vcpkg -C Release -N --no-tests=error 2>&1
+          $ctestList = ctest --test-dir out\vs2022-vcpkg -C Release -N `
+            --label-exclude clusterfuzzlite --no-tests=error 2>&1
           $ctestList | Tee-Object -FilePath "out\vs2022-vcpkg\Testing\ci\ctest-list.txt"
           if ($LASTEXITCODE -ne 0) {
             throw "CTest discovery failed with exit code $LASTEXITCODE"
@@ -176,10 +198,10 @@ jobs:
           Write-Host "Running CTest suites..."
           ctest --test-dir out\vs2022-vcpkg -C Release `
             --parallel ([Environment]::ProcessorCount) `
-            --label-exclude known-red `
+            --label-exclude 'known-red|clusterfuzzlite' `
             --output-on-failure `
             --no-tests=error `
-            --output-junit "out\vs2022-vcpkg\Testing\ci\ctest-results.xml"
+            --output-junit "Testing\ci\ctest-results.xml"
           if ($LASTEXITCODE -ne 0) {
             throw "CTest execution failed with exit code $LASTEXITCODE"
           }
@@ -239,8 +261,7 @@ jobs:
           }
 
           python -m pip install `
-            "pytest>=7.0,<9; python_version < '3.10'" `
-            "pytest>=9.0.3,<10; python_version >= '3.10'" `
+            "pytest>=9.0.3,<10" `
             'numpy>=1.23,<3'
 
           $wheel = (Get-ChildItem python\dist\*.whl | Select-Object -First 1).FullName
@@ -299,11 +320,11 @@ jobs:
             Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
           }
 
-          if ($env:PYTHON_VERSION -notmatch '^3\.(9|12|13)$') {
+          if ($env:PYTHON_VERSION -notmatch '^3\.(11|12|13|14)$') {
             throw "Unsupported Python version for cibuildwheel smoke: $env:PYTHON_VERSION"
           }
 
-          python -m pip install 'cibuildwheel>=2.23,<3' 'twine>=5.0,<7'
+          python -m pip install 'cibuildwheel==3.4.0' 'twine>=5.0,<7'
           cd python
           $distArtifacts = Get-ChildItem -Path dist\* -Include *.whl,*.tar.gz -File
           if (-not $distArtifacts) {
@@ -355,14 +376,6 @@ jobs:
           git config --global credential.helper ""
           if (Test-Path Env:GITHUB_TOKEN) {
             Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-          }
-
-          if ($env:PYTHON_VERSION -eq '3.9') {
-            Write-Host (
-              "[SKIP] iccdev-mcp requires Python >=3.10; " +
-              "skipping MCP verification on Python $env:PYTHON_VERSION"
-            )
-            exit 0
           }
 
           pip install ".\iccdev-mcp\"

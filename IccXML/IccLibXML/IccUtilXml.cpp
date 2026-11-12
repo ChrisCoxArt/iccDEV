@@ -1351,27 +1351,25 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
   // caller compares the count returned with the count it expected, so
   // returning 0 refuses the array.
 
-  icUInt32Number n = 0, b = 0;
+  icUInt32Number n = 0;
   bool bInNum = false;
-  char num[256] = {0};
+  // The whole token, however long: a fixed buffer kept only a prefix, and a
+  // long but valid spelling such as 300 zeros then "1e10" was read as 0 (#3023).
+  std::string num;
 
   while ( (n < nSize) && *szText ) {
     if (icIsNumChar(*szText)) {
       if (!bInNum) {
         bInNum = true;
-        b=0;
+        num.clear();
       }
-      num[b] = *szText;
- 
-      if (b+2<sizeof(num))
-        b++;
+      num += *szText;
     }
     else {
       if (bInNum) {
-        num[b] = 0;
-        if (!icXmlFloatTokenValid<T>(num))
+        if (!icXmlFloatTokenValid<T>(num.c_str()))
           return 0;
-        pBuf[n] = icParseArrayValue<T>(num);
+        pBuf[n] = icParseArrayValue<T>(num.c_str());
         n++;
         bInNum = false;
       }
@@ -1383,10 +1381,9 @@ icUInt32Number CIccXmlArrayType<T, Tsig>::ParseText(T* pBuf, icUInt32Number nSiz
     szText++;
   }
   if ( bInNum && (n < nSize) ) {
-    num[b] = 0;
-    if (!icXmlFloatTokenValid<T>(num))
+    if (!icXmlFloatTokenValid<T>(num.c_str()))
       return 0;
-    pBuf[n] = icParseArrayValue<T>(num);
+    pBuf[n] = icParseArrayValue<T>(num.c_str());
     n++;
   } 
 
@@ -1668,7 +1665,7 @@ const icChar* icGetStandardObserverName(icStandardObserver str)
 
 // icGetDateTimeValue is now implemented in IccProfLib/IccUtil.cpp
 
-icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
+bool icGetDeviceAttrValue(xmlNode *pNode, icUInt64Number &out)
 {	
 	icUInt64Number devAttr = 0;
 	xmlAttr *attr = icXmlFindAttr(pNode, "ReflectiveOrTransparency");
@@ -1714,14 +1711,41 @@ icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
     devAttr |= icSelfLuminous;
   }
 
+  // The named bits above stand even when VendorSpecific is refused, so the
+  // one-argument overload below still returns them.
+  out = devAttr;
+
   attr = icXmlFindAttr(pNode, "VendorSpecific");
   if (attr) {
-    icUInt64Number vendor = 0;
-    sscanf(icXmlAttrValue(attr), "%llx", &vendor);
-    devAttr |= vendor;
+    // Surrounding white space is allowed, as the old sscanf() allowed it.  A
+    // sign is not: strtoull() would negate the value, and it skips leading
+    // white space before looking for one, so check after trimming.
+    const char *raw = icXmlAttrValue(attr);
+    std::string text = raw ? raw : "";
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+      return false;
+    text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+    if (text[0] == '-' || text[0] == '+')
+      return false;
+
+    char *end = nullptr;
+    errno = 0;
+    unsigned long long vendor = std::strtoull(text.c_str(), &end, 16);
+    if (end == text.c_str() || *end != '\0' || errno == ERANGE)
+      return false;
+    devAttr |= (icUInt64Number)vendor;
   }
 
-	return devAttr;
+  out = devAttr;
+  return true;
+}
+
+icUInt64Number icGetDeviceAttrValue(xmlNode *pNode)
+{
+  icUInt64Number value = 0;
+  icGetDeviceAttrValue(pNode, value);
+  return value;
 }
 
 icColorantEncoding icGetColorantValue(const icChar* str)

@@ -66,7 +66,16 @@ For EVERY `run:` step in the workflow, verify:
 - [ ] Callable workflow callers and callees use separate, event-qualified
       groups when their work must not supersede each other
 
-### 8. Docker and Container Security
+### 8. Action Pin Ownership
+- [ ] Every remote action uses a lowercase 40-character commit SHA.
+- [ ] Every workflow reference to the same action repository uses one SHA,
+      unless a documented maintainer exception requires version divergence.
+- [ ] Tests and scripts assert action identity and pin shape without copying
+      the current workflow SHA.
+- [ ] `.github/scripts/check-workflow-action-pins.py` passes with no mirrored
+      pins outside `.github/workflows`.
+
+### 9. Docker and Container Security
 - [ ] Dockerfiles use digest-pinned `FROM` references
 - [ ] No `curl|bash`, `wget|bash`, remote `ADD`, or secret-like `ARG`/`ENV`
 - [ ] Runtime images use non-root users unless explicitly justified
@@ -81,22 +90,30 @@ For EVERY `run:` step in the workflow, verify:
 - [ ] Documented container commands work from a fresh checkout or clean
       container, with explicit ref fetches when comparing branches
 
-### 9. Review-Churn Prevention
+### 10. Review-Churn Prevention
 - [ ] Review the repeat-review avoidance checklist for the changed surface (canonical: `docs/regression-workflow-governance.md`, section "Recent maintainer PRs...").
 - [ ] Contract matrix maps every changed workflow, helper, Dockerfile, manifest,
       and dependency updater to its consumer, failure path, trigger, and local
       evidence before the first review.
 
-### 10. Full Run Log Audit
+### 11. Full Run Log Audit
 - [ ] Full log archive downloaded with `gh api /repos/OWNER/REPO/actions/runs/RUN_ID/logs`
 - [ ] Runtime diagnostics grepped across every job, not only failed jobs
 - [ ] Echoed shell source filtered out before classifying findings
 - [ ] Green-run `##[error]`, `##[warning]`, and `CMake Warning` lines reviewed
 - [ ] Install/uninstall logs checked for duplicate manifest paths and missing files
 - [ ] Package-manager and cache warnings classified as fixed, deferred, or baseline
+- [ ] Each allowed cache contains one immutable archive, uses a literal exact
+      key containing its SHA-256, and re-verifies that digest before extraction
+- [ ] Pull requests cannot save Actions caches; low-trust metadata and package
+      or release workflows do not restore or save caches; trusted saves run
+      only after a restore miss
+- [ ] Docker cache imports resolve a previously validated canonical image to an
+      immutable digest, export only inline metadata, and retain a no-cache mode
+- [ ] Cache pilots record cold/warm elapsed time, hit status, and entry size
 - [ ] Matrix smoke-test skips reviewed for missing coverage
 
-### 11. Comprehensive Matrix Coverage
+### 12. Comprehensive Matrix Coverage
 - [ ] The comprehensive matrix calls MSVC, ClangCL, and MinGW UCRT64 Windows
       coverage.
 - [ ] One Unix and one Windows lane run complete CTest with
@@ -119,7 +136,7 @@ gh workflow run ci-pr-risk-security-analysis.yml \
   -f analysis_target='Current branch workflows'
 ```
 
-The scanner checks: SHA pinning, dangerous triggers, credential hygiene,
+The scanner checks: SHA pinning and ownership, dangerous triggers, credential hygiene,
 shell hardening, matrix injection, output sanitization, permissions,
 trusted-base helper boundaries, Dockerfile security, supply-chain score,
 Trivy/TanStack indicators, ref-name security, and workflow inventory.
@@ -149,7 +166,7 @@ grep -c 'credential.helper' "$FILE"  # should equal number of run: blocks
 
 ```bash
 python3 -c "import yaml; yaml.safe_load(open('$FILE')); print('YAML OK')"
-actionlint -no-color "$FILE"
+jactionlint --profile correctness --no-color "$FILE"
 yamllint -d '{extends: default, rules: {document-start: disable, truthy: disable, line-length: {max: 120}}}' "$FILE"
 zizmor "$FILE"
 hadolint Dockerfile*
@@ -206,7 +223,7 @@ rg -n '##\[error\]|##\[warning\]|::error|::warning|CMake Warning|File ".+" does 
 CodeQL Actions analysis is required for workflow changes. CodeQL Python
 analysis is required for changed Python scripts. Full CodeQL C/C++ remains
 required for related C/C++ or CMake changes. Pair CodeQL with YAML parsing,
-`actionlint`, ShellCheck, `yamllint`, and the workflow permission audit because
+`jactionlint`, ShellCheck, `yamllint`, and the workflow permission audit because
 no single scanner covers the full CI threat model.
 
 ## Reference Workflows

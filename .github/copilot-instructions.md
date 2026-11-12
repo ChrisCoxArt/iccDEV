@@ -17,6 +17,7 @@ commands here.
 | `IccProfLib/icProfileHeader.h` | `instructions/icc-specification.instructions.md` | ICC header, tag, and color-space rules |
 | `ports/**` | `instructions/vcpkg-port.instructions.md` | vcpkg overlay port and CI |
 | `python/**` | `instructions/python-bindings.instructions.md` | Cython build, tests, and `ICCDEV_BUILD_DIR` |
+| `iccdev-mcp/**` | `instructions/iccdev-mcp.instructions.md` | MCP/REST review, capability tests, and pure Python package boundary |
 | `matlab/**` | `instructions/matlab-mex.instructions.md` | MEX gateway, OOP layer, and `build_mex.m` |
 | `matlab/**` | `instructions/matlab-code-review.instructions.md` | Focused MATLAB MEX review checks |
 | `Tools/Winnt/IccIisIsapi/**` | `Tools/Winnt/IccIisIsapi/isapi-instructions.md` | IIS ISAPI setup and hardening |
@@ -42,8 +43,11 @@ For documentation edits, run the bounded graph-light Doxygen check in
 graph generation belongs to release packaging or graph changes. Keep
 `HAVE_DOT=YES` for checked-in diagrams; exclude CTest implementation and
 fixtures from the generated package. Keep
-Markdown links inside the Doxygen INPUT tree; use explicit HTML anchors for
-outside-tree references. Never commit generated Doxygen output or warning logs.
+Markdown links inside the Doxygen INPUT tree; use relative Markdown links for
+generated Markdown pages, `\ref` for generated source files, and absolute GitHub
+HTML anchors for repo-only resources. Relative HTML anchors can break in the
+packaged site without a Doxygen warning. Never commit
+generated Doxygen output or warning logs.
 
 Copilot code review reads repository-wide instructions, the nearest applicable
 `AGENTS.md`, path-specific instructions, and relevant skills from the PR head
@@ -70,7 +74,6 @@ Canonical regression scripts:
 - `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`
 - `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`
 - `.github/scripts/iccdev-applysearch-cli-args-regression.sh`
-- `.github/scripts/iccdev-heif-carrier-qa.sh`
 - `.github/scripts/iccdev-xml-spec-qa.sh`
 
 For regression workflow updates, use
@@ -99,12 +102,9 @@ fuzzer runtime boundary, and replay the pinned #2687 artifact before fuzzing.
 - iOS CLUT editor proof-of-concept: `examples/ios-clut-editor/README.md`,
   `.github/skills/ios-clut-editor/SKILL.md`, and
   `.github/prompts/ios-clut-editor.prompt.md`
-- HEIF ICC carrier research tooling: `.github/ci/tooling/heif/Readme.md`,
-  `.github/skills/heif-icc-qa/SKILL.md`, and
-  `.github/prompts/heif-icc-qa.prompt.md`
-- libpng iCCP fault research tooling: `.github/ci/tooling/libpng/Readme.md`,
-  `.github/skills/libpng-iccp-qa/SKILL.md`, and
-  `.github/prompts/libpng-iccp-qa.prompt.md`
+- Native HEIF inspection and extraction QA:
+  `Tools/CmdLine/IccHeifDump/Readme.md` and
+  `.github/ci/test-data/heif/Readme.md`
 - Windows session helper: dot-source `.\.github\scripts\icc-session.ps1`, then
   run `icc-session` to create the next `DD-mmm-YYYY-NNN` workspace directory.
 - AVX2 CLUT debugging and optimization handoff:
@@ -198,7 +198,7 @@ agent-policy surfaces.
   actionable findings over exhaustive comment volume. No comment is better
   than a low-value concern.
 - For workflow changes, use the trusted workflow/static-analysis guidance.
-  Consider YAML parsing, `actionlint`, `yamllint`, `zizmor`, and CodeQL Actions
+  Consider YAML parsing, pinned `jactionlint`, `yamllint`, `zizmor`, and CodeQL Actions
   results as applicable; do not duplicate a confirmed automated finding without
   additional impact or remediation context.
 - Use repository MCP context or agent skills only when relevant to the changed
@@ -250,6 +250,7 @@ Key safety rules:
 | Code review hunting | `.github/prompts/code-review-hunting.prompt.md` |
 | Reduce documentation noise | `.github/prompts/reduce-doc-noise.prompt.md` |
 | Build/test/coverage | `.github/prompts/build-and-test.prompt.md` |
+| Coverage and timing analysis | `.github/prompts/code-coverage-analysis.prompt.md` |
 | Add a CLI tool | `.github/prompts/add-new-tool.prompt.md` |
 | iOS CLUT editor planning | `.github/prompts/ios-clut-editor.prompt.md` |
 | Contributor onboarding | `.github/prompts/contributor-onboarding.prompt.md` |
@@ -261,7 +262,6 @@ Key safety rules:
 | ClusterFuzzLite integration | `.github/prompts/clusterfuzzlite.prompt.md` |
 | Maintainer CTest selection | `.github/prompts/maintainer-ci-ctest.prompt.md` |
 | Maintainer regression container | `.github/prompts/regression-container-maintainer.prompt.md` |
-| libpng iCCP fault QA | `.github/prompts/libpng-iccp-qa.prompt.md` |
 | Valgrind-family analysis | `.github/prompts/valgrind-analysis.prompt.md` |
 | Workflow governance audit | `.github/prompts/audit-workflow-governance.prompt.md` |
 | Pre-PR security cycle | `.github/prompts/pre-pr-security-cycle.prompt.md` |
@@ -295,7 +295,7 @@ Key safety rules:
 | Regression workflow governance | `.github/skills/regression-workflow-governance/SKILL.md` |
 | Regression container maintainer | `.github/skills/regression-container-maintainer/SKILL.md` |
 | Maintainer CI and CTest | `.github/skills/maintainer-ci-ctest/SKILL.md` |
-| libpng iCCP fault QA | `.github/skills/libpng-iccp-qa/SKILL.md` |
+| Coverage and timing analysis | `.github/skills/code-coverage-analysis/SKILL.md` |
 | Pre-PR security cycle | `.github/skills/pre-pr-security-cycle/SKILL.md` |
 | Focused pull request review | `.github/skills/code-review/SKILL.md` |
 | Stacked PR and fast-lane workflow | `.github/skills/stacked-pr-fast-lane/SKILL.md` |

@@ -44,8 +44,11 @@ Use this skill for `.clusterfuzzlite/**`,
 - Keep `cmmapply` control bytes outside the ICC header so direction, intent,
   and interpolation can mutate without corrupting the profile-size field.
 - Keep a schema-shaped IccConnect seed and dedicated config dictionary. Drive
-  `fromJson()`/`toJson()` round trips for top-level and nested `CIccCfg*`
-  objects before adding another configuration target.
+  reset and non-reset `fromJson()`/`toJson()` round trips for top-level and
+  nested `CIccCfg*` objects, compare stable serialization, and traverse a
+  bounded set of later nested array elements before adding another
+  configuration target. Keep input length runner-owned; do not add a second
+  fixed size guard inside the harness.
 - Keep the workflow limited to manual dispatch and the nightly schedule. Manual
   dispatch defaults to one `address`/`core` smoke job; `run_mode=full` and the
   schedule use all nine group/sanitizer combinations.
@@ -55,6 +58,10 @@ Use this skill for `.clusterfuzzlite/**`,
 - Keep corpus pruning runnable after a fuzz finding. Keep coverage an explicit
   manual option that emits a ClusterFuzzLite artifact without broadening
   repository permissions.
+- Before fuzzing, republish the latest valid exact-name corpus artifacts with
+  one-day retention. Use the GitHub artifact name filter so the pinned runner
+  does not paginate the repository-wide artifact history; preserve an existing
+  corpus and use an empty TAR only for a true cold start.
 - Keep one temporary CFL patch per open MSan issue. Attempt patches in order,
   report drift or already-integrated fixes, and continue the default workflow;
   reserve `--strict` for local patch-stack maintenance. Remove only the patch
@@ -71,11 +78,13 @@ in-process seam, structured seed, and distinct attribution boundary.
 
 ## Local Validation
 
-From an OSS-Fuzz checkout, run for each sanitizer in `address`, `undefined`,
-and `memory`:
+From an OSS-Fuzz checkout, use a clean external source directory whose basename
+is lowercase. The helper derives its Docker repository name from that basename,
+and Docker rejects uppercase repository names. Run for each sanitizer in
+`address`, `undefined`, and `memory`:
 
 ```bash
-iccdev_source=/path/to/iccDEV
+iccdev_source=/path/to/iccdev-clean-source
 source_sha="$(git -C "$iccdev_source" rev-parse HEAD)"
 source_digest="$("$iccdev_source/.github/scripts/iccdev-cfl-source-digest.sh" "$iccdev_source")"
 python3 infra/helper.py build_image --external --pull "$iccdev_source"
@@ -100,11 +109,12 @@ bash -n .clusterfuzzlite/build.sh .github/ci/cfl/build.sh \
   .github/scripts/iccdev-clusterfuzzlite-config-tests.sh \
   .github/scripts/iccdev-clusterfuzzlite-target-tests.sh
 .github/scripts/iccdev-clusterfuzzlite-config-tests.sh
+.github/scripts/iccdev-cfl-artifact-refresh-tests.sh
 .github/scripts/iccdev-fuzz-patch-check-tests.sh
 .github/scripts/check-fuzz-patches.sh
 ctest --test-dir Build -R '^iccdev\.clusterfuzzlite-(configuration|targets)$' \
   --output-on-failure --no-tests=error
-actionlint -no-color .github/workflows/ci-clusterfuzzlite.yml
+jactionlint --profile correctness --no-color .github/workflows/ci-clusterfuzzlite.yml
 .github/scripts/preflight-safety-checks.sh --require-tools
 ```
 

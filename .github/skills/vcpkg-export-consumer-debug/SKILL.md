@@ -26,17 +26,41 @@ refresh `ports/iccdev/portfile.cmake` `REF` plus `SHA512` together. CI should
 use local source mode (`VCPKG_ICCDEV_SOURCE` and `VCPKG_KEEP_ENV_VARS`) so it
 tests the checked-out branch, not the GitHub archive fallback.
 
-When refreshing the source pin, also test the non-local path with
-`VCPKG_ICCDEV_SOURCE` unset. Install `iccdev[tools,xml,json]` using the overlay
-and a full, bootstrapped vcpkg checkout, then build and run
+When refreshing the source pin, also test the non-local path on Windows with
+`VCPKG_ICCDEV_SOURCE` unset. Use a fresh `--x-install-root` and disable binary
+cache restoration for the `iccdev` package, or remove the prior `iccdev`
+install before repeating it; changing this environment variable alone does
+not replace an already installed package. Install `iccdev[tools,xml,json]`
+using the overlay and a full, bootstrapped vcpkg checkout, then build and run
 `examples/hello-iccdev` against the installed package. A local-source build
-does not verify the new archive hash or the pinned source's packaging.
+does not verify the new archive hash or the pinned source's packaging. The
+overlay is static-only and deliberately disables `ENABLE_CMM_TOOLS`; its
+`tools` feature does not install the Windows ICM `IccDEVCmm.dll`.
 
 For Windows source/consumer smoke tests, the immutable
-<https://github.com/InternationalColorConsortium/iccDEV/releases/tag/vcpkg-win-2324-libheif-deps>
+<https://github.com/InternationalColorConsortium/iccDEV/releases/tag/vcpkg-win-23241-libheif-deps>
 export supplies prebuilt dependencies. Verify its published SHA256 before
 extraction and disable manifest mode when using its toolchain. The export is
 not a full vcpkg registry; it does not replace the overlay install above.
+
+## Prebuilt Export Refresh
+
+`_build-test-windows.yml`, `ci-pr-win.yml`, `ci-matlab.yml`, and the optional
+`pinned-release-bundle` path in `ci-latest-release.yml` pin the same export
+asset by URL and SHA256. Change all four together and update the assertions in
+`.github/tests/test_wasm_workflow.py`. The release workflow defaults to
+`windows_vcpkg_source=manifest`; selecting `pinned-release-bundle` verifies
+the archive checksum and configures with `VCPKG_MANIFEST_MODE=OFF`. The asset
+suffix is only a label and does not identify the vcpkg registry baseline, and
+the export does not set the manifest `builtin-baseline`; refresh that
+separately as described in Dependency Manifest Sync.
+
+```powershell
+gh release view <tag> --repo InternationalColorConsortium/iccDEV `
+  --json assets --jq '.assets[] | [.name, .digest, .size] | @tsv'
+git grep -n -E 'vcpkg-win-[0-9]+-libheif-deps|iccdev-windows-vcpkg-classic' -- .github docs
+python -m pytest --rootdir . --import-mode=importlib .github/tests/test_wasm_workflow.py -q
+```
 
 ## Dependency Manifest Sync
 
@@ -148,25 +172,14 @@ execute_process(
 
 ## Validation
 
-Run local checks before pushing:
+Run local checks on Windows before pushing:
 
-```bash
-git diff --check -- \
-  vcpkg.json \
-  Build/Cmake/vcpkg.json \
-  ports/iccdev/vcpkg.json \
-  ports/iccdev/portfile.cmake \
-  Build/Cmake/RefIccMAXUninstall.cmake.in \
-  .github/workflows/ci-vcpkg-ports.yml \
-  .github/skills/vcpkg-export-consumer-debug/SKILL.md
-
-python3 -c "import json; [json.load(open(p)) for p in ['vcpkg.json', 'Build/Cmake/vcpkg.json', 'ports/iccdev/vcpkg.json', 'examples/hello-iccdev/vcpkg.json']]; print('vcpkg JSON OK')"
-python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci-vcpkg-ports.yml')); print('YAML parse OK')"
-actionlint -no-color .github/workflows/ci-vcpkg-ports.yml
-file vcpkg.json Build/Cmake/vcpkg.json ports/iccdev/vcpkg.json \
-  ports/iccdev/portfile.cmake \
-  Build/Cmake/RefIccMAXUninstall.cmake.in \
-  .github/skills/vcpkg-export-consumer-debug/SKILL.md
+```powershell
+git diff --check
+python -c "import json; [json.load(open(p)) for p in ['vcpkg.json', 'Build/Cmake/vcpkg.json', 'ports/iccdev/vcpkg.json', 'examples/hello-iccdev/vcpkg.json']]; print('vcpkg JSON OK')"
+python -c "import yaml; yaml.safe_load(open('.github/workflows/ci-vcpkg-ports.yml')); print('YAML parse OK')"
+jactionlint --profile correctness --no-color .github/workflows/ci-vcpkg-ports.yml
+jactionlint --profile correctness --no-color .github/workflows/vcpkg-packages.yml
 ```
 
 Final proof for these failures requires a GitHub-hosted Windows runner. Monitor

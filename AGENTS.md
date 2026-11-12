@@ -13,9 +13,11 @@ shares one source of truth. Update rules here, not in the mirrors.
 
 - Check `git --no-pager status --short --branch` before edits.
 - Prefer focused changes with exact repros and regression coverage.
-- Keep documentation links Doxygen-safe: if a Markdown link points outside the
-  Doxygen INPUT tree, use an explicit HTML anchor instead of a Markdown reference
-  so generated docs stay warning-free. Before handing off documentation changes,
+- Keep documentation links Doxygen-safe: use relative Markdown links for
+  generated Markdown pages and `\ref` for generated source files. Use absolute
+  GitHub HTML anchors for repo-only resources; relative HTML anchors can break
+  in the packaged site even when Doxygen emits no warning. Before handing off
+  documentation changes,
   run the bounded graph-light Doxygen check in
   `docs/documentation-maintenance.md` and require an empty
   `docs/generated/doxygen-warnings.log`. Time is valuable: reserve full graph
@@ -31,6 +33,22 @@ shares one source of truth. Update rules here, not in the mirrors.
   `.github/scripts/iccdev-applynamedcmm-cli-args-regression.sh`,
   `.github/scripts/iccdev-applysearch-cli-args-regression.sh`, and
   `.github/scripts/iccdev-namedcolor-overprint-regression-tests.sh`.
+- For maintainer pre-PR validation, use the current maintainer image and local
+  tools for applicable builds, preflight, scanners, and dynamic checks. On the
+  pushed pre-PR branch, run `ci-qa-pr` with `ctest-mode=full` and
+  `ctest-recent-limit=0` plus `ci-codeql-security` on the same head. Record
+  terminal results before opening an explicitly authorized PR. Run
+  `ci-pr-action` on the PR head for final cross-platform builds, profile
+  checks, and representative CTest coverage; it does not replace the local
+  or pre-PR screening.
+- An open same-repository PR targeting `master` runs `ci-pr-action` fast lane
+  on each push or rebase. The trusted status labeler refreshes after validation
+  completes. Verify its exact current head, `PR Summary`, labels, and merge
+  state before reporting readiness. For a manual retry, dispatch the trusted
+  `master` workflow with `pr_number` and `expected_head_sha`; use
+  `docs/label-system.md` for commands and stacked-PR limits. The automatic
+  fast lane does not replace the final full-scope PR gate.
+  Keep the final full-scope PR gate in the readiness sequence above.
 - Before the first automated review, record a `base...HEAD` contract matrix for
   every changed cross-cutting surface: producer, consumer, build/runtime
   behavior, platform or toolchain boundary, CI trigger, dependency owner, and
@@ -44,13 +62,18 @@ shares one source of truth. Update rules here, not in the mirrors.
   and generated-file attribution as directed by their provenance.
 - For MCP runtime checks, validate every Docker image variant against its
   discovered capabilities. Do not hard-code a total tool count.
+- Keep the pure Python `iccdev-mcp` Python 3.10+ package contract separate from
+  the compiled `iccdev` CPython 3.11-3.14 wheel contract. For MCP behavior or
+  packaging changes, use `.github/skills/mcp-server-qa/SKILL.md` and require
+  source tests plus the relevant installed-package, native, or image smoke;
+  record skipped native tests as unverified coverage.
 - The published unified container is a native `linux/amd64` and `linux/arm64`
   manifest. Build and smoke each platform before publishing a tag; Apple
   Silicon Docker hosts must select `linux/arm64` without emulation.
 - Python CI and rolling-release wheels share `_build-python-wheels.yml`
   between `ci-json-python` and `ci-latest-release`, with Python 3.13 driving
   cibuildwheel 3.4.0 for all seven platform lanes. Keep installed-wheel tests
-  and the Windows ARM64 Python 3.9/3.10 NumPy exception aligned. Primary CI
+  and their binary NumPy dependency aligned across all lanes. Primary CI
   disables shared wheel artifact upload and fails on empty test collection; release
   CI enables explicitly named artifact intake validated by
   `.github/scripts/validate-python-release-wheels.py` with an independent
@@ -62,7 +85,7 @@ shares one source of truth. Update rules here, not in the mirrors.
   report their diagnostic outcomes without blocking later package publications.
   Require complete package inventories, dual checksums, release
   attestations, the protected `release` environment, and OIDC publishing.
-  Validate downloaded release wheels with `--release` to require all 45
+  Validate downloaded release wheels with `--release` to require all 36
   targets without CI identifier files. Require RECORD file coverage, secure
   hashes, and sizes before attestation; ZIP CRCs alone do not prove this contract.
 - Rolling-release MCP artifacts are a separate universal wheel and sdist,
@@ -103,6 +126,7 @@ shares one source of truth. Update rules here, not in the mirrors.
 | Memcheck, Helgrind, DRD, Massif, and Callgrind | `docs/valgrind-analysis.md`, `.github/skills/valgrind-analysis/SKILL.md` |
 | Regression container prompt | `.github/prompts/regression-container-maintainer.prompt.md` |
 | Maintainer CTest selection and CI budget | `.github/skills/maintainer-ci-ctest/SKILL.md` |
+| Source coverage and build-configuration timing | `docs/code-coverage.md`, `.github/skills/code-coverage-analysis/SKILL.md` |
 | ICC.2 spectral, bi-spectral, and MCS XML QA | `docs/xml-spec-qa.md`, `.github/skills/icc2-xml-spec-qa/SKILL.md` |
 | ICC XML and JSON corpus round-trip QA | `docs/xml-json-roundtrip-qa.md`, `.github/skills/xml-json-roundtrip-qa/SKILL.md` |
 | New CLI tool onboarding | `.github/prompts/add-new-tool.prompt.md` |
@@ -110,8 +134,7 @@ shares one source of truth. Update rules here, not in the mirrors.
 | iOS CLUT editor planning | `.github/prompts/ios-clut-editor.prompt.md` |
 | Contributor onboarding | `.github/prompts/contributor-onboarding.prompt.md` |
 | Apply-path throughput benchmark | `Tools/CmdLine/IccBenchApply/Readme.md` |
-| HEIF ICC carrier build and QA | `.github/workflows/ci-nokia-heif-icc-smoke.yml`, `.github/ci/tooling/heif/Readme.md`, `.github/skills/heif-icc-qa/SKILL.md` |
-| libpng iCCP fault build and QA | `.github/workflows/ci-libpng-iccp-smoke.yml`, `.github/ci/tooling/libpng/Readme.md`, `.github/skills/libpng-iccp-qa/SKILL.md` |
+| Native HEIF inspection and extraction QA | `Tools/CmdLine/IccHeifDump/Readme.md`, `.github/ci/test-data/heif/Readme.md` |
 | Security repro | `.github/prompts/reproduce-security-issue.prompt.md` |
 | iccSpecSepToTiff QA | `.github/skills/specsep-qa/SKILL.md` |
 | IIS ISAPI endpoint QA | `.github/skills/iis-isapi-qa/SKILL.md` |
@@ -129,6 +152,7 @@ shares one source of truth. Update rules here, not in the mirrors.
 | MATLAB binding and IccJSON tests | `.github/skills/matlab-bindings-test/SKILL.md` |
 | MATLAB binding debug | `.github/prompts/debug-matlab-bindings.prompt.md` |
 | Python binding tests | `.github/skills/python-bindings-test/SKILL.md` |
+| MCP server QA and package/runtime handoff | `.github/skills/mcp-server-qa/SKILL.md`, `iccdev-mcp/docs/build-and-test.md` |
 | WASM build tests | `.github/skills/wasm-build-test/SKILL.md` |
 | MCP subprocess debug | `.github/prompts/debug-mcp-subprocess.prompt.md` |
 | Python/Cython debug | `.github/prompts/debug-python-bindings.prompt.md` |
@@ -155,7 +179,7 @@ The official ClusterFuzzLite lane builds all eight in-process targets above.
 Keep its `address`, `undefined`, and `memory` builds separate, pass all compiler
 and linker instrumentation through the OSS-Fuzz environment, require matching
 Clang 21 or 22 compilers across AFL, CFL, and ClusterFuzzLite, and keep the
-workflow manual plus branch-push-only until maintainers broaden that policy.
+workflow limited to manual dispatch and the nightly schedule.
 The ClusterFuzzLite memory build must bootstrap the pinned instrumented libc++
 and libc++abi, reject libstdc++ or another libc++ at runtime, and replay the
 pinned #2687 artifact before fuzzing. A report crossing an uninstrumented C++
@@ -165,7 +189,10 @@ Keep `cmmapply` controls outside the ICC header: an optional three-byte trailer
 selects direction, intent, and interpolation without corrupting the encoded
 profile size. Keep at least one schema-shaped IccConnect configuration seed in
 `.github/ci/test-data`, use the dedicated config dictionary, and preserve
-round-trip coverage for top-level and nested `CIccCfg*` objects.
+reset and non-reset round-trip coverage for top-level and nested `CIccCfg*`
+objects. Traverse a bounded set of later nested array elements directly, and
+leave the config input limit owned by the runner rather than duplicating it in
+the harness.
 
 Temporary CFL MSan workarounds live as individual issue patches under
 `.github/ci/fuzz-patches/cfl`. The default fuzz build attempts every patch and

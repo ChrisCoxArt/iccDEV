@@ -82,8 +82,7 @@ function(iccdev_add_regression_executable TARGET_NAME)
   add_dependencies(build-test-binaries "${TARGET_NAME}")
 endfunction()
 
-# Native extraction safety must run on Windows as well as Unix, without the
-# optional Nokia reader or the bash-backed carrier suite.
+# Native extraction safety must run on Windows as well as Unix.
 if(TARGET iccHeifDump)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
@@ -91,7 +90,7 @@ if(TARGET iccHeifDump)
       COMMAND "${Python3_EXECUTABLE}"
         "${ICCDEV_REPO_ROOT}/.github/scripts/test_heif_output_safety.py"
         --tool "$<TARGET_FILE:iccHeifDump>"
-        --corpus "${ICCDEV_REPO_ROOT}/.github/ci/tooling/heif/img")
+        --corpus "${ICCDEV_REPO_ROOT}/.github/ci/test-data/heif")
     set_tests_properties(iccdev.heif-output-safety PROPERTIES
       TIMEOUT 120
       LABELS "iccdev;heif;image;regression;issue-2831")
@@ -469,6 +468,53 @@ function(iccdev_add_clut_avx512_sixteen_output_test)
   )
 endfunction()
 
+function(iccdev_add_iccconnect_htos_selector_test)
+  # Reads a profile generated from Testing/HDR by iccFromXml.
+  if(NOT DEFINED TARGET_LIB_ICCCONNECT OR NOT TARGET "${TARGET_LIB_ICCCONNECT}" OR
+     NOT TARGET iccFromXml)
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccConnectHToSSelectorTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/iccconnect-htos-selector.cpp"
+  )
+  target_compile_features(iccConnectHToSSelectorTest PRIVATE cxx_std_17)
+  target_link_libraries(iccConnectHToSSelectorTest PRIVATE ${TARGET_LIB_ICCCONNECT})
+  add_dependencies(check iccConnectHToSSelectorTest)
+
+  if(WIN32)
+    set(_htos_profile_root "${ICCDEV_TEST_OUTDIR}/windows-testing")
+  else()
+    set(_htos_profile_root "${ICCDEV_TESTING_DIR}")
+  endif()
+
+  add_test(
+    NAME iccdev.iccconnect-htos-selector
+    COMMAND "$<TARGET_FILE:iccConnectHToSSelectorTest>"
+      "${_htos_profile_root}/HDR/BT2100PQNarrowScene.icc"
+      "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+  )
+  set_tests_properties(iccdev.iccconnect-htos-selector PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccconnect;hdr;iccmax;issue-2981;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+  if(WIN32)
+    set(_htos_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccConnectHToSSelectorTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCCONNECT}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _htos_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.iccconnect-htos-selector PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_htos_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 function(iccdev_add_iccconnect_config_parser_test)
   if(NOT DEFINED TARGET_LIB_ICCCONNECT OR NOT TARGET "${TARGET_LIB_ICCCONNECT}")
     return()
@@ -499,7 +545,7 @@ function(iccdev_add_iccconnect_config_parser_test)
   set_tests_properties(iccdev.iccconnect-config-parser PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
     TIMEOUT 60
-    LABELS "iccdev;iccconnect;config;cli;json;regression"
+    LABELS "iccdev;iccconnect;config;cli;json;issue-2982;regression"
   )
   if(WIN32)
     set(_iccconnect_config_windows_env_mods
@@ -532,14 +578,22 @@ function(iccdev_add_createsearch_embedded_profile_test)
 
   # sRGB_D65_MAT.icc is a tracked v5 matrix/TRC profile, so a profile->itself
   # search converges quickly and the run stays well inside the timeout below.
+  # The same helper also inspects the initialized search CMM to keep
+  # searchApply.initial.interpolation distinct from the final profile setting
+  # (#2978); that assertion needs no interpolation-sensitive fixture.
+  # The same helper inspects the initialized destination sub-chain to prove
+  # searchApply.initial.adjustPcsLuminance reaches its xform hint (#2979).
   set(_createsearch_embedded_profile
     "${ICCDEV_TESTING_DIR}/ApplyDataFiles/test-profiles/sRGB_D65_MAT.icc")
+  set(_createsearch_bpc_profile
+    "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc")
 
   if(WIN32)
     add_test(
       NAME iccdev.createsearch-embedded-profile
       COMMAND "$<TARGET_FILE:iccCreateSearchEmbeddedProfileTest>"
         "${_createsearch_embedded_profile}"
+        "${_createsearch_bpc_profile}"
     )
   else()
     add_test(
@@ -549,6 +603,7 @@ function(iccdev_add_createsearch_embedded_profile_test)
         ${ICCDEV_TEST_ENV}
         "$<TARGET_FILE:iccCreateSearchEmbeddedProfileTest>"
         "${_createsearch_embedded_profile}"
+        "${_createsearch_bpc_profile}"
     )
   endif()
   # A Nelder-Mead search runs per sample and the helper drives five chains
@@ -558,7 +613,7 @@ function(iccdev_add_createsearch_embedded_profile_test)
   set_tests_properties(iccdev.createsearch-embedded-profile PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
     TIMEOUT 300
-    LABELS "iccdev;iccconnect;cmmsearch;embedded;regression"
+    LABELS "iccdev;iccconnect;cmmsearch;embedded;issue-2978;issue-2979;issue-2980;regression"
   )
   if(WIN32)
     set(_createsearch_embedded_windows_env_mods
@@ -572,6 +627,53 @@ function(iccdev_add_createsearch_embedded_profile_test)
     endforeach()
     set_tests_properties(iccdev.createsearch-embedded-profile PROPERTIES
       ENVIRONMENT_MODIFICATION "${_createsearch_embedded_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_cmm_htos_selection_test)
+  # Reads a profile generated from Testing/HDR by iccFromXml.
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}" OR NOT TARGET iccFromXml)
+    return()
+  endif()
+
+  # ICC.2:2023 8.14.2 / 8.14.3 HDR-to-SDR tag selection (#2983, #2984).
+  iccdev_add_regression_executable(iccCmmHToSSelectionTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/cmm-htos-selection.cpp"
+  )
+  target_compile_features(iccCmmHToSSelectionTest PRIVATE cxx_std_17)
+  target_link_libraries(iccCmmHToSSelectionTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccCmmHToSSelectionTest)
+
+  if(WIN32)
+    set(_htos_selection_profile_root "${ICCDEV_TEST_OUTDIR}/windows-testing")
+  else()
+    set(_htos_selection_profile_root "${ICCDEV_TESTING_DIR}")
+  endif()
+
+  add_test(
+    NAME iccdev.cmm-htos-selection
+    COMMAND "$<TARGET_FILE:iccCmmHToSSelectionTest>"
+      "${_htos_selection_profile_root}/HDR/BT2100PQNarrowScene.icc"
+      "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+  )
+  set_tests_properties(iccdev.cmm-htos-selection PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;iccprofLib;hdr;iccmax;issue-2983;issue-2984;regression"
+    FIXTURES_REQUIRED iccdev_profiles
+  )
+  if(WIN32)
+    set(_htos_selection_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccCmmHToSSelectionTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _htos_selection_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.cmm-htos-selection PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_htos_selection_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -1656,6 +1758,146 @@ function(iccdev_add_mpecalc_matrix_overflow_test)
   endif()
 endfunction()
 
+function(iccdev_add_sparsematrix_array_copy_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccSparseMatrixArrayCopyTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/sparsematrix-array-copy.cpp"
+  )
+  target_link_libraries(iccSparseMatrixArrayCopyTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccSparseMatrixArrayCopyTest)
+
+  add_test(
+    NAME iccdev.sparsematrix-array-copy
+    COMMAND "$<TARGET_FILE:iccSparseMatrixArrayCopyTest>"
+  )
+  set_tests_properties(iccdev.sparsematrix-array-copy PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 25
+    LABELS "iccdev;sparsematrix;copy;roundtrip;regression"
+  )
+  if(WIN32)
+    set(_sparsematrix_copy_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccSparseMatrixArrayCopyTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _sparsematrix_copy_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.sparsematrix-array-copy PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_sparsematrix_copy_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_clut_describe_bounds_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccClutDescribeBoundsTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/clut-describe-bounds.cpp"
+  )
+  target_link_libraries(iccClutDescribeBoundsTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccClutDescribeBoundsTest)
+
+  add_test(
+    NAME iccdev.clut-describe-bounds
+    COMMAND "$<TARGET_FILE:iccClutDescribeBoundsTest>"
+  )
+  set_tests_properties(iccdev.clut-describe-bounds PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 25
+    LABELS "iccdev;clut;describe;bounds;regression"
+  )
+  if(WIN32)
+    set(_clut_describe_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccClutDescribeBoundsTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _clut_describe_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.clut-describe-bounds PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_clut_describe_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_profile_flags_name_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccProfileFlagsNameTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/profile-flags-name.cpp"
+  )
+  target_link_libraries(iccProfileFlagsNameTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccProfileFlagsNameTest)
+
+  add_test(
+    NAME iccdev.profile-flags-name
+    COMMAND "$<TARGET_FILE:iccProfileFlagsNameTest>"
+  )
+  set_tests_properties(iccdev.profile-flags-name PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 25
+    LABELS "iccdev;profile;flags;regression"
+  )
+  if(WIN32)
+    set(_profile_flags_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccProfileFlagsNameTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _profile_flags_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.profile-flags-name PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_profile_flags_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_namedcolor_array_default_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccNamedColorArrayDefaultTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/namedcolor-array-default.cpp"
+  )
+  target_link_libraries(iccNamedColorArrayDefaultTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccNamedColorArrayDefaultTest)
+
+  add_test(
+    NAME iccdev.namedcolor-array-default
+    COMMAND "$<TARGET_FILE:iccNamedColorArrayDefaultTest>"
+  )
+  set_tests_properties(iccdev.namedcolor-array-default PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 25
+    LABELS "iccdev;namedcolor;array;regression"
+  )
+  if(WIN32)
+    set(_namedcolor_array_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccNamedColorArrayDefaultTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _namedcolor_array_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.namedcolor-array-default PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_namedcolor_array_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
 # Guards CIccSparseMatrixUInt8::set / CIccSparseMatrixUInt16::set in IccSparseMatrix.h
 # (alerts #1061, #2260): (1) the clamp is NaN-safe -- `!(value > 0.0) ? 0` routes NaN
 # and value<=0 to 0 before the float->int cast, where the old `value < 0.0` test let a
@@ -2675,6 +2917,141 @@ function(iccdev_add_xml_lut_curve_count_test)
     endforeach()
     set_tests_properties(iccdev.xml-lut-curve-count PROPERTIES
       ENVIRONMENT_MODIFICATION "${_xml_lut_curve_count_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_responsecurve_write_count_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccResponseCurveWriteCountTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/responsecurve-write-count.cpp"
+  )
+  target_compile_features(iccResponseCurveWriteCountTest PRIVATE cxx_std_17)
+  target_link_libraries(iccResponseCurveWriteCountTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+
+  add_test(
+    NAME iccdev.responsecurve-write-count
+    COMMAND "$<TARGET_FILE:iccResponseCurveWriteCountTest>"
+  )
+  set_tests_properties(iccdev.responsecurve-write-count PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofLib;responsecurve;security;regression"
+  )
+  if(WIN32)
+    set(_responsecurve_write_count_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccResponseCurveWriteCountTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _responsecurve_write_count_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.responsecurve-write-count PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_responsecurve_write_count_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_lut_read_reuse_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccLutReadReuseTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/lut-read-reuse.cpp"
+  )
+  target_compile_features(iccLutReadReuseTest PRIVATE cxx_std_17)
+  target_link_libraries(iccLutReadReuseTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+
+  add_test(
+    NAME iccdev.lut-read-reuse
+    COMMAND "$<TARGET_FILE:iccLutReadReuseTest>"
+  )
+  set_tests_properties(iccdev.lut-read-reuse PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 60
+    LABELS "iccdev;iccprofLib;lut;issue-3012;issue-3014;regression"
+  )
+  if(WIN32)
+    set(_lut_read_reuse_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccLutReadReuseTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _lut_read_reuse_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.lut-read-reuse PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_lut_read_reuse_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_lut_stage_combinations_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccLutStageCombinationsTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/lut-stage-combinations.cpp"
+  )
+  target_link_libraries(iccLutStageCombinationsTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccLutStageCombinationsTest)
+
+  add_test(
+    NAME iccdev.lut-stage-combinations
+    COMMAND "$<TARGET_FILE:iccLutStageCombinationsTest>"
+  )
+  set_tests_properties(iccdev.lut-stage-combinations PROPERTIES
+    TIMEOUT 60
+    LABELS "iccdev;validation;lut;issue-2972;regression"
+  )
+  if(WIN32)
+    set(_lut_stage_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccLutStageCombinationsTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _lut_stage_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.lut-stage-combinations PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_lut_stage_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+function(iccdev_add_tag_count_contract_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccTagCountContractTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/tag-count-contract.cpp"
+  )
+  target_link_libraries(iccTagCountContractTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccTagCountContractTest)
+  add_test(NAME iccdev.tag-count-contract
+    COMMAND "$<TARGET_FILE:iccTagCountContractTest>")
+  set_tests_properties(iccdev.tag-count-contract PROPERTIES
+    TIMEOUT 120
+    LABELS "iccdev;security;tag;count;regression"
+  )
+  if(WIN32)
+    set(_tag_count_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccTagCountContractTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _tag_count_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.tag-count-contract PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_tag_count_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -4186,7 +4563,7 @@ function(iccdev_add_sparsematrix_union_validate_test)
   set_tests_properties(iccdev.sparsematrix-union-validate PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
     TIMEOUT 60
-    LABELS "iccdev;security;sparsematrix;cwe-835;regression"
+    LABELS "iccdev;security;sparsematrix;cwe-835;issue-2991;regression"
   )
   if(WIN32)
     set(_sparse_union_windows_env_mods
@@ -5181,6 +5558,46 @@ function(iccdev_add_unsupported_profile_class_test)
     endforeach()
     set_tests_properties(iccdev.unsupported-profile-class-status PROPERTIES
       ENVIRONMENT_MODIFICATION "${_unsupclass_windows_env_mods}"
+    )
+  endif()
+endfunction()
+
+# Issue #2973: CIccEvalCompare accepted the ICC.2 16-channel device-space boundary but stored
+# the sampled device pixel in a 15-element stack array.  A library caller using
+# nGran=2 stayed below the independent sample-count cap and wrote element 15 on
+# all 65,536 nodes.  Build the 15-channel reach control, 16-channel boundary,
+# and 17-channel refusal in memory; sanitizer lanes make the old mismatch red.
+function(iccdev_add_eval_roundtrip_device_channel_bound_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccEvalRoundtripDeviceChannelBoundTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/eval-roundtrip-device-channel-bound.cpp"
+  )
+  target_link_libraries(iccEvalRoundtripDeviceChannelBoundTest PRIVATE ${TARGET_LIB_ICCPROFLIB})
+  add_dependencies(check iccEvalRoundtripDeviceChannelBoundTest)
+
+  add_test(
+    NAME iccdev.eval-roundtrip-device-channel-bound
+    COMMAND "$<TARGET_FILE:iccEvalRoundtripDeviceChannelBoundTest>"
+  )
+  set_tests_properties(iccdev.eval-roundtrip-device-channel-bound PROPERTIES
+    WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+    TIMEOUT 120
+    LABELS "iccdev;cmm;eval;roundtrip;security;bounds;issue-2973;regression"
+  )
+  if(WIN32)
+    set(_eval_roundtrip_bound_windows_env_mods
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:iccEvalRoundtripDeviceChannelBoundTest>"
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
+    )
+    foreach(_runtime_path IN LISTS ICCDEV_WINDOWS_RUNTIME_PATHS)
+      list(APPEND _eval_roundtrip_bound_windows_env_mods
+        "PATH=path_list_prepend:${_runtime_path}")
+    endforeach()
+    set_tests_properties(iccdev.eval-roundtrip-device-channel-bound PROPERTIES
+      ENVIRONMENT_MODIFICATION "${_eval_roundtrip_bound_windows_env_mods}"
     )
   endif()
 endfunction()
@@ -7843,6 +8260,53 @@ function(iccdev_add_json_namedcolor_colorspaces_test)
     endforeach()
     set_tests_properties(iccdev.json-namedcolor-colorspaces PROPERTIES
       ENVIRONMENT_MODIFICATION "${_json_nmcl_cs_env_mods}"
+    )
+  endif()
+endfunction()
+
+# #2975: the pos<0 / pos>1 clamps in three tag-array Interpolate()
+# implementations are both false for NaN, which then reached an undefined
+# float-to-unsigned conversion (CodeQL alerts 1086-1088 were dismissed on the
+# clamp). NaN now takes the position-0 result, as CIccTagFloatNum already did.
+function(iccdev_add_tag_interpolate_nonfinite_test)
+  if(NOT TARGET "${TARGET_LIB_ICCPROFLIB}")
+    return()
+  endif()
+
+  iccdev_add_regression_executable(iccTagInterpolateNonfiniteTest
+    "${ICCDEV_REPO_ROOT}/.github/ci/regression/tag-interpolate-nonfinite.cpp"
+  )
+  target_compile_features(iccTagInterpolateNonfiniteTest PRIVATE cxx_std_17)
+  target_include_directories(iccTagInterpolateNonfiniteTest PRIVATE
+    "${ICCDEV_REPO_ROOT}/IccProfLib"
+  )
+  target_link_libraries(iccTagInterpolateNonfiniteTest PRIVATE
+    ${TARGET_LIB_ICCPROFLIB}
+  )
+  add_dependencies(check iccTagInterpolateNonfiniteTest)
+
+  if(WIN32)
+    add_test(
+      NAME iccdev.tag-interpolate-nonfinite
+      COMMAND "$<TARGET_FILE:iccTagInterpolateNonfiniteTest>"
+    )
+  else()
+    add_test(
+      NAME iccdev.tag-interpolate-nonfinite
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        ${ICCDEV_TEST_ENV}
+        "$<TARGET_FILE:iccTagInterpolateNonfiniteTest>"
+    )
+  endif()
+  set_tests_properties(iccdev.tag-interpolate-nonfinite PROPERTIES
+    TIMEOUT 30
+    LABELS "iccdev;tag;interpolate;ubsan;codeql;regression"
+  )
+  if(WIN32)
+    set_tests_properties(iccdev.tag-interpolate-nonfinite PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:${TARGET_LIB_ICCPROFLIB}>"
     )
   endif()
 endfunction()
@@ -10926,6 +11390,7 @@ function(iccdev_add_installed_package_consumer_test)
       "-DICCDEV_HAVE_SHARED=${ENABLE_SHARED_LIBS}"
       "-DICCDEV_HAVE_JSON=${_have_json}"
       "-DICCDEV_HAVE_CONNECT=${_have_connect}"
+      "-DICCDEV_EXPECTED_PACKAGE_VERSION=${REFICCMAX_VERSION}"
       -P "${CMAKE_CURRENT_LIST_DIR}/RunInstalledPackageConsumerTest.cmake"
   )
   # Generous because the test performs three nested configure+build cycles on
@@ -11803,12 +12268,15 @@ function(iccdev_add_windows_iccdevcmm_smoke_test)
 
   add_dependencies(check iccDEVCmmSmokeTest RefIccMAX)
 
+  # Generated from Testing/Named/NamedColorV4.xml; a checked-in ICC keeps this
+  # DLL smoke independent of the XML converter and its optional dependencies.
   add_test(
     NAME iccdev.windows-iccdevcmm-smoke
     COMMAND
       "$<TARGET_FILE:iccDEVCmmSmokeTest>"
       "$<TARGET_FILE:RefIccMAX>"
       "${ICCDEV_TESTING_DIR}/sRGB_v4_ICC_preference.icc"
+      "${ICCDEV_REPO_ROOT}/.github/ci/test-data/cmm-namedcolor-v4.icc"
   )
   set_tests_properties(iccdev.windows-iccdevcmm-smoke PROPERTIES
     WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
@@ -11828,6 +12296,59 @@ function(iccdev_add_windows_iccdevcmm_smoke_test)
   set_tests_properties(iccdev.windows-iccdevcmm-smoke PROPERTIES
     ENVIRONMENT_MODIFICATION "${_iccdevcmm_windows_env_mods}"
   )
+
+  # Install only the CMM and its core library into an isolated prefix. This
+  # catches a missing vcpkg zlib DLL even when the optional IIS target would
+  # otherwise copy every vcpkg DLL into a full runtime package.
+  if(ENABLE_INSTALL_RIM AND ENABLE_SHARED_LIBS AND ICC_USE_ZLIB
+     AND VCPKG_TARGET_TRIPLET AND ZLIB_LIBRARY_RELEASE
+     AND NOT IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}"
+     AND NOT IS_ABSOLUTE "${CMAKE_INSTALL_DOCDIR}")
+    set(_iccdevcmm_vcpkg_installed "${VCPKG_INSTALLED_DIR}")
+    if(NOT _iccdevcmm_vcpkg_installed)
+      set(_iccdevcmm_vcpkg_installed "${_VCPKG_INSTALLED_DIR}")
+    endif()
+    get_filename_component(_iccdevcmm_zlib_name
+      "${ZLIB_LIBRARY_RELEASE}" NAME_WE)
+    set(_iccdevcmm_zlib_dll
+      "${_iccdevcmm_vcpkg_installed}/${VCPKG_TARGET_TRIPLET}/bin/${_iccdevcmm_zlib_name}.dll")
+    if(_iccdevcmm_vcpkg_installed AND EXISTS "${_iccdevcmm_zlib_dll}")
+      add_test(
+        NAME iccdev.windows-iccdevcmm-runtime-install
+        CONFIGURATIONS Release
+        COMMAND "${CMAKE_COMMAND}"
+          "-DICCDEV_CMM_PACKAGE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+          "-DICCDEV_CMM_PACKAGE_SMOKE=$<TARGET_FILE:iccDEVCmmSmokeTest>"
+          "-DICCDEV_CMM_PACKAGE_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          "-DICCDEV_CMM_PACKAGE_BINDIR=${CMAKE_INSTALL_BINDIR}"
+          "-DICCDEV_CMM_PACKAGE_DOCDIR=${CMAKE_INSTALL_DOCDIR}"
+          "-DICCDEV_CMM_PACKAGE_COMPONENT=${ICCDEV_RUNTIME_COMPONENT}"
+          "-DICCDEV_CMM_PACKAGE_ZLIB_DLL=${_iccdevcmm_zlib_name}.dll"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunWindowsCmmPackageInstallTest.cmake"
+      )
+      set_tests_properties(iccdev.windows-iccdevcmm-runtime-install PROPERTIES
+        WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+        TIMEOUT 60
+        LABELS "iccdev;windows;cmm;runtime-package;vcpkg;regression"
+      )
+      if(TARGET iccIisIsapi)
+        add_test(
+          NAME iccdev.windows-iccdevcmm-iis-runtime-manifest
+          CONFIGURATIONS Release
+          COMMAND "${CMAKE_COMMAND}"
+            "-DICCDEV_CMM_IIS_BUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-DICCDEV_CMM_IIS_BINDIR=${CMAKE_INSTALL_BINDIR}"
+            "-DICCDEV_CMM_IIS_ZLIB_DLL=${_iccdevcmm_zlib_name}.dll"
+            -P "${CMAKE_CURRENT_LIST_DIR}/RunWindowsCmmIisRuntimeManifestTest.cmake"
+        )
+        set_tests_properties(iccdev.windows-iccdevcmm-iis-runtime-manifest PROPERTIES
+          WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
+          TIMEOUT 60
+          LABELS "iccdev;windows;cmm;iis;runtime-package;vcpkg;regression"
+        )
+      endif()
+    endif()
+  endif()
 endfunction()
 
 
@@ -11955,11 +12476,11 @@ endforeach()
 # registers the Windows test set and then return()s, so anything placed after it
 # never runs on Windows. This block handles WIN32 itself.
 #
-# Records; never asserts a timing threshold. Shared CI runners vary 20-30%
-# between runs on the same commit, so a threshold would flake without catching
-# anything a local run would not. The test fails on a real defect: a checksum
-# that moved between thread counts, a second Begin() that changed the output,
-# or -- since #2254 -- a run in which no case was measured at all.
+# Exercises every built-in chain with a small workload and checks every CSV row;
+# never asserts a timing threshold. Shared CI runners vary 20-30% between runs
+# on the same commit. The test fails on a real defect: a missing/skipped case,
+# a checksum that moved between thread counts, a second Begin() that changed
+# the output, or -- since #2254 -- a run in which no case was measured at all.
 #
 # That last clause is the anti-vacuity guard, and it is not theoretical. Before
 # #2254 the tool exited 0 after printing "0 case(s) measured, 9 skipped", so
@@ -11969,9 +12490,8 @@ endforeach()
 # failure, so a regression that restores the old exit status turns that test
 # red rather than quietly re-hollowing this one.
 #
-# The 'slow' label puts it on the existing opt-out path rather than inventing
-# one: check-fast excludes 'slow' while check excludes only 'known-red', so the
-# full suite runs it and the fast loop does not.
+# The 8192-pixel, one-repeat CTest is a correctness smoke. Longer throughput
+# measurements remain available through iccBenchApply -suite outside CTest.
 #
 # ENVIRONMENT hands the tool both profile roots. iccdev.create-profiles writes
 # generated profiles into the source tree while iccdev.windows-create-profiles
@@ -12045,7 +12565,10 @@ if(TARGET iccBenchApply)
     if(WIN32)
       add_test(
         NAME iccdev.apply-throughput
-        COMMAND "$<TARGET_FILE:iccBenchApply>" -suite -csv -pixels 65536 -repeats 3
+        COMMAND "${CMAKE_COMMAND}"
+          "-DICCDEV_BENCH_APPLY=$<TARGET_FILE:iccBenchApply>"
+          "-DICCDEV_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplySuite.cmake"
       )
     else()
       add_test(
@@ -12053,14 +12576,17 @@ if(TARGET iccBenchApply)
         COMMAND
           "${CMAKE_COMMAND}" -E env
           ${ICCDEV_TEST_ENV}
-          "$<TARGET_FILE:iccBenchApply>" -suite -csv -pixels 65536 -repeats 3
+          "${CMAKE_COMMAND}"
+          "-DICCDEV_BENCH_APPLY=$<TARGET_FILE:iccBenchApply>"
+          "-DICCDEV_REPO_ROOT=${ICCDEV_REPO_ROOT}"
+          -P "${CMAKE_CURRENT_LIST_DIR}/RunBenchApplySuite.cmake"
       )
     endif()
 
     set_tests_properties(iccdev.apply-throughput PROPERTIES
       WORKING_DIRECTORY "${ICCDEV_REPO_ROOT}"
-      TIMEOUT 300
-      LABELS "iccdev;iccprofLib;benchmark;throughput;slow"
+      TIMEOUT 120
+      LABELS "iccdev;iccprofLib;benchmark;throughput;regression"
       FIXTURES_REQUIRED iccdev_profiles
       ENVIRONMENT "ICCDEV_BENCH_SOURCE_ROOT=${ICCDEV_REPO_ROOT};ICCDEV_BENCH_BUILD_ROOT=${ICCDEV_TEST_OUTDIR}/windows-testing"
     )
@@ -13125,9 +13651,11 @@ if(WIN32)
   endif()
 
   iccdev_add_iccconnect_thread_test()
+  iccdev_add_iccconnect_htos_selector_test()
   iccdev_add_clut_avx512_sixteen_output_test()
   iccdev_add_iccconnect_config_parser_test()
   iccdev_add_createsearch_embedded_profile_test()
+  iccdev_add_cmm_htos_selection_test()
   iccdev_add_mru_apply_ownership_test()
   iccdev_add_cmmsearch_init_pcc_test()
   iccdev_add_cmmsearch_rebegin_test()
@@ -13183,6 +13711,7 @@ if(WIN32)
   iccdev_add_struct_name_spelling_test()
   iccdev_add_mcs_colorspace_name_test()
   iccdev_add_signature_utils_contract_test()
+  iccdev_add_tag_count_contract_test()
   iccdev_add_utf8_converter_cursor_test()
   iccdev_add_console_sanitize_codepoint_test()
   iccdev_add_tiff_create_overflow_test()
@@ -13248,10 +13777,17 @@ if(WIN32)
   iccdev_add_mpecalc_matrix_overflow_test()
   iccdev_add_mpecalc_rotate_operand_test()
   iccdev_add_mpecalc_select_parse_leak_test()
+  # This Windows call list returns before the Unix call list below. Keep the
+  # cross-platform lint regressions registered on both sides of that return.
+  iccdev_add_sparsematrix_array_copy_test()
+  iccdev_add_clut_describe_bounds_test()
+  iccdev_add_profile_flags_name_test()
+  iccdev_add_namedcolor_array_default_test()
   iccdev_add_sparsematrix_set_roundtrip_test()
   iccdev_add_cmmsearch_namedcolor_ownership_test()
   iccdev_add_namedcolor_findcolor_suffix_underflow_test()
   iccdev_add_colorant_count_narrowing_json_test()
+  iccdev_add_tag_interpolate_nonfinite_test()
   iccdev_add_calculator_limits_test()
   iccdev_add_calculator_limits_json_test()
   iccdev_add_json_calculator_newcopy_test()
@@ -13307,6 +13843,9 @@ if(WIN32)
   iccdev_add_extended_device_colorspace_test()
   iccdev_add_xml_text_long_roundtrip_test()
   iccdev_add_xml_lut_curve_count_test()
+  iccdev_add_responsecurve_write_count_test()
+  iccdev_add_lut_read_reuse_test()
+  iccdev_add_lut_stage_combinations_test()
   iccdev_add_hex_data_malformed_xml_test()
   iccdev_add_xml_strict_numeric_attrs_test()
   iccdev_add_hex_data_malformed_json_test()
@@ -13317,6 +13856,7 @@ if(WIN32)
   iccdev_add_xml_float_significant_digits_test()
   iccdev_add_tonemap_write_many_outputs_test()
   iccdev_add_unsupported_profile_class_test()
+  iccdev_add_eval_roundtrip_device_channel_bound_test()
   iccdev_add_pcs_adjust_status_test()
   iccdev_add_dpcc_pcc_replacement_test()
   iccdev_add_pcs_xyzconvert_matrix_channels_test()
@@ -13517,6 +14057,13 @@ fi
 duration=$1
 shift
 
+# Accept the explicit seconds suffix supported by GNU timeout.  Several test
+# harnesses use it, while macOS reaches this compatibility wrapper because it
+# provides neither timeout nor gtimeout by default.
+case "$duration" in
+  *s) duration=${duration%s} ;;
+esac
+
 case "$duration" in
   ''|*[!0-9.]*)
     echo "timeout: invalid duration '$duration'" >&2
@@ -13531,20 +14078,37 @@ rm -f "$timed_out"
 pid=$!
 
 (
-  sleep "$duration"
+  sleeper=""
+  stop_watcher() {
+    if [ -n "$sleeper" ]; then
+      kill "$sleeper" >/dev/null 2>&1 || true
+      wait "$sleeper" 2>/dev/null || true
+    fi
+    exit 0
+  }
+  trap stop_watcher HUP INT TERM
+
+  sleep "$duration" &
+  sleeper=$!
+  wait "$sleeper" 2>/dev/null || exit 0
+  sleeper=""
+
   if kill -0 "$pid" >/dev/null 2>&1; then
     : > "$timed_out"
     kill -TERM "$pid" >/dev/null 2>&1 || true
-    sleep 2
+    sleep 2 &
+    sleeper=$!
+    wait "$sleeper" 2>/dev/null || exit 0
+    sleeper=""
     kill -KILL "$pid" >/dev/null 2>&1 || true
   fi
-) &
+) >/dev/null 2>&1 &
 watcher=$!
 
 wait "$pid"
 status=$?
 
-kill "$watcher" >/dev/null 2>&1 || true
+kill -TERM "$watcher" >/dev/null 2>&1 || true
 wait "$watcher" 2>/dev/null || true
 
 if [ -e "$timed_out" ]; then
@@ -13651,6 +14215,13 @@ if(NOT WIN32)
   endif()
 endif()
 
+set(ICCDEV_TEST_PROFILE_ENV "LLVM_PROFILE_FILE=/dev/null")
+if(ENABLE_COVERAGE)
+  # Coverage callers own the bounded profile pool destination. Leaving this
+  # unset here preserves LLVM_PROFILE_FILE through cmake -E env at test time.
+  set(ICCDEV_TEST_PROFILE_ENV)
+endif()
+
 set(ICCDEV_TEST_ENV
   "PATH=${ICCDEV_TOOL_PATH}:$ENV{PATH}"
   "LD_LIBRARY_PATH=${ICCDEV_SHARED_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}"
@@ -13675,7 +14246,7 @@ set(ICCDEV_TEST_ENV
   # carry their own -g DWARF, and debuginfod only ever supplied *system*
   # library debug info - while removing the network dependency from every test.
   "DEBUGINFOD_URLS="
-  "LLVM_PROFILE_FILE=/dev/null"
+  ${ICCDEV_TEST_PROFILE_ENV}
   "ICCDEV_TOOLS_DIR=${ICCDEV_TOOLS_DIR}"
   "ICCDEV_TESTING_DIR=${ICCDEV_TESTING_DIR}"
   "ICCDEV_BUILD_DIR=${ICCDEV_SCRIPT_BUILD_DIR}"
@@ -13687,10 +14258,12 @@ set(ICCDEV_TEST_ENV
 )
 
 iccdev_add_iccconnect_thread_test()
+iccdev_add_iccconnect_htos_selector_test()
 iccdev_add_taint_trace_memory_state_probe()
 iccdev_add_clut_avx512_sixteen_output_test()
 iccdev_add_iccconnect_config_parser_test()
 iccdev_add_createsearch_embedded_profile_test()
+iccdev_add_cmm_htos_selection_test()
 iccdev_add_mru_apply_ownership_test()
 iccdev_add_cmmsearch_init_pcc_test()
 iccdev_add_cmmsearch_rebegin_test()
@@ -13744,6 +14317,7 @@ iccdev_add_mlnk_header_test()
 iccdev_add_struct_name_spelling_test()
 iccdev_add_mcs_colorspace_name_test()
 iccdev_add_signature_utils_contract_test()
+iccdev_add_tag_count_contract_test()
 iccdev_add_utf8_converter_cursor_test()
 iccdev_add_console_sanitize_codepoint_test()
 iccdev_add_tiff_create_overflow_test()
@@ -13798,10 +14372,15 @@ iccdev_add_cmm_registry_allowlist_test()
 iccdev_add_mpecalc_matrix_overflow_test()
 iccdev_add_mpecalc_rotate_operand_test()
 iccdev_add_mpecalc_select_parse_leak_test()
+iccdev_add_sparsematrix_array_copy_test()
+iccdev_add_clut_describe_bounds_test()
+iccdev_add_profile_flags_name_test()
+iccdev_add_namedcolor_array_default_test()
 iccdev_add_sparsematrix_set_roundtrip_test()
 iccdev_add_cmmsearch_namedcolor_ownership_test()
 iccdev_add_namedcolor_findcolor_suffix_underflow_test()
 iccdev_add_colorant_count_narrowing_json_test()
+iccdev_add_tag_interpolate_nonfinite_test()
 iccdev_add_calculator_limits_test()
 iccdev_add_calculator_limits_json_test()
 iccdev_add_json_calculator_newcopy_test()
@@ -13868,6 +14447,9 @@ iccdev_add_utf8_textarray_test()
 iccdev_add_extended_device_colorspace_test()
 iccdev_add_xml_text_long_roundtrip_test()
 iccdev_add_xml_lut_curve_count_test()
+iccdev_add_responsecurve_write_count_test()
+iccdev_add_lut_read_reuse_test()
+iccdev_add_lut_stage_combinations_test()
 iccdev_add_hex_data_malformed_xml_test()
 iccdev_add_xml_strict_numeric_attrs_test()
 iccdev_add_hex_data_malformed_json_test()
@@ -13878,6 +14460,7 @@ iccdev_add_segmented_curve_bounds_json_test()
 iccdev_add_xml_float_significant_digits_test()
 iccdev_add_tonemap_write_many_outputs_test()
 iccdev_add_unsupported_profile_class_test()
+iccdev_add_eval_roundtrip_device_channel_bound_test()
 iccdev_add_pcs_adjust_status_test()
 iccdev_add_dpcc_pcc_replacement_test()
 iccdev_add_pcs_xyzconvert_matrix_channels_test()
@@ -13905,6 +14488,14 @@ function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
     return()
   endif()
 
+  # Optional CONFIGURATIONS restricts a script at CTest registration time,
+  # including single-config Release trees and multi-config Release invocations.
+  cmake_parse_arguments(PARSE_ARGV 5 _script "" "" "CONFIGURATIONS")
+  set(_script_config_args)
+  if(_script_CONFIGURATIONS)
+    list(APPEND _script_config_args CONFIGURATIONS ${_script_CONFIGURATIONS})
+  endif()
+
   string(REPLACE "." "-" _out_name "${NAME}")
   add_test(
     NAME "${NAME}"
@@ -13912,7 +14503,8 @@ function(iccdev_add_script_test NAME TIMEOUT LABELS WORKING_DIRECTORY SCRIPT)
       "${CMAKE_COMMAND}" -E env
       ${ICCDEV_TEST_ENV}
       "ICCDEV_TEST_OUTDIR=${ICCDEV_TEST_OUTDIR}/${_out_name}"
-      "${BASH_EXECUTABLE}" "${SCRIPT}" ${ARGN}
+      "${BASH_EXECUTABLE}" "${SCRIPT}" ${_script_UNPARSED_ARGUMENTS}
+    ${_script_config_args}
   )
   set_tests_properties("${NAME}" PROPERTIES
     WORKING_DIRECTORY "${WORKING_DIRECTORY}"
@@ -14651,16 +15243,29 @@ set_tests_properties(iccdev.issue-1982-dual-pcs-selection-regression PROPERTIES
   SKIP_RETURN_CODE 77
 )
 
-# CI debug helper for the NaN/SixChanInputRef iccApplyToLink PoC.  It preserves
-# the original master heap-buffer-overflow replay with extra signature/register
-# logging and now expects the NaN range to fail closed before CMM/LUT generation.
-iccdev_add_script_test(
-  iccdev.applytolink-nan-sixchan-debug
-  120
-  "iccdev;tools;cmm;applytolink;debug;asan;ubsan"
-  "${ICCDEV_REPO_ROOT}"
-  "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applytolink-nan-sixchan-debug.sh"
-)
+# The NaN range regression rejects invalid input before iccApplyToLink loads
+# the SixChanInputRef profile or enters CMM/LUT generation.
+# Keep it out of Release CTest discovery, including the comprehensive gate.
+# Single-config CTest does not pass -C, so configure it unconditionally only
+# in Debug trees; multi-config generators use add_test(CONFIGURATIONS Debug).
+if(ICCDEV_IS_MULTI_CONFIG OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_iccdev_debug_script_config_args)
+  if(ICCDEV_IS_MULTI_CONFIG)
+    list(APPEND _iccdev_debug_script_config_args CONFIGURATIONS Debug)
+  endif()
+  iccdev_add_script_test(
+    iccdev.applytolink-nan-sixchan-debug
+    120
+    "iccdev;tools;cmm;applytolink;debug;asan;ubsan"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applytolink-nan-sixchan-debug.sh"
+    ${_iccdev_debug_script_config_args}
+  )
+  # Report unavailable tools and non-ASan Debug builds as skips, not passes.
+  set_tests_properties(iccdev.applytolink-nan-sixchan-debug PROPERTIES
+    SKIP_RETURN_CODE 77
+  )
+endif()
 
 if(ICC_USE_ZLIB)
   set(_hextext_compression_mode "ON")
@@ -14844,6 +15449,21 @@ if(TARGET iccFromXml AND TARGET iccToXml AND TARGET iccApplyToLink)
   )
   set_tests_properties(iccdev.xml-parser-regressions PROPERTIES
     FIXTURES_REQUIRED iccdev_profiles
+  )
+endif()
+
+# Issue #2964: the file-backed SampledSegment and SingleSampledCurve readers must stop when
+# their sample table cannot be sized. The same Linux fault-injection DSO also
+# covers both CIccMpeXmlMatrix::ParseXml() SetSize() calls: full MatrixData and
+# the implicit zero-matrix form. The deterministic SingleSampledCurve cap runs
+# under every Unix tool build; allocator-failure cases are Linux-only.
+if(TARGET iccFromXml)
+  iccdev_add_script_test(
+    iccdev.xml-sampled-curve-setsize
+    120
+    "iccdev;xml;curve;setsize;allocation;issue-2964;regression"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-xml-sampled-curve-setsize-tests.sh"
   )
 endif()
 
@@ -15665,8 +16285,18 @@ if(TARGET iccApplySearch)
     "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applysearch-cli-args-regression.sh"
    )
   set_tests_properties(iccdev.applysearch-cli-args PROPERTIES
-    # The regression compares results from internal thread counts through 8.
-    # Keep that bounded workload from competing with another aggregate test.
+    # The routine regression activates at most two workers in one tool process.
+    PROCESSORS 2
+  )
+  iccdev_add_script_test(
+    iccdev.applysearch-cli-args-exhaustive
+    180
+    "iccdev;cmm;config;cli;security;issue-1674;issue-1853;issue-2190;regression;slow;pr-extended"
+    "${ICCDEV_REPO_ROOT}"
+    "${ICCDEV_REPO_ROOT}/.github/scripts/iccdev-applysearch-cli-args-regression.sh"
+    --exhaustive-thread-matrix
+  )
+  set_tests_properties(iccdev.applysearch-cli-args-exhaustive PROPERTIES
     PROCESSORS "${_iccdev_aggregate_ctest_processors}"
   )
 endif()

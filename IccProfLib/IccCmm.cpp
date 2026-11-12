@@ -441,6 +441,7 @@ CIccXform::CIccXform()
   m_nInterp = icInterpLinear;
   m_bUseD2BTags = false;
   m_bLuminanceMatching = false;
+  m_bUseHToS = true;
   m_PCSOffset[0] = m_PCSOffset[1] = m_PCSOffset[2] = 0;
 }
 
@@ -1448,6 +1449,7 @@ void CIccXform::SetParams(CIccProfile *pProfile, bool bInput, icRenderingIntent 
   m_bAbsToRel = bAbsToRel;
   m_nMCS = nMCS;
   m_bLuminanceMatching = false;
+  m_bUseHToS = true;
 
   // m_pProfile, m_bInput and m_bUseSpectralPCS above are exactly the fields
   // the base GetSrcSpace()/GetDstSpace() compute from (m_bGamutXform and
@@ -1474,6 +1476,12 @@ void CIccXform::SetParams(CIccProfile *pProfile, bool bInput, icRenderingIntent 
     pHint = pHintManager->GetHint("CIccLuminanceMatchingHint");
     if (pHint) {
       m_bLuminanceMatching = true;
+    }
+
+    pHint = pHintManager->GetHint("CIccUseHToSHint");
+    if (pHint) {
+      CIccUseHToSHint *pHToSHint = (CIccUseHToSHint*)pHint;
+      m_bUseHToS = pHToSHint->UseHToS();
     }
   }
 }
@@ -1634,10 +1642,12 @@ icStatusCMM CIccXform::Begin()
   }
 
 	// set up for any needed PCS adjustment
+  // Compare the values used below to calculate the scale. Re-encoding them
+  // as s15Fixed16 can collapse a non-identity scale (#2885).
   if (bNeedAbsAdjust &&
-        (m_MediaXYZ.X != illXYZ.X ||
-        m_MediaXYZ.Y != illXYZ.Y ||
-        m_MediaXYZ.Z != illXYZ.Z)) {
+        (mediaXYZ[0] != illumXYZ[0] ||
+        mediaXYZ[1] != illumXYZ[1] ||
+        mediaXYZ[2] != illumXYZ[2])) {
 
     icColorSpaceSignature Space = m_pProfile->m_Header.pcs;
 
@@ -3705,7 +3715,8 @@ icStatusCMM CIccPcsXform::pushXYZNormalize(IIccProfileConnectionConditions *pPcc
 
   CIccApplyXform *pApply = tmp.GetNewApply(stat);
   if (pApply) {
-    icFloatNumber xyz[3], normxyz[3], pccxyz[3];
+    icFloatNumber xyz[3] = { 0.0f, 0.0f, 0.0f };
+    icFloatNumber normxyz[3], pccxyz[3];
     
     if (illuminantRange.steps < 3) {
       delete pApply;
@@ -9937,9 +9948,25 @@ icStatusCMM CIccCmm::AddXform(CIccProfile &Profile,
   icStatusCMM stat = AddXform(pProfile, nIntent, nInterp, pPcc, nLutType, bUseD2BxB2DxTags, pHintManager);
   // AddXform took ownership of the profile pointer, or deleted it if there was an error
   
-  if (stat == icCmmStatOk && savedClass != icSigColorEncodingClass)
+  if (stat == icCmmStatOk && savedClass != icSigColorEncodingClass) {
+    // Begin() looks for the HDR-to-SDR tags (ICC.2:2023 7.2.13, 8.14) only
+    // after this copy has let go of the borrowed IO, so read them now.
+    if (pProfile->m_Header.flags & icExtendedRangePCS) {
+      pProfile->FindTag(icSigHToS0Tag);
+      pProfile->FindTag(icSigHToS1Tag);
+      pProfile->FindTag(icSigHToS2Tag);
+      pProfile->FindTag(icSigHToS3Tag);
+    }
+    // A PCS adjustment such as BPC builds transforms from this profile in
+    // Begin() too. Read every tag that can be read; one that cannot is left
+    // for Begin() to report only if the adjustment actually needs it.
+    if (pHintManager && pHintManager->GetHint("CIccCreateAdjustPCSXformHint")) {
+      for (TagEntryList::iterator i = pProfile->m_Tags.begin(); i != pProfile->m_Tags.end(); i++)
+        pProfile->FindTag(*i);
+    }
     pProfile->CopyAttach(nullptr);
-    
+  }
+
   return stat;
 }
 
@@ -10145,15 +10172,25 @@ icStatusCMM CIccCmm::CheckPCSRangeConversions()
 
     for (; next != m_Xforms->end(); last = next, next++) {
       //Add extended PCS to standard PCS conversion as needed
-      if (last->ptr->IsInput() && last->ptr->IsExtendedPCS() && IsSpaceColorimetricPCS(last->ptr->GetDstSpace()) &&
+      if (last->ptr->UseHToS() && last->ptr->IsInput() &&
+        last->ptr->IsExtendedPCS() && IsSpaceColorimetricPCS(last->ptr->GetDstSpace()) &&
         !next->ptr->IsExtendedPCS()) {
         CIccProfile* pProfile = last->ptr->GetProfilePtr();
-        CIccTag* pTag = pProfile->FindTag(icSigHToS0Tag + last->ptr->GetIntent());
-        if (!pTag) {
+        CIccTag* pTag = NULL;
+        if (pProfile->m_Header.deviceClass == icSigAbstractClass) {
+          // ICC.2:2023 8.14.3: an abstract profile uses HdrToSdr0Tag only.
           pTag = pProfile->FindTag(icSigHToS0Tag);
-          if (!pTag) {
+        }
+        else {
+          // ICC.2:2023 8.14.2 and 8.14.7: the tag for the rendering intent,
+          // then HdrToSdr0Tag, HdrToSdr1Tag and HdrToSdr3Tag.
+          pTag = pProfile->FindTag(icSigHToS0Tag + last->ptr->GetIntent());
+          if (!pTag)
+            pTag = pProfile->FindTag(icSigHToS0Tag);
+          if (!pTag)
             pTag = pProfile->FindTag(icSigHToS1Tag);
-          }
+          if (!pTag)
+            pTag = pProfile->FindTag(icSigHToS3Tag);
         }
         //If we find the HToSxTag then create a transform for it and inject it into the transform list
         if (pTag) {

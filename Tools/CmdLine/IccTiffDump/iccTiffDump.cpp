@@ -47,7 +47,9 @@
 
 #include <cstdio>
 #include <cerrno>
+#include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include "IccCmm.h"
@@ -84,14 +86,20 @@ IdList planar_types[] = {
   {UNKNOWNID, "Unknown"},
 };
 
-IdList photo_types[] = {
-  {PHOTO_MINISWHITE, "Min Is White"},
-  {PHOTO_MINISBLACK, "Min Is Black"},
-  {PHOTO_CIELAB,     "CIELab"},
-  {PHOTO_ICCLAB,     "IccLab"},
-  {PHOTO_RGB,        "RGB"},
-  {PHOTO_PALETTE,    "Palette"},
-  {UNKNOWNID,        "Unknown"},
+IdList tiff_photo_types[] = {
+  {PHOTOMETRIC_MINISWHITE, "Min Is White"},
+  {PHOTOMETRIC_MINISBLACK, "Min Is Black"},
+  {PHOTOMETRIC_RGB,        "RGB"},
+  {PHOTOMETRIC_PALETTE,    "Palette"},
+  {PHOTOMETRIC_MASK,       "Transparency Mask"},
+  {PHOTOMETRIC_SEPARATED,  "Separated"},
+  {PHOTOMETRIC_YCBCR,      "YCbCr"},
+  {PHOTOMETRIC_CIELAB,     "CIELab"},
+  {PHOTOMETRIC_ICCLAB,     "ICCLab"},
+  {PHOTOMETRIC_ITULAB,     "ITU Lab"},
+  {PHOTOMETRIC_LOGL,       "LogL"},
+  {PHOTOMETRIC_LOGLUV,     "LogLuv"},
+  {UNKNOWNID,              "Unknown"},
 };
 
 // TIFFTAG_RESOLUTIONUNIT was never reported, so every image was printed as though its
@@ -119,6 +127,46 @@ const char* GetId(unsigned long nId, IdList* pIdList)
 {
   for (;pIdList->nId != nId && pIdList->nId != UNKNOWNID; pIdList++);
   return pIdList->szName;
+}
+
+// This single-threaded CLI counts diagnostics, forwarding through the shared
+// sanitized stderr handlers without relying on version-specific messages.
+static unsigned int g_tiffWarnings = 0;
+static unsigned int g_tiffErrors = 0;
+static TIFFErrorHandler g_previousTiffWarningHandler = NULL;
+static TIFFErrorHandler g_previousTiffErrorHandler = NULL;
+
+static void RecordTiffWarning(const char* module, const char* fmt, va_list ap)
+{
+  if (g_tiffWarnings < UINT_MAX)
+    g_tiffWarnings++;
+  if (g_previousTiffWarningHandler)
+    g_previousTiffWarningHandler(module, fmt, ap);
+}
+
+static void RecordTiffError(const char* module, const char* fmt, va_list ap)
+{
+  if (g_tiffErrors < UINT_MAX)
+    g_tiffErrors++;
+  if (g_previousTiffErrorHandler)
+    g_previousTiffErrorHandler(module, fmt, ap);
+}
+
+static void PrintTiffDiagnostics()
+{
+  if (g_tiffWarnings || g_tiffErrors) {
+    printf("TIFF diagnostics:  %u warning(s), %u error(s); see stderr\n",
+           g_tiffWarnings, g_tiffErrors);
+    printf("Metadata caveat:   libtiff may have ignored or repaired stored fields; "
+           "reported values are not a raw IFD dump\n");
+  }
+}
+
+static void EmitTiffDiagnosticsJson()
+{
+  printf("\"metadataSource\":\"libtiff\",\"tiffValidation\":\"not-performed\","
+         "\"tiffDiagnostics\":{\"warningCount\":%u,\"errorCount\":%u}",
+         g_tiffWarnings, g_tiffErrors);
 }
 
 static bool IsRegularOutputDestination(const char* szFname)
@@ -221,14 +269,19 @@ static bool WriteEmbeddedIccProfile(const char* szFname,
   return true;
 }
 
-void Usage()
+void Usage(FILE *stream)
 {
-  printf("iccTiffDump built with IccProfLib version " ICCPROFLIBVER "\n\n");
-  printf("Usage: iccTiffDump {--evidence-json} {--ifd N} {--list-directories} tiff_file {exported_icc_file}\n\n");
-  printf("IFD indexes are zero-based main-chain directories. Listing does not extract or validate ICC data.\n");
-  printf("Inspection is metadata-only; it does not assert pixel decoding or SVS compatibility.\n\n");
+  fprintf(stream, "iccTiffDump built with IccProfLib version " ICCPROFLIBVER "\n");
+  fprintf(stream, "libtiff: %s\n\n", icTiffRuntimeVersion().c_str());
+  fprintf(stream, "Usage: iccTiffDump {--evidence-json} {--ifd N} tiff_file {exported_icc_file}\n");
+  fprintf(stream, "       iccTiffDump {--evidence-json} --list-directories tiff_file\n\n");
+  fprintf(stream, "  --version prints tool and linked-library versions only.\n");
+  fprintf(stream, "IFD indexes are zero-based main-chain directories. Listing does not extract or validate ICC data.\n");
+  fprintf(stream, "Inspection is metadata-only; it does not assert pixel decoding or SVS compatibility.\n\n");
+  fprintf(stream, "Values reflect libtiff's interpretation, including defaults and repairs, not a raw IFD dump.\n");
+  fprintf(stream, "TIFF warnings/errors remain on stderr and are counted in reports; exit 0 does not validate the TIFF.\n\n");
 #ifdef ICCDEV_TELEMETRY
-  CIccTiffTelemetry::Help(stdout);
+  CIccTiffTelemetry::Help(stream);
 #endif
 }
 
@@ -270,6 +323,8 @@ static void EmitWriteEvidenceJson(const char* tiffPath, const char* outputPath,
   printf("{");
   printf("\"schema\":\"iccdev-qa-evidence/v1\",");
   printf("\"tool\":\"iccTiffDump\",");
+  EmitTiffDiagnosticsJson();
+  printf(",");
   printf("\"input\":\"%s\",", icJsonEscape(tiffPath).c_str());
   printf("\"directory\":%u,\"bigTiff\":%s,\"tiled\":%s,\"tileWidth\":%u,\"tileHeight\":%u,",
          image.GetDirectory(), image.IsBigTiff() ? "true" : "false",
@@ -492,13 +547,14 @@ struct TiffDumpTelemetryStats {
 static std::string TiffDumpGeometry(TIFF *tif, unsigned int directory)
 {
   uint32_t width = 0, height = 0, tileWidth = 0, tileHeight = 0;
-  uint16_t bits = 0, samples = 0, planar = 0, orientation = 0;
+  uint16_t bits = 0, samples = 0, photometric = 0, planar = 0, orientation = 0;
   uint16_t resolutionUnit = RESUNIT_INCH;
   float xResolution = 0, yResolution = 0;
   TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &width);
   TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &height);
   TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
   TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &samples);
+  TIFFGetField(tif, TIFFTAG_PHOTOMETRIC, &photometric);
   TIFFGetFieldDefaulted(tif, TIFFTAG_PLANARCONFIG, &planar);
   TIFFGetFieldDefaulted(tif, TIFFTAG_ORIENTATION, &orientation);
   TIFFGetFieldDefaulted(tif, TIFFTAG_RESOLUTIONUNIT, &resolutionUnit);
@@ -514,6 +570,7 @@ static std::string TiffDumpGeometry(TIFF *tif, unsigned int directory)
     ",\"height\":" + std::to_string(height) +
     ",\"bits_per_sample\":" + std::to_string(bits) +
     ",\"samples_per_pixel\":" + std::to_string(samples) +
+    ",\"photometric\":" + std::to_string(photometric) +
     ",\"planar\":" + std::to_string(planar) +
     ",\"layout\":" + CIccTiffTelemetry::JsonString(tiled ? "tiled" : "stripped") +
     ",\"tiled\":" + (tiled ? "true" : "false") +
@@ -625,13 +682,15 @@ static bool ListDirectories(const char *path, bool evidence
       printf("%s{\"directory\":%u,\"width\":%u,\"height\":%u,\"bigTiff\":%s,"
              "\"tiled\":%s,\"tileWidth\":%u,\"tileHeight\":%u,\"compression\":%u,"
              "\"codecAvailable\":%s,\"iccLength\":%u,\"bitsPerSample\":%u,"
-             "\"samplesPerPixel\":%u,\"planar\":%u,\"sampleFormat\":%u,"
+             "\"samplesPerPixel\":%u,\"photometric\":%u,\"photometricName\":\"%s\","
+             "\"planar\":%u,\"sampleFormat\":%u,"
              "\"orientation\":%u,\"blockCount\":%u,\"subIfdOffsets\":[",
              i ? "," : "", i, width, height,
              TIFFIsBigTIFF(tif) ? "true" : "false", tiled ? "true" : "false",
              tileWidth, tileHeight, compression,
              TIFFIsCODECConfigured(compression) ? "true" : "false",
-             length, bitsPerSample, samplesPerPixel, planar,
+             length, bitsPerSample, samplesPerPixel, photo,
+             GetId(photo, tiff_photo_types), planar,
              sampleFormat, orientation,
              tiled ? TIFFNumberOfTiles(tif) : TIFFNumberOfStrips(tif));
       for (unsigned int s = 0; s < subCount; s++)
@@ -639,16 +698,22 @@ static bool ListDirectories(const char *path, bool evidence
       printf("]}");
     }
     else {
-      printf("IFD %u: %u x %u, %s, %s, tile %u x %u, compression %u, ICC %u bytes\n",
+      printf("IFD %u: %u x %u, %s, %s, tile %u x %u, compression %u, "
+             "photometric %u (%s), ICC %u bytes (libtiff interpretation)\n",
              i, width, height, TIFFIsBigTIFF(tif) ? "BigTIFF" : "TIFF",
              tiled ? "tiled" : "stripped", tileWidth,
-             tileHeight, compression, length);
+             tileHeight, compression, photo, GetId(photo, tiff_photo_types), length);
       for (unsigned int s = 0; s < subCount; s++)
         printf("  SubIFD offset: %llu\n", static_cast<unsigned long long>(subOffsets[s]));
     }
   }
-  if (evidence)
-    printf("]}\n");
+  if (evidence) {
+    printf("],");
+    EmitTiffDiagnosticsJson();
+    printf("}\n");
+  }
+  else
+    PrintTiffDiagnostics();
 #ifdef ICCDEV_TELEMETRY
   if (telemetry) {
     stats->inventoryMs = CIccTiffTelemetry::Since(phaseStart);
@@ -667,6 +732,11 @@ int main(int argc, icChar* argv[])
   bool hasDirectory = false;
   std::vector<icChar*> positional;
   const bool bareInvocation = argc <= 1;
+  if (argc == 2 && !stricmp(argv[1], "--version")) {
+    printf("iccTiffDump IccProfLib=" ICCPROFLIBVER "\n");
+    printf("libtiff: %s\n", icTiffRuntimeVersion().c_str());
+    return 0;
+  }
 #ifdef ICCDEV_TELEMETRY
   CIccTiffTelemetry telemetry;
   TiffDumpTelemetryStats telemetryStats(telemetry);
@@ -688,8 +758,12 @@ int main(int argc, icChar* argv[])
       return 1;
 #endif
     if (!stricmp(argv[arg], "--help") || !stricmp(argv[arg], "-h")) {
-      Usage();
+      Usage(stdout);
       return 0;
+    }
+    if (!stricmp(argv[arg], "--version")) {
+      fprintf(stderr, "--version must be used alone\n");
+      return 1;
     }
     if (!stricmp(argv[arg], "--evidence-json"))
       bEvidenceJson = true;
@@ -722,20 +796,28 @@ int main(int argc, icChar* argv[])
   argc = static_cast<int>(positional.size());
   argv = positional.data();
   if (argc <= minargs) {
-    Usage();
+    Usage(bareInvocation ? stdout : stderr);
     return bareInvocation ? 0 : 1;
   }
   else if (argc > 3) {
-    Usage();
+    Usage(stderr);
     return 1;
   }
+  g_previousTiffWarningHandler = TIFFSetWarningHandler(RecordTiffWarning);
+  g_previousTiffErrorHandler = TIFFSetErrorHandler(RecordTiffError);
 #ifdef ICCDEV_TELEMETRY
   std::vector<std::string> protectedPaths;
   protectedPaths.push_back(argv[1]);
   if (argc > 2)
     protectedPaths.push_back(argv[2]);
   if (!telemetry.Start("iccTiffDump", protectedPaths,
-                       "\"metadata_only\":true,\"decoded_pixels\":0,\"decoded_bytes\":0"))
+                       std::string("\"tool_version\":") +
+                       CIccTiffTelemetry::JsonString(ICCPROFLIBVER) +
+                       ",\"library_versions\":{\"IccProfLib\":" +
+                       CIccTiffTelemetry::JsonString(ICCPROFLIBVER) +
+                       ",\"libtiff\":" +
+                       CIccTiffTelemetry::JsonString(icTiffRuntimeVersion()) + "}" +
+                       ",\"metadata_only\":true,\"decoded_pixels\":0,\"decoded_bytes\":0"))
     return 1;
   telemetryStats.started = true;
 #endif
@@ -794,6 +876,7 @@ int main(int argc, icChar* argv[])
   printf("-------------------->Tiff Image Dump<---------------------------\n");
   printf("Filename:          %s\n", srcName.c_str());
   printf("Directory:         %u\n", SrcImg.GetDirectory());
+  printf("Metadata:          libtiff interpretation (not a TIFF validity check)\n");
   printf("Container:         %s\n", SrcImg.IsBigTiff() ? "BigTIFF" : "TIFF");
   printf("Layout:            %s\n", SrcImg.IsTiled() ? "Tiled" : "Stripped");
   if (SrcImg.IsTiled())
@@ -861,7 +944,12 @@ int main(int argc, icChar* argv[])
   else if (nEffectiveExtra)
     printf("ExtraSamples:      not stored; libtiff treats %u of %u samples as non-color\n",
       nEffectiveExtra, SrcImg.GetSamples());
-  printf("Photometric:       %s\n", GetId(SrcImg.GetPhoto(), photo_types));
+  const unsigned int photometric = SrcImg.GetTiffPhotometric();
+  const char *photometricName = GetId(photometric, tiff_photo_types);
+  if (!strcmp(photometricName, "Unknown"))
+    printf("Photometric:       Unknown (%u)\n", photometric);
+  else
+    printf("Photometric:       %s\n", photometricName);
   if (SrcImg.GetBytesPerLine())
     printf("BytesPerLine:      %u\n", SrcImg.GetBytesPerLine());
   else
@@ -869,6 +957,7 @@ int main(int argc, icChar* argv[])
   printf("Resolution:        (%lf x %lf) %s\n", SrcImg.GetXRes(), SrcImg.GetYRes(),
     GetId(SrcImg.GetResolutionUnit(), resolution_units));
   printf("Compression:       %s\n", GetId(SrcImg.GetCompress(), compression_types));
+  PrintTiffDiagnostics();
   }
 
   unsigned char *pProfMem = nullptr;

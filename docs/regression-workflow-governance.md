@@ -16,6 +16,28 @@ build/runtime behavior, platform or toolchain boundary, CI trigger, dependency
 owner, and local evidence. Re-review the complete matrix after a repair; any
 new blocker returns the branch to branch-only grooming before another review.
 
+## Screening Sequence
+
+1. In the local development environment, complete the applicable pre-commit,
+   preflight, focused build/test, and security checks. The maintainer image
+   supplies zizmor, Trivy, CodeQL, fuzzers, Valgrind, and other tools for the
+   affected surface.
+2. On the pre-PR branch, run `ci-qa-pr` with `ctest-mode=full` and
+   `ctest-recent-limit=0` for the comprehensive build and CTest matrix. Run
+   `ci-codeql-security` against the same head. Investigate failures and repeat
+   the affected checks after any changes.
+3. Once screening succeeds and the user authorizes publication, open the PR.
+4. Run `ci-pr-action` on the PR head as the final cross-platform build, profile
+   generation, and representative CTest sounding board for merge readiness.
+   Its `pr-extended` exclusion and path-scoped lanes mean it does not replace
+   the local checks, preflight, or the pre-PR `ci-qa-pr` matrix. Record exact
+   head SHAs and run IDs in the readiness evidence.
+
+The comprehensive matrix still follows each workflow's declared scope: for
+example, `ci-infrastructure` CTests require direct selection or a dedicated
+workflow. Keep the appropriate specialized security, sanitizer, and packaging
+gates in the screening record when their contracts apply.
+
 ## Canonical Locations
 
 | Item | Location | Purpose |
@@ -26,14 +48,16 @@ new blocker returns the branch to branch-only grooming before another review.
 | Sanitizer regression gate | `.github/workflows/ci-sanitizer-regression.yml` | Standalone path-scoped ASAN/UBSAN caller for initial PR validation and explicit final dispatches. |
 | Risk-analysis gate | `.github/workflows/ci-risk-analysis-gate.yml` | Standalone manual caller for the reusable Linux and Windows workflow-security audits. |
 | Rebase safety gate | `.github/workflows/ci-rebase-safety.yml` | Lightweight ancestry validation for same-repository PR synchronize events. |
+| PR CI label dispatcher | `.github/workflows/ci-maintainer-pr-dispatch.yml` | Maintainer-label requests dispatched from the trusted `master` workflow with exact PR head input. |
+| PR status labeler | `.github/workflows/update-labels.yml` | API-only current-head validation on PR events and trusted workflow completions. |
 | MATLAB native gate | `.github/workflows/ci-matlab.yml` | Manual Windows MSVC, Linux x86_64, and Apple Silicon macOS MEX QA; separate Docker interoperability. |
 | MATLAB release bundles | `.github/workflows/ci-latest-release.yml` | Linux x86_64, macOS arm64, and Windows x64 MEX builds with staged MATLAB QA and payload verification. |
 | Apple platform gates | `.github/workflows/ci-apple-platform-smoke.yml`, `.github/workflows/ci-apple-mobile-core.yml` | iOS/watchOS simulator hosts and Xcode Release/Debug CTest runtime layouts; [local commands](build.md). |
 | CTest registration | `Build/Cmake/Testing/CMakeLists.txt` | CTest names, labels, fixtures, timeouts, and check target. |
 | CTest process guide | `docs/ctest.md` | Local commands, registered suites, and add-test workflow. |
+| Coverage process guide | `docs/code-coverage.md` | Deterministic profraw merging, module matching, and configuration timing. |
 | Maintainer CI skill | `.github/skills/maintainer-ci-ctest/SKILL.md` | Repeatable maintainer workflow for CI, CTest, CPack, sanitizer, and release gates. |
 | Maintainer CI prompt | `.github/prompts/maintainer-ci-ctest.prompt.md` | Structured planning prompt for maintainer-owned infrastructure changes. |
-| External compatibility examples | `.github/workflows/ci-nokia-heif-icc-smoke.yml`, `.github/workflows/ci-libpng-iccp-smoke.yml` | Manual, pinned-dependency lanes with isolated wrapper CTests and immutable runtime resolution. |
 | Workflow rules | `.github/instructions/workflow-governance.instructions.md` | Shell hardening, output sanitization, and injection prevention. |
 | Workflow trust boundaries | `docs/workflow-security-trust-boundaries.md` | Trusted-base helper model, PR workflow canaries, and visual review aids. |
 | Testing rules | `.github/instructions/testing.instructions.md` | Test directories, script expectations, and regression flow. |
@@ -53,46 +77,76 @@ that contract. These jobs do not package or upload release artifacts.
 `IccProfLib/`, `IccXML/`, `IccJSON/`, `IccConnect/`, `Tools/`, and registered
 C/C++ sources under `.github/ci/regression/`. Generated header templates and
 native tool resources under the owned source directories are included. Native
-regression fixtures under `.github/ci/regression/` select the testing surface.
+regression fixtures under `.github/ci/regression/` and HEIF carriers under
+`.github/ci/test-data/heif/` select the testing surface.
 Native build configuration is
 limited to `Build/Cmake/`, `Build/AppleMobile/`, `Build/XCode/BuildAll.sh`, and
 the root `vcpkg.json`. `Testing/` changes also select the native matrix.
 
 Examples, ports, bindings, documentation, and unrelated CMake wrappers do not
 select the native matrix merely because of a file extension or basename.
-OpenImageIO, HEIF, and libpng paths under `.github/ci/tooling/` are reported as
-external research tooling and retain their separate manual workflows; the PR
-orchestrator does not call those research projects. Mixed external/native diffs
-still run the native matrix. Keep this contract table-driven in
+Keep this contract table-driven in
 `.github/tests/test-ci-pr-path-classifier.sh` and source the classifier from the
 trusted base checkout for pull requests. Path discovery disables Git rename
 detection so a move is classified against both its removed source path and its
 added destination path.
 
-`ci-pr-action` owns deterministic core builds and tests only. Its reusable tool
-suite passes `instrumentation=core` and excludes `ci-infrastructure` CTests.
+`ci-pr-action` owns deterministic core builds and tests, plus a reusable MCP
+package and Dockerfile check. The MCP job runs when the native matrix is
+selected or when MCP package, Dockerfile, or MCP workflow files change. It
+checks out the exact PR head selected by the caller and contributes to the
+protected `PR Summary` result. Its `mcp-server-` concurrency group is distinct
+from the caller's `ci-pr-` group, so a called job cannot cancel its caller.
+The reusable tool suite passes `instrumentation=core` and always excludes
+`ci-infrastructure` and `clusterfuzzlite` CTests.
+The macOS Clang Release/LTO and Debug jobs run a representative native CTest
+selection after profile generation. They exclude `slow`, `clusterfuzzlite`,
+`pr-extended`, and `ci-infrastructure`, so Darwin shared-library and optimizer
+boundaries are checked without duplicating the comprehensive pre-PR matrix.
+Its fast mode runs a fixed core smoke selection plus the requested recent
+registrations; the recent limit is registration order, not change impact.
+Full mode checks the image's spectral-preview Python package pins and decoder
+capabilities before reusing its environment, and rebuilds that environment
+from the checkout when the image contract differs. Fast mode excludes the sole
+spectral-preview CTest and skips that dependency setup.
+Windows PR jobs report CTest helper compilation and CTest execution as separate
+steps. The MinGW helper build uses bounded two-way parallelism; MSVC and
+ClangCL keep serial staging for vcpkg runtime DLLs.
 The standalone sanitizer caller runs the reusable tool workflow independently
 for native source, build, testing, or regression-fixture changes; the reusable
 workflow also remains manually dispatchable. Pre-flight is a standalone
 path-scoped PR workflow, while risk analysis is an explicit final security
 workflow, so scanner or infrastructure failures cannot be mistaken for core
-build failures. External compatibility, dynamic-analysis tooling, and
-ClusterFuzzLite remain manual or scheduled lanes.
+build failures. Dynamic-analysis tooling and ClusterFuzzLite remain manual or
+scheduled lanes.
 
 ## Rebase and Final Validation
 
 Opening, reopening, or marking a PR ready for review runs its path-scoped
-automatic gates once. A subsequent `synchronize` event runs
-`ci-rebase-safety` as its only validation lane; it verifies that the PR head
-contains the event base without rebuilding the full matrix.
+automatic gates. A subsequent `synchronize` event runs `ci-rebase-safety`
+for ancestry and `ci-pr-action` in its bounded fast lane for the new head.
+The fast lane does not restart the full matrix. `ci-pr-action` publishes an
+exact-head `PR Summary` result; the trusted status labeler refreshes after
+validation completes. Check that result, the current head, labels, draft
+state, and merge state before reporting `Merge Ready`.
+
+If automatic validation is absent on an open same-repository PR targeting
+`master`, dispatch `ci-pr-action` from the trusted `master` workflow with
+the PR number and exact expected head SHA, then manually refresh
+`update-labels.yml` if its completion-triggered refresh is absent. See
+`label-system.md` for commands and the non-`master`-base stacked PR limit.
+This iterative fast lane does not replace the final full-scope lanes below.
 
 Before merging a rebased source PR, explicitly dispatch the applicable final
 lanes on the PR head. Use the full core matrix for source, build, or test
-changes; dispatch the sanitizer, JSON, MCP, and MATLAB workflows only when
-their documented paths or contracts apply.
+changes; dispatch the sanitizer, JSON, and MATLAB workflows only when their
+documented paths or contracts apply. `ci-pr-action` includes MCP validation
+for full core runs; `ci-mcp-server` remains available for an isolated rerun.
 
 ```bash
-gh workflow run ci-pr-action.yml --ref <head-branch> -f ci_scope=full
+gh workflow run ci-pr-action.yml --ref master -f ci_scope=full \
+  -f pr_number=<open-master-target-pr-number> \
+  -f expected_head_sha=<40-character-head-sha>
 gh workflow run ci-sanitizer-regression.yml --ref <head-branch>
 gh workflow run ci-json-roundtrip.yml --ref <head-branch>
 gh workflow run ci-mcp-server.yml --ref <head-branch>
@@ -100,13 +154,12 @@ gh workflow run ci-matlab.yml --ref <head-branch>
 gh workflow run ci-risk-analysis-gate.yml --ref <head-branch>
 ```
 
-The lightweight workflow publishes only `Rebase Safety`, not the protected
-`PR Summary` context: ancestry alone is not evidence of successful validation.
-The protected summary remains pending until explicit validation succeeds for
-the current PR head. A maintainer records that final-run evidence before merge.
-Rebases and ordinary pushes both emit `synchronize`; neither automatically
-restarts the full matrix. Manual risk analysis checks every workflow's Bash
-prologue, even when the target and audit base SHA coincide.
+`Rebase Safety` proves ancestry only; it does not satisfy the protected
+`PR Summary` context. A maintainer records both the automatic fast-lane and
+final full-scope evidence for the current PR head before merge. Rebases and
+ordinary pushes both emit `synchronize`; neither automatically restarts the
+full matrix. Manual risk analysis checks every workflow's Bash prologue,
+even when the target and audit base SHA coincide.
 
 ## When to Add a Script
 
@@ -142,13 +195,16 @@ workflows use `iccdev-apple-simulator-smoke.sh` and
 console sentinel, a missing-fixture control must fail, the report must include
 the built extended-library checks, the public invalid-profile substitution
 control, and non-failing mobile gap notes; Xcode CTest must produce fresh CLI
-output in both configurations. The manual platform workflow accepts a focused
-`core`, `examples`, or `all` scope; the examples scope runs the three manual
-iOS apps with sanitizers on one disposable simulator. A manual core workflow
+output in both configurations. Normal PR CI calls the platform workflow with
+the `xcode` scope; it does not run the long simulator gate. The manual platform
+workflow accepts a focused `core`, `xcode`, `examples`, or `all` scope; the
+examples scope runs the three manual iOS apps with sanitizers on one disposable
+simulator. A manual core workflow
 dispatch additionally uploads the built static archives, generated version
 headers, and build manifest; reusable calls keep those products in the job
-workspace. Neither Apple workflow runs automatically on a push. A nonzero
-helper exit fails either gate.
+workspace. The release workflow builds and validates those archives without
+rerunning simulator or Xcode smoke. Neither Apple workflow runs automatically
+on a push. A nonzero helper exit fails either gate.
 
 ## Workflow Governance Requirements
 
@@ -163,15 +219,31 @@ Every edited workflow `run:` block must keep these properties:
 - `unset GITHUB_TOKEN || true`.
 - No direct `${{ }}` expressions inside shell code; pass values through `env:`.
 - Sanitized writes to `GITHUB_STEP_SUMMARY` and `GITHUB_OUTPUT`.
+- No unbounded glob or `xargs` batching into repeated writes to one fixed report
+  output; use an input list or unique staged outputs.
 - Least-privilege permissions.
-- `pull_request_target` and `workflow_run` automation must not checkout or run
-  PR-controlled code before mutating trusted state such as labels or checks.
+- `pull_request_target` and `workflow_run` status automation must use trusted
+  default-branch definitions and API metadata only. It must never checkout or
+  run PR-controlled code before mutating trusted state such as labels or checks.
+  A workflow completion is a refresh signal, not proof of PR success; resolve
+  the current head and its required aggregate result before applying labels.
 - `pull_request` workflows that build PR code must source `.github/scripts`
   helpers and sanitizers from a trusted base checkout, not from PR-controlled
   content, unless a test-only exception is explicitly marked for preflight.
 - Runner-reduction changes must preserve trusted-base sanitizer sourcing,
   sanitize every `GITHUB_OUTPUT` value, and retain path-gated validation for
   container changes.
+- Actions-service workflow cache is limited to exact-key, checksum-addressed
+  immutable download archives. Pull requests restore only; trusted push,
+  schedule, and manual jobs may save after verification and only on a restore
+  miss. Keep release, build output, package tree, compiler, CTest, and artifact
+  paths uncached. The
+  manual Docker workflow may import inline cache metadata only from a previously
+  validated canonical image resolved to an immutable digest, and may export it
+  only inside the candidate image.
+- Treat a cache as a measured pilot. Compare a cold trusted run with a warm
+  rerun, record cache size and hit status, and remove a cache that adds service
+  churn without a material elapsed-time reduction.
 
 For reusable governance coverage, call
 `.github/workflows/ci-pr-risk-security-analysis.yml` instead of duplicating the
@@ -260,7 +332,7 @@ dependency, packaged MCP, and Docker-workflow changes require the local
 canonical-image build and smoke in `docs/regression-container.md`; only
 `ci-docker` publishes images.
 
-Local review should include YAML parsing, `actionlint`, `yamllint`, direct
+Local review should include YAML parsing, `jactionlint`, `yamllint`, direct
 `${{ }}` interpolation scans for `run:` blocks, Dockerfile base/remote-exec
 checks when container files are in scope, CodeQL Actions analysis, and CodeQL
 query-pack resolution when CodeQL workflows or queries are touched.
@@ -348,12 +420,17 @@ separate from general source changes when practical.
 
 | File | Owner intent | Required local checks |
 |------|--------------|-----------------------|
-| `Dockerfile` | Unified image for runtime tools, MCP, ASAN/UBSAN CTest, fuzzing, review, and hybrid timing gates. Clang 22 is the default toolchain; the packaged AFL++ LLVM plugin is paired with Clang 21. | Use cached builds during development, then run the [container maintainer preflight](regression-container.md#maintainer-preflight-and-security-checks), including a final no-cache build, policy/SAST checks, analyzer inventory, MCP/REST runtime smoke, health check, and image vulnerability/secret triage. AFL wrapper changes also need the container bootstrap probe in `docs/afl-fuzzing.md`. |
+| `Dockerfile` | Unified image for runtime tools, MCP, ASAN/UBSAN CTest, fuzzing, review, and hybrid timing gates. Clang 22 is the default toolchain; the packaged AFL++ LLVM plugin is paired with Clang 21. | Use cached builds during development, then run the container maintainer preflight in \ref md_docs_2regression-container "the regression container guide", including a final no-cache build, policy/SAST checks, analyzer inventory, MCP/REST runtime smoke, health check, and image vulnerability/secret triage. AFL wrapper changes also need the container bootstrap probe in `docs/afl-fuzzing.md`. |
 
 For unified `Dockerfile` publishing:
 
 1. Build and smoke the target image locally; cached development builds are
    permitted, but the final pre-push proof must use no cache.
+   The manual Docker workflow defaults to a digest-pinned inline cache from its
+   last validated integration image, falls back to `latest`, and performs a
+   cold build when neither exists. It exposes `use_build_cache=false` for an
+   explicit clean hosted rebuild and does not use the GitHub Actions cache
+   service or a separate mutable cache image.
 2. Publish through the maintainer-controlled container release path.
 3. Record the published immutable SHA tag, digest, and source revision from the
    release output.
@@ -382,6 +459,8 @@ file .github/scripts/<regression-script>.sh
 Run the focused regression and capture the command plus result in the handoff.
 For workflow edits, also inspect the changed `run:` blocks for the governance
 rules above.
+Run `.github/scripts/check-workflow-fixed-output-batching.py` for any workflow
+that enumerates inputs for coverage, report, archive, or checksum generation.
 For updates to `.github/scripts/iccdev-tool-coverage-baseline.sh`, run both the
 direct script invocation and `ctest -R '^iccdev\.tool-coverage$'` so CI wrapper
 behavior is covered.

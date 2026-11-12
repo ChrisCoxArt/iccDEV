@@ -217,7 +217,7 @@ void Usage(FILE* stream)
   fprintf(stream, "    0 - Linear\n");
   fprintf(stream, "    1 - Tetrahedral\n\n");
 
-  fprintf(stream, "  For init_intent/intent1/intent2/mid_intent:\n");
+  fprintf(stream, "  For intent1/intent2/mid_intent:\n");
   fprintf(stream, "     0 - Perceptual\n");
   fprintf(stream, "     1 - Relative\n");
   fprintf(stream, "     2 - Saturation\n");
@@ -226,7 +226,11 @@ void Usage(FILE* stream)
   fprintf(stream, "     40 + Intent - with BPC\n");
   fprintf(stream, "     90 + Intent - Colorimetric Only\n");
   fprintf(stream, "    100 + Intent - Spectral Only\n");
-  fprintf(stream, " +10000 - Use V5 sub-profile if present\n");
+  fprintf(stream, " +10000 - Use V5 sub-profile if present\n\n");
+
+  fprintf(stream, "  For init_intent:\n");
+  fprintf(stream, "    Use the selectors above except 40 + Intent.\n");
+  fprintf(stream, "    BPC is a profile-stage option and is rejected for -INIT.\n");
   
   fprintf(stream, "\n");
 }
@@ -484,29 +488,29 @@ int main(int argc, const char* argv[])
     }
 
     if (!exportFile.empty()) {
+      json cfgJson;
+      json applyJson, profilesJson;
+
+      cfgApply.toJson(applyJson);
+
+      if (bExportData) {
+        json dataJson;
+        cfgData.toJson(dataJson);
+        cfgJson["colorData"] = dataJson;
+
+        applyJson["srcFile"] = nullptr;
+        applyJson["srcType"] = "colorData";
+      }
+
+      cfgJson["dataFiles"] = applyJson;
+
+      cfgSearchApply.toJson(profilesJson);
+      cfgJson["searchApply"] = profilesJson;
+
+
+      std::string jsonText = cfgJson.dump(1);
       FILE* f = icOpenWriteTextFile(exportFile.c_str());
       if (f) {
-        json cfgJson;
-        json applyJson, profilesJson;
-
-        cfgApply.toJson(applyJson);
-
-        if (bExportData) {
-          json dataJson;
-          cfgData.toJson(dataJson);
-          cfgJson["colorData"] = dataJson;
-
-          applyJson["srcFile"] = nullptr;
-          applyJson["srcType"] = "colorData";
-        }
-
-        cfgJson["dataFiles"] = applyJson;
-
-        cfgSearchApply.toJson(profilesJson);
-        cfgJson["searchApply"] = profilesJson;
-
-
-        std::string jsonText = cfgJson.dump(1);
         size_t n = fwrite(jsonText.c_str(), 1, jsonText.size(), f);
         if (n != jsonText.size()) {
           printf("Error writing json config file '%s'\n", icSanitizeConsoleText(exportFile.c_str()).c_str());

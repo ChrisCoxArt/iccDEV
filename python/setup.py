@@ -588,7 +588,7 @@ with open(os.path.join(os.path.dirname(__file__), "README.md"), encoding="utf-8"
 
 setup(
     name="iccdev",
-    version="0.1.1",
+    version="2.4.2.6",
     description="Python bindings for RefIccMAX (iccDEV) - ICC color profile library",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -597,7 +597,7 @@ setup(
     packages=find_packages(),
     ext_modules=extensions,
     cmdclass={"build_ext": build_ext, "sdist": sdist},
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     install_requires=[],
     keywords="icc color profile cmm color-management cython",
     package_data={

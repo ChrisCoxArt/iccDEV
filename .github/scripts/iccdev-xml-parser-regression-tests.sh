@@ -51,6 +51,7 @@ set -uo pipefail
 TOOLS_DIR="${ICCDEV_TOOLS_DIR:-Build/Tools}"
 TESTING_DIR="${ICCDEV_TESTING_DIR:-Testing}"
 OUTDIR="${ICCDEV_TEST_OUTDIR:-/tmp/iccdev-xml-parser-regressions}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mkdir -p "$OUTDIR"
 
 # Absolute paths before any tool path is derived from them: the round-trip case
@@ -1014,6 +1015,98 @@ PY
   pass "$name (65536 channels refused at the count, no signal)"
 }
 
+responsecurve_65536_measurement_types() {
+  local name="xml-responsecurve-65536-measurement-types"
+  local control="$OUTDIR/resp-measurement-types-control.xml"
+  local boundary="$OUTDIR/resp-measurement-types-65535.xml"
+  local file="$OUTDIR/resp-measurement-types-65536.xml"
+  local control_icc="$OUTDIR/resp-measurement-types-control.icc"
+  local boundary_icc="$OUTDIR/resp-measurement-types-65535.icc"
+  local output_icc="$OUTDIR/resp-measurement-types-65536.icc"
+  local logfile="$OUTDIR/${name}.log"
+  local boundary_log="$OUTDIR/${name}-boundary.log"
+
+  if [ ! -x "$FROMXML" ]; then
+    skip "$name" "iccFromXml not built"
+    return
+  fi
+
+  # ICC.1:2022 Table 73 encodes the number of response-curve measurement types
+  # as uInt16. The XML parser used to append every ResponseCurve without that
+  # bound; Write then narrowed 65536 to zero, allocated no offsets, and wrote
+  # nOffset[0] while traversing the full list (IccTagBasic.cpp:11739).
+  write_countofchannels_document "$control" "<CountOfChannels>1</CountOfChannels>"
+  rm -f "$control_icc" "$boundary_icc" "$output_icc"
+  if ! "$FROMXML" "$control" "$control_icc" >"$logfile" 2>&1 || [ ! -s "$control_icc" ]; then
+    fail "$name" "the one-curve control did not produce a profile"
+    return
+  fi
+  check_sanitizers "$name" "$logfile" || return
+
+  if ! python3 - "$control" "$boundary" "$file" <<'PY'
+from pathlib import Path
+import sys
+
+control = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = '      <ResponseCurve MeasUnitSignature="Status A">'
+end_marker = '      </ResponseCurve>\n'
+start = control.index(start_marker)
+end = control.index(end_marker, start) + len(end_marker)
+curve = control[start:end]
+for count, path in ((65535, sys.argv[2]), (65536, sys.argv[3])):
+    Path(path).write_text(
+        control[:start] + curve * count + control[end:], encoding="utf-8"
+    )
+PY
+  then
+    fail "$name" "could not generate the boundary documents"
+    return
+  fi
+
+  if ! "$FROMXML" "$boundary" "$boundary_icc" >"$boundary_log" 2>&1 ||
+     [ ! -s "$boundary_icc" ]; then
+    fail "$name" "the 65535-curve boundary did not produce a profile"
+    return
+  fi
+  check_sanitizers "$name" "$boundary_log" || return
+  if ! python3 - "$boundary_icc" <<'PY'
+from pathlib import Path
+import sys
+
+profile = Path(sys.argv[1]).read_bytes()
+tags = int.from_bytes(profile[128:132], "big")
+entries = (profile[132 + 12 * i:144 + 12 * i] for i in range(tags))
+resp = next((entry for entry in entries if entry[:4] == b"resp"), None)
+if resp is None:
+    raise SystemExit(1)
+offset = int.from_bytes(resp[4:8], "big")
+raise SystemExit(0 if profile[offset + 10:offset + 12] == b"\xff\xff" else 1)
+PY
+  then
+    fail "$name" "the 65535-curve profile has the wrong encoded count"
+    return
+  fi
+
+  "$FROMXML" "$file" "$output_icc" >"$logfile" 2>&1
+  local status=$?
+  if [ "$status" -eq 0 ] || [ "$status" -ge 128 ]; then
+    fail "$name" "iccFromXml exited $status instead of refusing gracefully"
+    return
+  fi
+  if ! grep -Fq "Too many ResponseCurve entries in responseCurveSet16Type" "$logfile"; then
+    fail "$name" "refusal did not come from the response-curve count guard"
+    return
+  fi
+  check_sanitizers "$name" "$logfile" || return
+  # SaveIccProfile opens the destination before Write; failed writes can leave
+  # an empty file. They must not emit a usable or partial ICC profile.
+  if [ -s "$output_icc" ]; then
+    fail "$name" "iccFromXml emitted a nonempty profile after refusing the tag"
+    return
+  fi
+  pass "$name (1 and 65535 curves convert; 65536 fail without a profile)"
+}
+
 echo
 echo "=== responseCurveSet16 CountOfChannels (issues #2397, #2398, #2399) ==="
 
@@ -1025,6 +1118,239 @@ measurement_devicecode_overflow
 responsecurve_profile_reads_back
 measurement_reserved_not_inherited
 countofchannels_65536_channel_write
+responsecurve_65536_measurement_types
+
+###############################################################################
+# Long numeric tokens must not be accepted as a truncated prefix.
+###############################################################################
+
+numeric_token_observer_kept() {
+  local name="xml-observer-long-numeric-token"
+  local fixture="$REPO_ROOT/.github/ci/test-data/ub-profileversion-negative-1845.xml"
+  local control="$OUTDIR/${name}-control.xml"
+  local longer="$OUTDIR/${name}.xml"
+  local control_icc="$OUTDIR/${name}-control.icc"
+  local longer_icc="$OUTDIR/${name}.icc"
+  local logfile="$OUTDIR/${name}.log"
+
+  if [ ! -x "$FROMXML" ] || [ ! -f "$fixture" ]; then
+    fail "$name" "iccFromXml or tracked XML fixture is missing"
+    return
+  fi
+
+  # #3023: the same ObserverFuncs sample spelled with 300 leading zeros must
+  # give the same profile.  A fixed token buffer read only its prefix, zeros.
+  if ! python3 - "$fixture" "$control" "$longer" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+version = '<ProfileVersion>-12.</ProfileVersion>'
+created = '<CreationDateTime>now</CreationDateTime>'
+sample = '0.001368'
+if any(source.count(text) != 1 for text in (version, created, sample)):
+    raise SystemExit('XML fixture changed: expected version/date/sample not found once')
+control = source.replace(version, '<ProfileVersion>5.00</ProfileVersion>')
+control = control.replace(created, '<CreationDateTime>2026-11-08T00:00:00</CreationDateTime>')
+Path(sys.argv[2]).write_text(control)
+Path(sys.argv[3]).write_text(control.replace(sample, '0' * 300 + sample))
+PY
+  then
+    fail "$name" "could not generate the XML control and long spelling"
+    return
+  fi
+
+  rm -f "$control_icc" "$longer_icc" "$logfile"
+  if ! "$FROMXML" "$control" "$control_icc" >"$logfile" 2>&1 || [ ! -s "$control_icc" ]; then
+    fail "$name" "valid observer control did not convert"
+    return
+  fi
+  check_sanitizers "$name (control)" "$logfile" || return
+  if ! "$FROMXML" "$longer" "$longer_icc" >"$logfile" 2>&1 || [ ! -s "$longer_icc" ]; then
+    fail "$name" "the long spelling of a valid sample did not convert"
+    return
+  fi
+  check_sanitizers "$name" "$logfile" || return
+  if ! cmp -s "$control_icc" "$longer_icc"; then
+    fail "$name" "the long spelling changed the profile"
+    return
+  fi
+  pass "$name (300 leading zeros keep the sample's value)"
+}
+
+echo
+echo "=== XML numeric token bounds ==="
+numeric_token_observer_kept
+
+###############################################################################
+# textDescriptionType must fail gracefully when its ASCII buffer cannot grow.
+###############################################################################
+
+textdescription_allocation_failure() {
+  local name="xml-textdescription-allocation-failure"
+  local fixture="$TESTING_DIR/V2/v2GrayTRC.xml"
+  local xml="$OUTDIR/textdescription-allocation.xml"
+  local interposer="$OUTDIR/textdescription-fail-realloc.so"
+  local control_log="$OUTDIR/${name}-control.log"
+  local failure_log="$OUTDIR/${name}-failure.log"
+  local status=0
+
+  if [ "$(uname -s)" != Linux ]; then
+    skip "$name" "glibc realloc fault injection runs on Linux"
+    return
+  fi
+  if ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+    skip "$name" "glibc realloc fault injection requires glibc"
+    return
+  fi
+  if ! command -v cc >/dev/null 2>&1 ||
+     ! command -v python3 >/dev/null 2>&1 ||
+     ! command -v nm >/dev/null 2>&1 ||
+     [ ! -x "$FROMXML" ] || [ ! -f "$fixture" ]; then
+    skip "$name" "compiler, python3, nm, iccFromXml, or v2 XML fixture missing"
+    return
+  fi
+  # ASan supplies its own realloc interceptor ahead of LD_PRELOAD and would
+  # bypass the failure injection. The plain build owns this check.  grep reads
+  # all of nm's output: with -q it exits at the first match, nm takes SIGPIPE,
+  # and under pipefail the pipeline reports 141 instead of a match.
+  if nm -D "$FROMXML" 2>/dev/null | grep '__asan_init' >/dev/null; then
+    skip "$name" "ASan intercepts realloc before LD_PRELOAD"
+    return
+  fi
+
+  if ! python3 - "$fixture" "$xml" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+marker = "iccDEV v2 grayscale display profile (grayTRC)"
+if source.count(marker) != 1:
+    raise SystemExit("textDescriptionType fixture marker changed")
+Path(sys.argv[2]).write_text(source.replace(marker, "A" * 4096))
+PY
+  then
+    fail "$name" "could not prepare XML fixture"
+    return
+  fi
+
+  if ! cc -shared -fPIC -x c -o "$interposer" - <<'C'
+#include <errno.h>
+#include <stddef.h>
+#include <unistd.h>
+
+extern void *__libc_realloc(void *, size_t);
+
+void *realloc(void *ptr, size_t size)
+{
+  if (ptr && size == 4097) {
+    static const char marker[] = "injected textDescriptionType realloc failure\n";
+    write(2, marker, sizeof(marker) - 1);
+    errno = ENOMEM;
+    return NULL;
+  }
+  return __libc_realloc(ptr, size);
+}
+C
+  then
+    fail "$name" "could not compile allocation fault injector"
+    return
+  fi
+
+  rm -f "$OUTDIR/${name}-control.icc" "$OUTDIR/${name}-failure.icc"
+  "$FROMXML" "$xml" "$OUTDIR/${name}-control.icc" >"$control_log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ] || [ ! -s "$OUTDIR/${name}-control.icc" ]; then
+    fail "$name" "control profile did not parse (exit $status)"
+    return
+  fi
+
+  status=0
+  LD_PRELOAD="$interposer" "$FROMXML" "$xml" "$OUTDIR/${name}-failure.icc" >"$failure_log" 2>&1 || status=$?
+  # A sanitizer or static runtime that resolves realloc ahead of LD_PRELOAD
+  # never calls the shim, so the marker is missing: nothing was injected.
+  if ! grep -F 'injected textDescriptionType realloc failure' "$failure_log" >/dev/null; then
+    skip "$name" "realloc interposition unavailable (sanitizer or static runtime)"
+    return
+  fi
+  if [ "$status" -lt 1 ] || [ "$status" -ge 128 ] || [ -e "$OUTDIR/${name}-failure.icc" ]; then
+    fail "$name" "injected failure did not reject gracefully (exit $status)"
+    return
+  fi
+  if ! grep -Fq 'injected textDescriptionType realloc failure' "$failure_log" ||
+     ! grep -Fq 'Memory error allocating textDescriptionType ASCII data' "$failure_log"; then
+    fail "$name" "did not reach the intended allocation and diagnostic"
+    return
+  fi
+  check_sanitizers "$name" "$failure_log" || return
+  pass "$name (allocation failure rejected without signal)"
+}
+
+echo
+echo "=== textDescriptionType allocation failure ==="
+textdescription_allocation_failure
+
+###############################################################################
+# A profile has one Header and one Tags section.
+###############################################################################
+
+echo
+echo "=== Duplicate top-level profile sections ==="
+
+top_level_sections_control() {
+  local name="xml-top-level-sections-control" source="$TESTING_DIR/Named/NamedColorV4.xml"
+  local logfile="$OUTDIR/xml-top-level-sections-control.log"
+  if [ ! -x "$FROMXML" ] || [ ! -f "$source" ]; then
+    skip "$name" "iccFromXml or NamedColorV4.xml missing"
+    return
+  fi
+  if ! "$FROMXML" "$source" "$OUTDIR/$name.icc" >"$logfile" 2>&1 ||
+     [ ! -s "$OUTDIR/$name.icc" ]; then
+    fail "$name" "single Header and Tags sections were refused"
+    return
+  fi
+  check_sanitizers "$name" "$logfile" || return
+  pass "$name (single sections accepted)"
+}
+
+duplicate_top_level_section() {
+  local section="$1" name="xml-duplicate-top-level-$1"
+  local source="$TESTING_DIR/Named/NamedColorV4.xml"
+  local file="$OUTDIR/$name.xml" logfile="$OUTDIR/$name.log" profile="$OUTDIR/$name.icc"
+  if [ ! -x "$FROMXML" ] || [ ! -f "$source" ]; then
+    skip "$name" "iccFromXml or NamedColorV4.xml missing"
+    return
+  fi
+  if ! python3 - "$source" "$file" "$section" <<'PY'
+import sys
+from pathlib import Path
+source, target, section = sys.argv[1:]
+data = Path(source).read_text()
+closing = "</IccProfile>"
+if data.count(closing) != 1:
+    raise SystemExit("fixture has no unique IccProfile closing tag")
+extra = ("<Header><ProfileVersion>9.99</ProfileVersion></Header>"
+         if section == "Header" else "<Tags><unrecognizedType/></Tags>")
+Path(target).write_text(data.replace(closing, extra + closing))
+PY
+  then
+    fail "$name" "could not construct fixture"
+    return
+  fi
+  rm -f "$profile"
+  "$FROMXML" "$file" "$profile" >"$logfile" 2>&1
+  local status=$?
+  if [ "$status" -lt 1 ] || [ "$status" -ge 128 ] || [ -e "$profile" ] ||
+     ! grep -Fq "Duplicate $section element in IccProfile" "$logfile"; then
+    fail "$name" "expected attributed graceful refusal (exit $status)"
+    return
+  fi
+  check_sanitizers "$name" "$logfile" || return
+  pass "$name (duplicate $section refused)"
+}
+
+top_level_sections_control
+duplicate_top_level_section Header
+duplicate_top_level_section Tags
 
 ###############################################################################
 

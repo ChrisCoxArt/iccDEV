@@ -79,6 +79,10 @@
 namespace iccDEV {
 #endif
 
+CIccCurve::~CIccCurve()
+{
+}
+
 #ifdef ICC_USE_AVX2
 static inline bool iccUseAvx2ClutOutput(int outputChannels)
 {
@@ -2369,6 +2373,9 @@ void CIccCLUT::Iterate(IDescribeSink &sink, icUInt8Number nIndex, icUInt32Number
     }
   }
   else {
+    if (!bufSize)
+      return;
+
     icChar *ptr = pOutText;
     icChar *ptrEnd = ptr + bufSize;
     icFloatNumber *pData = &m_pData[nPos];
@@ -2377,25 +2384,32 @@ void CIccCLUT::Iterate(IDescribeSink &sink, icUInt8Number nIndex, icUInt32Number
     for (i=0; i<m_nInput; i++) {
       icColorValue(pVal, valSize, (icFloatNumber)m_GridAdr[i] / (m_GridPoints[i]-1), m_csInput, i, bUseLegacy);
 
-// TODO - this buffer handling is sloppy, but should be ok for now
-// really needs to be refactored, needs some sort of error return if buffer overflows
-// right now it will terminate the output when the buffer overflows
-      ptr += snprintf(ptr, size_t(ptrEnd-ptr), " %s", pVal);
-      if (ptr >= ptrEnd)
-            return;
+      size_t remaining = size_t(ptrEnd - ptr);
+      int n = snprintf(ptr, remaining, " %s", pVal);
+      if (n < 0 || size_t(n) >= remaining)
+        return;
+      ptr += n;
     }
-    strcpy(ptr, "  ");
+    if (ptrEnd - ptr <= 2)
+      return;
+    ptr[0] = ptr[1] = ' ';
     ptr += 2;
+    *ptr = '\0';
 
     for (i=0; i<m_nOutput; i++) {
       icColorValue(pVal, valSize, pData[i], m_csOutput, i, bUseLegacy);
 
-      ptr += snprintf(ptr, size_t(ptrEnd-ptr), " %s", pVal);
-      if (ptr >= ptrEnd)
-            return;
+      size_t remaining = size_t(ptrEnd - ptr);
+      int n = snprintf(ptr, remaining, " %s", pVal);
+      if (n < 0 || size_t(n) >= remaining)
+        return;
+      ptr += n;
     }
-    strcpy(ptr, "\n");
-    sink.Write((const char*)pOutText, strlen(pOutText));
+    if (ptrEnd - ptr <= 1)
+      return;
+    *ptr++ = '\n';
+    *ptr = '\0';
+    sink.Write((const char*)pOutText, size_t(ptr - pOutText));
 
     if (cellsRemaining && *cellsRemaining > 0)
       --(*cellsRemaining);
@@ -3752,10 +3766,11 @@ CIccMBB::CIccMBB()
  */
 CIccMBB::CIccMBB(const CIccMBB &IMBB)
 {
- icUInt8Number nCurves;
- int i;
- 
-  m_bInputMatrix = IMBB.m_bInputMatrix;
+  icUInt8Number nCurves;
+  int i;
+  const bool bInputMatrix = IMBB.IsInputMatrix();
+
+  m_bInputMatrix = bInputMatrix;
   m_bUseMCurvesAsBCurves = IMBB.m_bUseMCurvesAsBCurves;
   m_nInput = IMBB.m_nInput;
   m_nOutput = IMBB.m_nOutput;
@@ -3769,7 +3784,7 @@ CIccMBB::CIccMBB(const CIccMBB &IMBB)
     m_CLUT = NULL;
 
   if (IMBB.m_CurvesA) {
-    nCurves = !IsInputB() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nOutput : m_nInput;
 
     m_CurvesA = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -3780,7 +3795,7 @@ CIccMBB::CIccMBB(const CIccMBB &IMBB)
   }
 
   if (IMBB.m_CurvesM) {
-    nCurves = IsInputMatrix() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nInput : m_nOutput;
 
     m_CurvesM = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -3791,7 +3806,7 @@ CIccMBB::CIccMBB(const CIccMBB &IMBB)
   }
 
   if (IMBB.m_CurvesB) {
-    nCurves = IsInputB() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nInput : m_nOutput;
 
     m_CurvesB = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -3825,12 +3840,21 @@ CIccMBB &CIccMBB::operator=(const CIccMBB &IMBB)
   if (&IMBB == this)
     return *this;
 
+  const bool bInputMatrix = IMBB.IsInputMatrix();
+  // Legacy LUTs have a fixed input-matrix layout. Their curve arrays cannot
+  // receive a source whose A, M, and B array sizes use the opposite layout.
+  // Other MBB tags can adopt the source layout through m_bInputMatrix.
+  const icTagTypeSignature tagType = GetType();
+  if (!bInputMatrix &&
+      (tagType == icSigLut8Type || tagType == icSigLut16Type))
+    return *this;
+
   Cleanup();
 
   icUInt8Number nCurves;
   int i;
 
-  m_bInputMatrix = IMBB.m_bInputMatrix;
+  m_bInputMatrix = bInputMatrix;
   m_bUseMCurvesAsBCurves = IMBB.m_bUseMCurvesAsBCurves;
   m_nInput = IMBB.m_nInput;
   m_nOutput = IMBB.m_nOutput;
@@ -3844,7 +3868,7 @@ CIccMBB &CIccMBB::operator=(const CIccMBB &IMBB)
     m_CLUT = NULL;
 
   if (IMBB.m_CurvesA) {
-    nCurves = !IsInputB() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nOutput : m_nInput;
 
     m_CurvesA = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -3855,7 +3879,7 @@ CIccMBB &CIccMBB::operator=(const CIccMBB &IMBB)
   }
 
   if (IMBB.m_CurvesM) {
-    nCurves = IsInputMatrix() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nInput : m_nOutput;
 
     m_CurvesM = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -3866,7 +3890,7 @@ CIccMBB &CIccMBB::operator=(const CIccMBB &IMBB)
   }
 
   if (IMBB.m_CurvesB) {
-    nCurves = IsInputB() ? m_nInput : m_nOutput;
+    nCurves = bInputMatrix ? m_nInput : m_nOutput;
 
     m_CurvesB = new LPIccCurve[nCurves];
     for (i=0; i<nCurves; i++)
@@ -4029,6 +4053,7 @@ bool CIccMBB::Init(icUInt8Number nInputChannels, icUInt8Number nOutputChannels)
   Cleanup();
   m_nInput = nInputChannels;
   m_nOutput = nOutputChannels;
+  m_bUseMCurvesAsBCurves = false;
   return true;
 }
 
@@ -4276,6 +4301,29 @@ icValidateStatus CIccMBB::Validate(std::string sigPath, std::string &sReport, co
   CIccInfo Info;
   std::string sSigPathName = Info.GetSigPathName(sigPath);
   icSignature sig = icGetFirstSigPathSig(sigPath);
+
+  // ICC.1 and ICC.2 allow only B, B+M+matrix, B+A+CLUT, or all five
+  // stages in mAB/mBA tags. Legacy lut8/lut16 use different stage rules.
+  if (GetType()==icSigLutAtoBType || GetType()==icSigLutBtoAType) {
+    if (!m_CurvesB) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - B-curves must be present.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+    if ((m_Matrix != NULL) != (m_CurvesM != NULL)) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - Matrix and M-curves must both be present or absent.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+    if ((m_CLUT != NULL) != (m_CurvesA != NULL)) {
+      sReport += icMsgValidateNonCompliant;
+      sReport += sSigPathName;
+      sReport += " - CLUT and A-curves must both be present or absent.\n";
+      rv = icMaxStatus(rv, icValidateNonCompliant);
+    }
+  }
 
   if (!pProfile) {
     sReport += icMsgValidateWarning;
@@ -4709,6 +4757,9 @@ CIccTagLutAtoB::~CIccTagLutAtoB()
 bool CIccTagLutAtoB::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
+  icUInt32Number reserved;
+  icUInt16Number reservedWord;
+  icUInt8Number nInput, nOutput;
   icUInt32Number Offset[5];
   icUInt8Number nCurves, i;
   size_t nPos;
@@ -4721,10 +4772,10 @@ bool CIccTagLutAtoB::Read(icUInt32Number size, CIccIO *pIO)
   size_t nEnd = nStart + size;
 
   if (!pIO->Read32(&sig) ||
-      !pIO->Read32(&m_nReserved) ||
-      !pIO->Read8(&m_nInput) ||
-      !pIO->Read8(&m_nOutput) ||
-      !pIO->Read16(&m_nReservedWord) ||
+      !pIO->Read32(&reserved) ||
+      !pIO->Read8(&nInput) ||
+      !pIO->Read8(&nOutput) ||
+      !pIO->Read16(&reservedWord) ||
       pIO->Read32(Offset, 5)!=5)
     return false;
 
@@ -4732,11 +4783,11 @@ bool CIccTagLutAtoB::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   // must have at least 1 input and 1 output
-  if (m_nInput < 1 || m_nOutput < 1)
+  if (nInput < 1 || nOutput < 1)
     return false;
 
   // and the current limit is for 15 channels
-  if (m_nInput > 15 || m_nOutput > 15)
+  if (nInput > 15 || nOutput > 15)
     return false;
 
   // Every Offset[] field is attacker-controlled. Validate each in u64
@@ -4749,6 +4800,14 @@ bool CIccTagLutAtoB::Read(icUInt32Number size, CIccIO *pIO)
     if (Offset[oi] && static_cast<icUInt64Number>(Offset[oi]) > size)
       return false;
   }
+
+  // NewCurvesA/B/M reuse their existing arrays. Release the previous tag while
+  // its old channel counts still describe those allocations, then install the
+  // counts from this header before creating any new stages.
+  if (!Init(nInput, nOutput))
+    return false;
+  m_nReserved = reserved;
+  m_nReservedWord = reservedWord;
 
   //B Curves
   if (Offset[0]) {
@@ -5083,14 +5142,6 @@ icValidateStatus CIccTagLutAtoB::Validate(std::string sigPath, std::string &sRep
       }
 
       if (m_CurvesA) {
-        if (!m_CLUT) {
-          sReport += icMsgValidateNonCompliant;
-          sReport += sSigPathName;
-          sReport += " - CLUT must be present if using A-curves.\n";
-
-          rv = icMaxStatus(rv, icValidateNonCompliant);
-        }
-
         icUInt32Number nCurves = !IsInputB() ? m_nInput : m_nOutput;
         for (i=0; i<nCurves; i++) {
           if (m_CurvesA[i]) {
@@ -5246,14 +5297,6 @@ icValidateStatus CIccTagLutBtoA::Validate(std::string sigPath, std::string &sRep
       }
 
       if (m_CurvesA) {
-        if (!m_CLUT) {
-          sReport += icMsgValidateNonCompliant;
-          sReport += sSigPathName;
-          sReport += " - CLUT must be present if using A-curves.\n";
-
-          rv = icMaxStatus(rv, icValidateNonCompliant);
-        }
-
         for (i=0; i<nOutput; i++) {
           if (m_CurvesA[i]) {
             rv = icMaxStatus(rv, m_CurvesA[i]->Validate(sigPath+icGetSigPath(GetType()), sReport, pProfile));
@@ -5365,6 +5408,9 @@ CIccTagLut8::~CIccTagLut8()
 bool CIccTagLut8::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
+  icUInt32Number reserved;
+  icUInt8Number nInput, nOutput, reservedByte;
+  icS15Fixed16Number xyzMatrix[9];
   icUInt8Number i, nGrid;
   LPIccCurve *pCurves;
   CIccTagCurve *pCurve;
@@ -5377,24 +5423,33 @@ bool CIccTagLut8::Read(icUInt32Number size, CIccIO *pIO)
   size_t nEnd = nStart + size;
  
   if (!pIO->Read32(&sig) ||
-      !pIO->Read32(&m_nReserved) ||
-      !pIO->Read8(&m_nInput) ||
-      !pIO->Read8(&m_nOutput) ||
+      !pIO->Read32(&reserved) ||
+      !pIO->Read8(&nInput) ||
+      !pIO->Read8(&nOutput) ||
       !pIO->Read8(&nGrid) ||
-      !pIO->Read8(&m_nReservedByte) ||
-      pIO->Read32(m_XYZMatrix, 9) != 9)
+      !pIO->Read8(&reservedByte) ||
+      pIO->Read32(xyzMatrix, 9) != 9)
     return false;
 
   if (sig!=GetType())
     return false;
 
   // must have at least 1 input and 1 output
-  if (m_nInput < 1 || m_nOutput < 1)
+  if (nInput < 1 || nOutput < 1)
     return false;
 
   // and the current limit is for 15 channels
-  if (m_nInput > 15 || m_nOutput > 15)
+  if (nInput > 15 || nOutput > 15)
     return false;
+
+  if (!Init(nInput, nOutput))
+    return false;
+  // A public base assignment may carry A-to-B placement into this legacy tag.
+  // Restore the fixed legacy layout before allocating its output A-curves.
+  m_bInputMatrix = true;
+  m_nReserved = reserved;
+  m_nReservedByte = reservedByte;
+  memcpy(m_XYZMatrix, xyzMatrix, sizeof(m_XYZMatrix));
 
   //B Curves
   pCurves = NewCurvesB();
@@ -5823,6 +5878,9 @@ CIccTagLut16::~CIccTagLut16()
 bool CIccTagLut16::Read(icUInt32Number size, CIccIO *pIO)
 {
   icTagTypeSignature sig;
+  icUInt32Number reserved;
+  icUInt8Number nInput, nOutput, reservedByte;
+  icS15Fixed16Number xyzMatrix[9];
   icUInt8Number i, nGrid;
   icUInt16Number nInputEntries, nOutputEntries;
   LPIccCurve *pCurves;
@@ -5836,12 +5894,12 @@ bool CIccTagLut16::Read(icUInt32Number size, CIccIO *pIO)
   size_t nEnd = nStart + size;
  
   if (!pIO->Read32(&sig) ||
-      !pIO->Read32(&m_nReserved) ||
-      !pIO->Read8(&m_nInput) ||
-      !pIO->Read8(&m_nOutput) ||
+      !pIO->Read32(&reserved) ||
+      !pIO->Read8(&nInput) ||
+      !pIO->Read8(&nOutput) ||
       !pIO->Read8(&nGrid) ||
-      !pIO->Read8(&m_nReservedByte) ||
-      pIO->Read32(m_XYZMatrix, 9) != 9 ||
+      !pIO->Read8(&reservedByte) ||
+      pIO->Read32(xyzMatrix, 9) != 9 ||
       !pIO->Read16(&nInputEntries) ||
       !pIO->Read16(&nOutputEntries))
     return false;
@@ -5850,16 +5908,25 @@ bool CIccTagLut16::Read(icUInt32Number size, CIccIO *pIO)
     return false;
 
   // must have at least 1 input and 1 output
-  if (m_nInput < 1 || m_nOutput < 1)
+  if (nInput < 1 || nOutput < 1)
     return false;
 
   // and the current limit is for 15 channels
-  if (m_nInput > 15 || m_nOutput > 15)
+  if (nInput > 15 || nOutput > 15)
     return false;
 
   if (nInputEntries < 2 || nInputEntries > 4096 ||
       nOutputEntries < 2 || nOutputEntries > 4096)
     return false;
+
+  if (!Init(nInput, nOutput))
+    return false;
+  // A public base assignment may carry A-to-B placement into this legacy tag.
+  // Restore the fixed legacy layout before allocating its output A-curves.
+  m_bInputMatrix = true;
+  m_nReserved = reserved;
+  m_nReservedByte = reservedByte;
+  memcpy(m_XYZMatrix, xyzMatrix, sizeof(m_XYZMatrix));
 
   //B Curves
   pCurves = NewCurvesB();
