@@ -5333,51 +5333,102 @@ void linear4_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 /******************************************************************************/
 
 static
-void linearSub_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
-                size_t size1, size_t /*size2*/, size_t /*size3*/,
-                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+void linearSub_forward_inner( uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t colStep )
 {
-  if (size1 < 3) {
-    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+  if (size1 <= 5)
     return;
-  }
 
   if (bitDepth == 8) {
-    for (int c = 0; c < channels; ++c) {    // copy first pixel
-      output[c] = input[c];
-    }
-    for (int c = 0; c < channels; ++c) {  // copy last pixel
-      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
-    }
     for (size_t x = 1; x < (size1-1); ++x) {
-      const uint8_t *in = input + x*colStep;
       uint8_t *out = output + x*colStep;
       for (int c = 0; c < channels; ++c) {
         // first + (last-first)*fraction
         uint8_t pred = (uint8_t) (output[c] + (((int)output[(size1-1)*colStep+c] - (int)output[c]) * x)/(size1-1));
-        out[c] = in[c] - pred;   // overflow/underflow is intentional
+        out[c] = out[c] - pred;   // overflow/underflow is intentional
       }
     }
   }
 
   if (bitDepth == 16) {
-    uint16_t *input16 = (uint16_t*)input;
     uint16_t *output16 = (uint16_t*)output;
-    for (int c = 0; c < channels; ++c) {    // copy first pixel
-      output16[c] = input16[c];
-    }
-    for (int c = 0; c < channels; ++c) {  // copy last pixel
-      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
-    }
     for (size_t x = 1; x < (size1-1); ++x) {
       for (int c = 0; c < channels; ++c) {
         // first + (last-first)*fraction
         uint16_t pred = (uint16_t) (output16[c] + (((int)output16[(size1-1)*colStep+c] - (int)output16[c]) * x)/(size1-1));
-        output16[x*colStep+c] = input16[x*colStep+c] - pred;   // overflow/underflow is intentional
+        output16[x*colStep+c] = output16[x*colStep+c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+
+  // subdivide residue and call recursively
+  size_t mid = size1 / 2;
+  size_t colBytes = colStep * (bitDepth/8);
+  linearSub_forward_inner(output+colBytes,bitDepth,channels,mid-2,colStep);
+  linearSub_forward_inner(output+(mid+1)*colBytes,bitDepth,channels,(size1-mid-2),colStep);
+}
+
+/******************************************************************************/
+
+static
+void linearSub_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  if (size1 <= 5) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+  
+  // copy input to output, continue to work in output
+  int bytes = bitDepth / 8;
+  memcpy(output,input,size1*bytes*channels);
+  
+  // linear between start, mid, end
+  size_t mid = (size1-2) / 2;
+  size_t colBytes = colStep * (bitDepth/8);
+  linearSub_forward_inner(output,bitDepth,channels,mid,colStep);
+  linearSub_forward_inner(output+mid*colBytes,bitDepth,channels,(size1-mid),colStep);
+}
+
+/******************************************************************************/
+
+static
+void linearSub_reverse_inner( uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t colStep )
+{
+  if (size1 <= 5)
+    return;
+  
+  // subdivide residue and call recursively
+  size_t mid = size1 / 2;
+  size_t colBytes = colStep * (bitDepth/8);
+  linearSub_reverse_inner(output+colBytes,bitDepth,channels,mid-2,colStep);
+  linearSub_reverse_inner(output+(mid+1)*colBytes,bitDepth,channels,(size1-mid-2),colStep);
+
+  if (bitDepth == 8) {
+    for (size_t x = 1; x < (size1-1); ++x) {
+      uint8_t *out = output + x*colStep;
+      for (int c = 0; c < channels; ++c) {
+        uint8_t pred = (uint8_t) (output[c] + (((int)output[(size1-1)*colStep+c] - (int)output[c]) * x)/(size1-1));
+        out[c] = out[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *output16 = (uint16_t*)output;
+    for (size_t x = 1; x < (size1-1); ++x) {
+      for (int c = 0; c < channels; ++c) {
+        // first + (last-first)*fraction
+        uint16_t pred = (uint16_t) (output16[c] + (((int)output16[(size1-1)*colStep+c] - (int)output16[c]) * x)/(size1-1));
+        output16[x*colStep+c] = output16[x*colStep+c] + pred;   // overflow/underflow is intentional
       }
     }
   }
 }
+
 
 /******************************************************************************/
 
@@ -5386,45 +5437,19 @@ void linearSub_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-  if (size1 < 2) {
+  if (size1 <= 5) {
     prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
     return;
   }
+  
+  // copy input to output, continue to work in output
+  int bytes = bitDepth / 8;
+  memcpy(output,input,size1*bytes*channels);
 
-  if (bitDepth == 8) {
-    for (int c = 0; c < channels; ++c) {    // copy first pixel
-      output[c] = input[c];
-    }
-    for (int c = 0; c < channels; ++c) {  // copy last pixel
-      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
-    }
-    for (size_t x = 1; x < (size1-1); ++x) {
-      const uint8_t *in = input + x*colStep;
-      uint8_t *out = output + x*colStep;
-      for (int c = 0; c < channels; ++c) {
-        uint8_t pred = (uint8_t) (output[c] + (((int)output[(size1-1)*colStep+c] - (int)output[c]) * x)/(size1-1));
-        out[c] = in[c] + pred;   // overflow/underflow is intentional
-      }
-    }
-  }
-
-  if (bitDepth == 16) {
-    uint16_t *input16 = (uint16_t*)input;
-    uint16_t *output16 = (uint16_t*)output;
-    for (int c = 0; c < channels; ++c) {    // copy first pixel
-      output16[c] = input16[c];
-    }
-    for (int c = 0; c < channels; ++c) {  // copy last pixel
-      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
-    }
-    for (size_t x = 1; x < (size1-1); ++x) {
-      for (int c = 0; c < channels; ++c) {
-        // first + (last-first)*fraction
-        uint16_t pred = (uint16_t) (output16[c] + (((int)output16[(size1-1)*colStep+c] - (int)output16[c]) * x)/(size1-1));
-        output16[x*colStep+c] = input16[x*colStep+c] + pred;   // overflow/underflow is intentional
-      }
-    }
-  }
+  size_t mid = (size1-2) / 2;
+  size_t colBytes = colStep * (bitDepth/8);
+  linearSub_reverse_inner(output,bitDepth,channels,mid,colStep);
+  linearSub_reverse_inner(output+mid*colBytes,bitDepth,channels,(size1-mid),colStep);
 }
 
 /******************************************************************************/
@@ -6714,8 +6739,8 @@ void test1DLUT( CIccTagCurve *curve, const std::string &name,
       applyOnePredictor( pred, (uint8_t*)output, (uint8_t*)verify,
                          dimensionArray, 1, 16, 1, steps, true );
       if ( memcmp(input,verify,steps*2) != 0 ) {
-          LogAnError(stderr, "%s: ERROR - %s predictor reverse failed %s\n",
-                      name.c_str(), pred.name, description.c_str() );
+          LogAnError(stderr, "%s: ERROR - %s predictor %d bit reverse failed %s\n",
+                      name.c_str(), pred.name, 16, description.c_str() );
       }
 #endif
 
@@ -6838,8 +6863,8 @@ void testText( uint8_t *data, const std::string &name,
     // apply reverse predictor for verification
     pred.reverse( output, verify, depth, length );
     if ( memcmp(data,verify,steps) != 0 ) {
-        LogAnError(stderr, "%s: ERROR - %s predictor reverse failed %s\n",
-                    name.c_str(), pred.name, description.c_str() );
+        LogAnError(stderr, "%s: ERROR - %s predictor %d bit reverse failed %s\n",
+                    name.c_str(), pred.name, depth, description.c_str() );
     }
 #endif
 
@@ -7047,8 +7072,8 @@ void testCLUT(CIccProfile */*pIcc*/, CIccCLUT *clut, const std::string &sigDesc,
       applyOnePredictor( pred, output, verify,
                          dimensionArray, inputChannels, 8*bytes, outputChannels, numPoints, true );
       if ( memcmp(input8,verify,byteSize) != 0 ) {
-          LogAnError(stderr, "%s: ERROR - %s predictor reverse failed\n",
-                      sigDesc.c_str(), pred.name );
+          LogAnError(stderr, "%s: ERROR - %s predictor %d bit reverse failed\n",
+                      sigDesc.c_str(), pred.name, 8*bytes );
       }
 #endif
 
