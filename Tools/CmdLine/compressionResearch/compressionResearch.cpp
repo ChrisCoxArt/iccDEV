@@ -5332,11 +5332,34 @@ void linear4_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int c
 
 /******************************************************************************/
 
+/*
+// 5 is real lowest limit, but stopping early seems to help for many curves
+ 5    310
+10    310
+11    310
+12    302
+13    285
+14    285
+15    285
+16    285
+17    285
+20    285
+22    285
+25    285
+27    285
+28    285
+29    506
+30    506
+35    506
+ */
+
+const size_t linearSubLowerLimit = 15;
+
 static
 void linearSub_forward_inner( uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t colStep )
 {
-  if (size1 <= 5)
+  if (size1 <= linearSubLowerLimit)
     return;
 
   if (bitDepth == 8) {
@@ -5362,11 +5385,13 @@ void linearSub_forward_inner( uint8_t *output, int bitDepth, int channels,
   }
 
 
-  // subdivide residue and call recursively
+  // subdivide residue and call recursively (ignoring end points that are already set)
   size_t mid = size1 / 2;
+  size_t inner = mid - 2;
   size_t colBytes = colStep * (bitDepth/8);
-  linearSub_forward_inner(output+colBytes,bitDepth,channels,mid-2,colStep);
-  linearSub_forward_inner(output+(mid+1)*colBytes,bitDepth,channels,(size1-mid-2),colStep);
+  size_t remaining = size1 - mid - 2;
+  linearSub_forward_inner(output+(1)*colBytes,bitDepth,channels,inner,colStep); // 1..6
+  linearSub_forward_inner(output+(mid+1)*colBytes,bitDepth,channels,remaining,colStep); // 8..14
 }
 
 /******************************************************************************/
@@ -5376,7 +5401,7 @@ void linearSub_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-  if (size1 <= 5) {
+  if (size1 <= linearSubLowerLimit) {
     prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
     return;
   }
@@ -5386,10 +5411,11 @@ void linearSub_forward( const uint8_t *input, uint8_t *output, int bitDepth, int
   memcpy(output,input,size1*bytes*channels);
   
   // linear between start, mid, end
-  size_t mid = (size1-2) / 2;
+  size_t mid = size1 / 2;
   size_t colBytes = colStep * (bitDepth/8);
-  linearSub_forward_inner(output,bitDepth,channels,mid,colStep);
-  linearSub_forward_inner(output+mid*colBytes,bitDepth,channels,(size1-mid),colStep);
+  size_t remaining = size1 - mid;
+  linearSub_forward_inner(output,bitDepth,channels,mid,colStep);  // 0..7
+  linearSub_forward_inner(output+mid*colBytes,bitDepth,channels,remaining,colStep); // 7..15
 }
 
 /******************************************************************************/
@@ -5398,14 +5424,16 @@ static
 void linearSub_reverse_inner( uint8_t *output, int bitDepth, int channels,
                 size_t size1, size_t colStep )
 {
-  if (size1 <= 5)
+  if (size1 <= linearSubLowerLimit)
     return;
   
-  // subdivide residue and call recursively
+  // subdivide residue and call recursively (ignoring end points that are already set)
   size_t mid = size1 / 2;
+  size_t inner = mid - 2;
   size_t colBytes = colStep * (bitDepth/8);
-  linearSub_reverse_inner(output+colBytes,bitDepth,channels,mid-2,colStep);
-  linearSub_reverse_inner(output+(mid+1)*colBytes,bitDepth,channels,(size1-mid-2),colStep);
+  size_t remaining = size1 - mid - 2;
+  linearSub_reverse_inner(output+(1)*colBytes,bitDepth,channels,inner,colStep); // 1..6
+  linearSub_reverse_inner(output+(mid+1)*colBytes,bitDepth,channels,remaining,colStep); // 8..14
 
   if (bitDepth == 8) {
     for (size_t x = 1; x < (size1-1); ++x) {
@@ -5437,7 +5465,7 @@ void linearSub_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-  if (size1 <= 5) {
+  if (size1 <= linearSubLowerLimit) {
     prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
     return;
   }
@@ -5446,10 +5474,11 @@ void linearSub_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
   int bytes = bitDepth / 8;
   memcpy(output,input,size1*bytes*channels);
 
-  size_t mid = (size1-2) / 2;
+  size_t mid = size1 / 2;
   size_t colBytes = colStep * (bitDepth/8);
-  linearSub_reverse_inner(output,bitDepth,channels,mid,colStep);
-  linearSub_reverse_inner(output+mid*colBytes,bitDepth,channels,(size1-mid),colStep);
+  size_t remaining = size1 - mid;
+  linearSub_reverse_inner(output,bitDepth,channels,mid,colStep);  // 0..7
+  linearSub_reverse_inner(output+mid*colBytes,bitDepth,channels,remaining,colStep); // 7..15
 }
 
 /******************************************************************************/
@@ -7965,7 +7994,7 @@ int main(int argc, char* argv[])
   unitTestMedians();
   unitTestZlib();
   unitTestTextPredictors();
-#if 1
+#if 0
   unitTestWavelets();
   unitTestPredictors();
 #endif
@@ -7978,6 +8007,8 @@ uint8_t *lutPtr = &lut[0];
 uint8_t *outPtr = &out[0];
 for (size_t i = 0; i < 256; ++i)
   lutPtr[i] = (uint8_t)(i &0xFF);
+
+#if 0
 waveletHaar_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 wavelet53_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 linear2_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
@@ -7993,6 +8024,22 @@ linear3_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 linear4_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 wavemint_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
 waveavg_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+#endif
+
+//linearSub_forward(lutPtr,outPtr,8,1,16,0,0,1,0,0);
+//linearSub_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+
+for (size_t i = 0; i < 256; ++i) {
+  float frac = i / 255.0f;
+  lutPtr[i] = (uint8_t)(255.0f * powf(frac,1.0f/2.2f));
+}
+linearSub_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+
+for (size_t i = 0; i < 256; ++i) {
+  float frac = i / 255.0f;
+  lutPtr[i] = (uint8_t)(255.0f * powf(frac,2.2f));
+}
+linearSub_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 #endif
 
 
