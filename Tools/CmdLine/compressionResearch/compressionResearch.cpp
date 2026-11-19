@@ -196,6 +196,8 @@ static func_predictor null_forward;
 static func_predictor null_reverse;
 static func_predictor prev_forward;
 static func_predictor prev_reverse;
+static func_predictor prev_forward2;
+static func_predictor prev_reverse2;
 static func_predictor next_forward;
 static func_predictor next_reverse;
 static func_predictor bytesplitPrev_forward;
@@ -402,6 +404,7 @@ std::vector<predictor_desc> predictorList =
  { "GamutBinary", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbin_forward, gamutbin_reverse },
  { "GamutBinaryXOR", PREDICTOR_TYPE_1D, FLAG_GAMUT_ONLY, gamutbinxor_forward, gamutbinxor_reverse },
  { "Previous", PREDICTOR_TYPE_1D, FLAG_NONE, prev_forward, prev_reverse },
+ { "Previous2", PREDICTOR_TYPE_1D, FLAG_NONE, prev_forward2, prev_reverse2 },
  { "Next", PREDICTOR_TYPE_1D, FLAG_NONE, next_forward, next_reverse },
  { "Linear", PREDICTOR_TYPE_1D, FLAG_NONE, linear_forward, linear_reverse },
  { "Linear2", PREDICTOR_TYPE_1D, FLAG_NONE, linear2_forward, linear2_reverse },
@@ -422,6 +425,8 @@ std::vector<predictor_desc> predictorList =
  { "SplitPrevChan", PREDICTOR_TYPE_1D, FLAG_NONE, bytesplitChanPrev_forward, bytesplitChanPrev_reverse },
  { "PrevSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<prev_forward>, unsplitwrap<prev_reverse> },
  { "PrevSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitchannelswrap<prev_forward>, unsplitchannelswrap<prev_reverse> },
+ { "Prev2Split", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<prev_forward2>, unsplitwrap<prev_reverse2> },
+ { "Prev2SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitchannelswrap<prev_forward2>, unsplitchannelswrap<prev_reverse2> },
  { "NextSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<next_forward>, unsplitwrap<next_reverse> },
  { "NextSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitchannelswrap<next_forward>, unsplitchannelswrap<next_reverse> },
  // wavelets reorder channels internally
@@ -440,6 +445,7 @@ std::vector<predictor_desc> predictorList =
  { "LinearSubSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linearSub_forward>, unsplitwrap<linearSub_reverse> },
  { "LinearSubSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linearSub_forward>, unsplitwrap<linearSub_reverse> },
 
+#if 0
  { "Previous2D", PREDICTOR_TYPE_2D, FLAG_NONE, prev2D_forward, prev2D_reverse },
  { "Next2D", PREDICTOR_TYPE_2D, FLAG_NONE, next2D_forward, next2D_reverse },
  { "Up", PREDICTOR_TYPE_2D, FLAG_NONE, up_forward, up_reverse },
@@ -508,6 +514,7 @@ std::vector<predictor_desc> predictorList =
  { "Max3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<max3D_forward>, unsplitchannelswrap<max3D_reverse> },
  { "Median3DSplit", PREDICTOR_TYPE_3D, FLAG_NONE, splitwrap<median3D_forward>, unsplitwrap<median3D_reverse> },
  { "Median3DSplitChan", PREDICTOR_TYPE_3D, FLAG_NONE, splitchannelswrap<median3D_forward>, unsplitchannelswrap<median3D_reverse> },
+#endif
 
 };
 
@@ -1428,6 +1435,55 @@ void bytesplitChanPrev_reverse( const uint8_t *input, uint8_t *output, int bitDe
     std::vector<uint8_t> temp( 2*half*channels );
     prev_reverse(input,&temp[0],8,channels,2*size1,0,0,colStep,0,0);
     byteunsplitchannels16( &temp[0], output, channels, half );
+  }
+}
+
+/******************************************************************************/
+
+// previous values, then the residue
+// can help for some curves, can hurt by introducing negatives
+static
+void prev_forward2( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t /*colStep*/, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  //assert(colStep == channels);
+
+  if (bitDepth == 8) {
+    memcpy(output,input,size1*channels);
+    prev_forward_inplace(output,size1);
+    prev_forward_inplace(output+1,size1-1);
+  }
+
+  if (bitDepth == 16) {
+    memcpy(output,input,size1*channels*2);
+    uint16_t *output16 = (uint16_t*)output;
+    prev_forward_inplace(output16,size1);
+    prev_forward_inplace(output16+1,size1-1);
+  }
+}
+
+/******************************************************************************/
+
+// reverse previous residue, then values
+static
+void prev_reverse2( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t /*colStep*/, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  //assert(colStep == channels);
+  
+  if (bitDepth == 8) {
+    memcpy(output,input,size1*channels);
+    prev_reverse_inplace(output+1,size1-1);
+    prev_reverse_inplace(output,size1);
+  }
+
+  if (bitDepth == 16) {
+    memcpy(output,input,size1*channels*2);
+    uint16_t *output16 = (uint16_t*)output;
+    prev_reverse_inplace(output16+1,size1-1);
+    prev_reverse_inplace(output16,size1);
   }
 }
 
