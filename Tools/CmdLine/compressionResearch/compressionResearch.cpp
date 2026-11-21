@@ -228,6 +228,8 @@ static func_predictor waveavg_forward;
 static func_predictor waveavg_reverse;
 static func_predictor linearSub_forward;
 static func_predictor linearSub_reverse;
+static func_predictor powerest_forward;
+static func_predictor powerest_reverse;
 
 // 2D
 static func_predictor up_forward;
@@ -411,6 +413,7 @@ std::vector<predictor_desc> predictorList =
  { "Linear3", PREDICTOR_TYPE_1D, FLAG_NONE, linear3_forward, linear3_reverse },
  { "Linear4", PREDICTOR_TYPE_1D, FLAG_NONE, linear4_forward, linear4_reverse },
  { "LinearSub", PREDICTOR_TYPE_1D, FLAG_NONE, linearSub_forward, linearSub_reverse },
+ { "PowerEst", PREDICTOR_TYPE_1D, FLAG_NONE, powerest_forward, powerest_reverse },
  { "Wavelet53", PREDICTOR_TYPE_1D, FLAG_NONE, wavelet53_forward, wavelet53_reverse },
  { "WaveletHaar", PREDICTOR_TYPE_1D, FLAG_NONE, waveletHaar_forward, waveletHaar_reverse },
  { "Wavemint", PREDICTOR_TYPE_1D, FLAG_NONE, wavemint_forward, wavemint_reverse },
@@ -444,7 +447,9 @@ std::vector<predictor_desc> predictorList =
  { "Linear4SplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linear4_forward>, unsplitwrap<linear4_reverse> },
  { "LinearSubSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linearSub_forward>, unsplitwrap<linearSub_reverse> },
  { "LinearSubSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<linearSub_forward>, unsplitwrap<linearSub_reverse> },
-
+ { "PowerEstSplit", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<powerest_forward>, unsplitwrap<powerest_reverse> },
+ { "PowerEstSplitChan", PREDICTOR_TYPE_1D, FLAG_NONE, splitwrap<powerest_forward>, unsplitwrap<powerest_reverse> },
+ 
 #if 0
  { "Previous2D", PREDICTOR_TYPE_2D, FLAG_NONE, prev2D_forward, prev2D_reverse },
  { "Next2D", PREDICTOR_TYPE_2D, FLAG_NONE, next2D_forward, next2D_reverse },
@@ -4692,7 +4697,7 @@ void linear_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int ch
                 size_t size1, size_t /*size2*/, size_t /*size3*/,
                 size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
 {
-  if (size1 < 2) {
+  if (size1 < 3) {
     prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
     return;
   }
@@ -5535,6 +5540,258 @@ void linearSub_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int
   size_t remaining = size1 - mid;
   linearSub_reverse_inner(output,bitDepth,channels,mid,colStep);  // 0..7
   linearSub_reverse_inner(output+mid*colBytes,bitDepth,channels,remaining,colStep); // 7..15
+}
+
+/******************************************************************************/
+
+// Simple end point interpolation with power function estimation
+// use 3 points to estimate power function (start, middle, end)
+
+  // pred = first + (last-first) * pow( fraction, N );
+// 127/128 should map to N=1
+// 55.5 should map to N=2.2
+// 186 should map to N=0.4545
+  // (midVal - first) / (last-first) = pow(0.5,N);
+  // log( (midVal - first) / (last-first) ) = log(0.5) * N;
+  // N = log( (midVal - first) / (last-first) ) ) / log(0.5);
+static
+void powerest_forward( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  const float epsilon = 1e-6;
+
+  if (size1 < 3) {
+    prev_forward(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+  
+  size_t middle = size1/2;
+  const size_t maxChannels = 15;
+  float N[ maxChannels ];
+  memset(N,0,maxChannels*sizeof(N[0]));
+
+  if (bitDepth == 8) {
+    // estimate power function
+    for (int c = 0; c < channels; ++c) {
+      uint8_t last = input[(size1-1)*colStep+c];
+      uint8_t first = input[c];
+      uint8_t mid = input[middle*colStep+c];
+      float numerator = float(mid - first);
+      float denom = float(last - first);
+      if (fabs(numerator) < epsilon || fabs(denom) < epsilon ) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+      float powerEstimate = logf( numerator/denom ) / log(0.5);
+      N[c] = powerEstimate;
+      
+      if ( !std::isfinite(powerEstimate) || powerEstimate < 0.1f || powerEstimate > 10.0f) {
+        size_t totalBytes = size1*colStep;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+    }
+    
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy middle pixel
+      output[middle*colStep+c] = input[middle*colStep+c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
+    }
+    
+    for (size_t x = 1; x < (size1-1); ++x) {
+      if (x == middle)
+        continue;
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      float fraction = x / float(size1-1);
+      for (int c = 0; c < channels; ++c) {
+        float power = powf( fraction, N[c] );
+        if (std::isnan(power)) {
+          printf("Bad power with %f, %f\n", fraction, N[c] );
+        }
+        uint8_t pred = (uint8_t) ( input[c] + (input[(size1-1)*colStep+c] - input[c]) * power );
+        out[c] = in[c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+
+    // estimate power function
+    for (int c = 0; c < channels; ++c) {
+      uint16_t last = input16[(size1-1)*colStep+c];
+      uint16_t first = input16[c];
+      uint16_t mid = input16[middle*colStep+c];
+      float numerator = float(mid - first);
+      float denom = float(last - first);
+      if (fabs(numerator) < epsilon || fabs(denom) < epsilon ) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+      float powerEstimate = logf( numerator/denom ) / log(0.5);
+      N[c] = powerEstimate;
+      
+      if ( !std::isfinite(powerEstimate) || powerEstimate < 0.1f || powerEstimate > 10.0f) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+    }
+    
+    uint16_t *output16 = (uint16_t*)output;
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy middle pixel
+      output16[middle*colStep+c] = input16[middle*colStep+c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
+    }
+    
+    for (size_t x = 1; x < (size1-1); ++x) {
+      if (x == middle)
+        continue;
+      float fraction = x / float(size1-1);
+      for (int c = 0; c < channels; ++c) {
+        float power = powf( fraction, N[c] );
+        if (std::isnan(power)) {
+          printf("Bad power with %f, %f\n", fraction, N[c] );
+        }
+        uint16_t pred = (uint16_t) ( input16[c] + (input16[(size1-1)*colStep+c] - input16[c]) * power);
+        output16[x*colStep+c] = input16[x*colStep+c] - pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+}
+
+/******************************************************************************/
+
+static
+void powerest_reverse( const uint8_t *input, uint8_t *output, int bitDepth, int channels,
+                size_t size1, size_t /*size2*/, size_t /*size3*/,
+                size_t colStep, size_t /*rowStep*/, size_t /*planeStep*/ )
+{
+  const float epsilon = 1e-6;
+  
+  if (size1 < 3) {
+    prev_reverse(input,output,bitDepth,channels,size1,0,0,colStep,0,0);
+    return;
+  }
+  
+  size_t middle = size1/2;
+  const size_t maxChannels = 15;
+  float N[ maxChannels ];
+  memset(N,0,maxChannels*sizeof(N[0]));
+
+  if (bitDepth == 8) {
+    // estimate power function
+    for (int c = 0; c < channels; ++c) {
+      uint8_t last = input[(size1-1)*colStep+c];
+      uint8_t first = input[c];
+      uint8_t mid = input[middle*colStep+c];
+      float numerator = float(mid - first);
+      float denom = float(last - first);
+      if (fabs(numerator) < epsilon || fabs(denom) < epsilon ) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+      float powerEstimate = logf( numerator/denom ) / log(0.5);
+      N[c] = powerEstimate;
+      
+      if (std::isnan(powerEstimate) || powerEstimate < 0.1f || powerEstimate > 10.0f) {
+        size_t totalBytes = size1*colStep;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+    }
+    
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output[c] = input[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy middle pixel
+      output[middle*colStep+c] = input[middle*colStep+c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output[(size1-1)*colStep+c] = input[(size1-1)*colStep+c];
+    }
+    
+    for (size_t x = 1; x < (size1-1); ++x) {
+      if (x == middle)
+        continue;
+      const uint8_t *in = input + x*colStep;
+      uint8_t *out = output + x*colStep;
+      float fraction = x / float(size1-1);
+      for (int c = 0; c < channels; ++c) {
+        float power = powf( fraction, N[c] );
+        if (std::isnan(power)) {
+          printf("Bad power with %f, %f\n", fraction, N[c] );
+        }
+        uint8_t pred = (uint8_t) ( input[c] + (input[(size1-1)*colStep+c] - input[c]) * power );
+        out[c] = in[c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
+
+  if (bitDepth == 16) {
+    uint16_t *input16 = (uint16_t*)input;
+    uint16_t *output16 = (uint16_t*)output;
+
+    // estimate power function
+    for (int c = 0; c < channels; ++c) {
+      uint16_t last = input16[(size1-1)*colStep+c];
+      uint16_t first = input16[c];
+      uint16_t mid = input16[middle*colStep+c];
+      float numerator = float(mid - first);
+      float denom = float(last - first);
+      if (fabs(numerator) < epsilon || fabs(denom) < epsilon ) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+      float powerEstimate = logf( numerator/denom ) / log(0.5);
+      N[c] = powerEstimate;
+      
+      if (std::isnan(powerEstimate) || powerEstimate < 0.1f || powerEstimate > 10.0f) {
+        size_t totalBytes = size1*colStep*2;
+        memcpy( output, input, totalBytes );
+        return;
+      }
+    }
+    
+    for (int c = 0; c < channels; ++c) {    // copy first pixel
+      output16[c] = input16[c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy middle pixel
+      output16[middle*colStep+c] = input16[middle*colStep+c];
+    }
+    for (int c = 0; c < channels; ++c) {  // copy last pixel
+      output16[(size1-1)*colStep+c] = input16[(size1-1)*colStep+c];
+    }
+    
+    for (size_t x = 1; x < (size1-1); ++x) {
+      if (x == middle)
+        continue;
+      float fraction = x / float(size1-1);
+      for (int c = 0; c < channels; ++c) {
+        float power = powf( fraction, N[c] );
+        if (std::isnan(power)) {
+          printf("Bad power with %f, %f\n", fraction, N[c] );
+        }
+        uint16_t pred = (uint16_t) ( input16[c] + (input16[(size1-1)*colStep+c] - input16[c]) * power );
+        output16[x*colStep+c] = input16[x*colStep+c] + pred;   // overflow/underflow is intentional
+      }
+    }
+  }
 }
 
 /******************************************************************************/
@@ -8089,13 +8346,13 @@ for (size_t i = 0; i < 256; ++i) {
   float frac = i / 255.0f;
   lutPtr[i] = (uint8_t)(255.0f * powf(frac,1.0f/2.2f));
 }
-linearSub_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+powerest_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 
 for (size_t i = 0; i < 256; ++i) {
   float frac = i / 255.0f;
   lutPtr[i] = (uint8_t)(255.0f * powf(frac,2.2f));
 }
-linearSub_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
+powerest_forward(lutPtr,outPtr,8,1,256,0,0,1,0,0);
 #endif
 
 
